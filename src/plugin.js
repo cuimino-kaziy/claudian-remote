@@ -4,9 +4,16 @@ import { LocalSseHub } from "./local-sse.js";
 import { SourceCapture, discoverClaudianTabs } from "./source-capture.js";
 import { SemanticStreamNormalizer } from "./stream-normalizer.js";
 import { ClaudianRemoteMobileView, MOBILE_VIEW_TYPE } from "./mobile/view.js";
-import { recoveryMetadata, restoreRecoveryMetadata } from "./mobile/persistence.js";
+import {
+  createOfflineReplicaCache,
+  recoveryMetadata,
+  restoreOfflineReplicaCache,
+  restoreRecoveryMetadata
+} from "./mobile/persistence.js";
 import { importFileIntoVault } from "./desktop/vault-import.js";
 import { COMPATIBILITY_SET, evaluateCompatibilitySet } from "./protocol/compatibility.js";
+import { DeviceStore, migrateLegacySynchronizedState } from "./storage/device-store.js";
+import { sanitizeSyncPreferences } from "./storage/sync-preferences.js";
 
 function id(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
@@ -85,28 +92,60 @@ export default class ClaudianRemotePlugin extends Plugin {
 
   async loadSettings() {
     const data = await this.loadData() || {};
-    this.privateData = data;
+    const initialSyncPreferences = sanitizeSyncPreferences(data);
+    if (!initialSyncPreferences.vault_id) initialSyncPreferences.vault_id = id("vault");
+    this.deviceStore = new DeviceStore({
+      namespace: `claudian-remote:${this.manifest.id}:${initialSyncPreferences.vault_id}`
+    });
+    let migration;
+    try {
+      migration = await migrateLegacySynchronizedState({
+        synchronized: data,
+        deviceStore: this.deviceStore,
+        // U6 supplies the Relay-side revocation operation. U3 deliberately
+        // invalidates the local copy and records the one-time migration gate.
+        revokeLegacyCredential: async () => {}
+      });
+    } catch {
+      migration = { synchronized: sanitizeSyncPreferences(data), rePairRequired: true };
+    }
+    this.syncedSettings = { ...migration.synchronized, vault_id: initialSyncPreferences.vault_id };
+    const identity = this.deviceStore.read("identity") || {};
+    const localPreferences = this.deviceStore.read("local-preferences") || {};
     this.settings = {
-      relay_base_url: String(data.relay_base_url || data.relayUrl || "").replace(/\/+$/, ""),
-      mobile_token: String(data.mobile_token || data.relayToken || ""),
-      device_id: String(data.device_id || id("mobile-device")),
-      client_instance_id: String(data.client_instance_id || id("mobile-view")),
-      upload_directory: String(data.upload_directory || "Claudian Remote/Uploads")
+      relay_base_url: String(localPreferences.relay_base_url || "").replace(/\/+$/, ""),
+      mobile_token: migration.rePairRequired ? "" : String(identity.mobile_token || ""),
+      device_id: migration.rePairRequired ? id("mobile-device") : String(identity.device_id || id("mobile-device")),
+      client_instance_id: migration.rePairRequired ? id("mobile-view") : String(identity.client_instance_id || id("mobile-view")),
+      upload_directory: String(localPreferences.upload_directory || "Claudian Remote/Uploads"),
+      notifications_enabled: this.syncedSettings.notifications_enabled,
+      haptics_enabled: this.syncedSettings.haptics_enabled,
+      re_pair_required: migration.rePairRequired === true
     };
-    if (!data.device_id || !data.client_instance_id) await this.saveSettings();
+    await this.saveSettings();
   }
 
   async saveSettings() {
     this.normalizer?.setExactSecrets(this.sourceFirewallSecrets());
-    this.privateData = {
-      ...this.privateData,
-      relay_base_url: this.settings.relay_base_url,
+    this.syncedSettings = sanitizeSyncPreferences({
+      ...this.syncedSettings,
+      notifications_enabled: this.settings.notifications_enabled,
+      haptics_enabled: this.settings.haptics_enabled
+    });
+    const identitySaved = this.deviceStore.write("identity", {
       mobile_token: this.settings.mobile_token,
       device_id: this.settings.device_id,
-      client_instance_id: this.settings.client_instance_id,
+      client_instance_id: this.settings.client_instance_id
+    });
+    const preferencesSaved = this.deviceStore.write("local-preferences", {
+      relay_base_url: this.settings.relay_base_url,
       upload_directory: this.settings.upload_directory
-    };
-    this.saveTail = (this.saveTail || Promise.resolve()).then(() => this.saveData(this.privateData));
+    });
+    if (!identitySaved || !preferencesSaved) {
+      this.settings.mobile_token = "";
+      this.settings.re_pair_required = true;
+    }
+    this.saveTail = (this.saveTail || Promise.resolve()).then(() => this.saveData(this.syncedSettings));
     await this.saveTail;
   }
 
@@ -115,13 +154,27 @@ export default class ClaudianRemotePlugin extends Plugin {
   }
 
   recoverySeed() {
-    return restoreRecoveryMetadata(this.privateData?.remote_v2_recovery);
+    const cache = restoreOfflineReplicaCache(this.deviceStore.read("offline-cache"));
+    const recovery = restoreRecoveryMetadata(this.deviceStore.read("recovery"));
+    return { ...cache, ...recovery, relay: recovery.relay, commands: {} };
   }
 
   async saveRecovery(state) {
-    this.privateData = { ...this.privateData, remote_v2_recovery: recoveryMetadata(state) };
-    this.saveTail = (this.saveTail || Promise.resolve()).then(() => this.saveData(this.privateData));
-    await this.saveTail;
+    const recoverySaved = this.deviceStore.write("recovery", recoveryMetadata(state));
+    const cacheSaved = this.deviceStore.write("offline-cache", createOfflineReplicaCache(state));
+    if (!recoverySaved || !cacheSaved) throw new Error("device_local_persistence_unavailable");
+  }
+
+  clearDeviceStateForRevocation() {
+    this.settings.mobile_token = "";
+    this.settings.re_pair_required = true;
+    return this.deviceStore.clearRevokedDevice();
+  }
+
+  purgeDeviceLocalState() {
+    this.settings.mobile_token = "";
+    this.settings.re_pair_required = true;
+    return this.deviceStore.clearRemoteState({ includeMigration: true });
   }
 
   async openMobileView() {

@@ -35,3 +35,24 @@ test("diagnostics describe normalized capabilities and attachment snapshots trut
   assert.match(report, /upload_status=uploading/);
   assert.doesNotMatch(report, /private\.pdf/);
 });
+
+test("diagnostic export never emits seeded secrets or absolute paths", () => {
+  const canary = "CANARY-SECRET-DO-NOT-EXPORT";
+  const absolutePath = "/Users/example/Private Vault/secret.md";
+  const state = {
+    activeConversationId: absolutePath,
+    transport: { status: "disconnected", error: canary },
+    presence: { mac: { status: "offline", path: absolutePath } },
+    relay: { appliedCursor: 7, epoch: canary },
+    capabilities: { mode: "offline", debug: canary },
+    conversations: {
+      [absolutePath]: {
+        revision: 1,
+        activeTurnId: "turn",
+        turns: { turn: { status: "completed", messages: { one: { text: canary } } } }
+      }
+    }
+  };
+  const report = buildDiagnosticReport(state, { status: "failed", path: absolutePath, error: canary });
+  assert.doesNotMatch(report, new RegExp(`${canary}|Users/example|Private Vault`));
+});

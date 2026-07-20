@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 try:
+    from gateway.mac_companion.config import Keychain, MacOSKeychain, load_secret_fields
     from gateway.relay.crypto import PayloadCrypto, redact_text
 except ImportError:  # pragma: no cover - script execution fallback
     import sys
 
     sys.path.append(str(Path(__file__).resolve().parents[2]))
+    from gateway.mac_companion.config import Keychain, MacOSKeychain, load_secret_fields
     from gateway.relay.crypto import PayloadCrypto, redact_text
 
 
@@ -62,18 +64,18 @@ class CompanionConfig:
     shutdown_drain_seconds: float = 5.0
 
     @classmethod
-    def from_file(cls, path: Path) -> "CompanionConfig":
+    def from_file(cls, path: Path, keychain: Optional[Keychain] = None) -> "CompanionConfig":
         data = json.loads(path.read_text(encoding="utf-8"))
-        payload_secret = data.get("payload_secret") or os.environ.get("CLAUDIAN_REMOTE_PAYLOAD_SECRET", "")
+        secrets = load_secret_fields(data, keychain or MacOSKeychain())
         poll_timeout_seconds = float(data.get("poll_timeout_seconds", 15))
         request_timeout_seconds = max(float(data.get("request_timeout_seconds", 30)), poll_timeout_seconds + 5)
         return cls(
             relay_base_url=str(data.get("relay_base_url", "")).rstrip("/"),
-            relay_token=str(data.get("relay_token", "")),
+            relay_token=secrets["relay_token"],
             pairing_id=str(data.get("pairing_id", "")),
             adapter_base_url=str(data.get("adapter_base_url", "")).rstrip("/"),
-            adapter_token=str(data.get("adapter_token", "")),
-            payload_secret=str(payload_secret),
+            adapter_token=secrets["adapter_token"],
+            payload_secret=secrets["payload_secret"],
             poll_timeout_seconds=poll_timeout_seconds,
             poll_interval_seconds=float(data.get("poll_interval_seconds", 2)),
             request_timeout_seconds=request_timeout_seconds,

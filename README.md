@@ -24,6 +24,24 @@ This repository contains no production credentials, local configuration,
 device state, logs, databases, Vault paths, or recovery data. Example values
 are intentionally non-working.
 
+## Device-local state boundary
+
+Obsidian-synchronized plugin data is an allowlisted preference document: a
+non-secret Vault identity, explicit connection mode, and notification/haptic
+choices. Relay endpoints, credentials, device identity, cursors, recent-history
+cache, pairing state, and local paths stay in device-local storage. Companion
+credentials are referenced from public configuration and resolved from the
+macOS login Keychain only in memory.
+
+The iPhone/iPad cache is a bounded, text-only convenience copy. Offline mode is
+read-only, keeps no send queue, and never stores attachment binaries. Purge and
+device revocation remove it. This separation prevents Obsidian Sync and iCloud
+from copying authority between devices, but it is not a hardware security
+boundary: another malicious Obsidian plugin in the same mobile sandbox, or a
+compromised phone, may still access web storage. The beta limits that residual
+risk to one revocable mobile device and requires immediate revocation after
+loss or compromise.
+
 ## Licenses and external services
 
 The plugin, Mac Companion, and lifecycle/packaging code are MIT licensed. The

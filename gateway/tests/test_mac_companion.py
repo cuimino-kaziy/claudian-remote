@@ -212,19 +212,24 @@ def test_companion_refuses_to_start_with_missing_required_settings():
 
 
 def test_file_config_keeps_request_timeout_longer_than_poll_timeout(tmp_path):
+    from gateway.mac_companion.config import InMemoryKeychain
+
     path = tmp_path / "companion.json"
     data = {
         "relay_base_url": "https://relay.example.invalid",
-        "relay_token": "mac-relay-token",
+        "relay_token_ref": "relay",
         "pairing_id": "room-a",
         "adapter_base_url": "http://127.0.0.1:27123",
-        "adapter_token": "local-rest-token",
+        "adapter_token_ref": "bridge",
         "poll_timeout_seconds": 15,
         "request_timeout_seconds": 10,
     }
     path.write_text(json.dumps(data), encoding="utf-8")
 
-    loaded = CompanionConfig.from_file(path)
+    loaded = CompanionConfig.from_file(path, InMemoryKeychain({
+        "relay": "mac-relay-token",
+        "bridge": "local-rest-token",
+    }))
 
     assert loaded.request_timeout_seconds == 20
 

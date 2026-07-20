@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { MobileReplica } from "../src/mobile/reducer.js";
-import { recoveryMetadata, restoreRecoveryMetadata } from "../src/mobile/persistence.js";
+import {
+  createOfflineReplicaCache,
+  recoveryMetadata,
+  restoreOfflineReplicaCache,
+  restoreRecoveryMetadata
+} from "../src/mobile/persistence.js";
 import { sha256 } from "../src/stream-normalizer.js";
 
 test("reset freezes updates until a checksummed keyframe atomically replaces projection", async () => {
@@ -56,4 +61,85 @@ test("persistence contains calibration coordinates only", () => {
   assert.deepEqual(saved, { version: 1, epoch: "epoch", applied_cursor: 42, active_conversation_id: "conv" });
   assert.equal(JSON.stringify(saved).includes("private"), false);
   assert.deepEqual(restoreRecoveryMetadata(saved), { relay: { epoch: "epoch", appliedCursor: 42 }, activeConversationId: "conv" });
+});
+
+test("offline cache is bounded, body-readable, and never contains queue or attachment binaries", () => {
+  const state = {
+    activeConversationId: "recent",
+    commands: { delayed: { text: "must never queue" } },
+    conversations: {
+      old: {
+        id: "old", title: "Old", revision: 1, activeTurnId: "old-turn", turnOrder: ["old-turn"],
+        turns: {
+          "old-turn": {
+            id: "old-turn", status: "completed", messageOrder: ["old-message"],
+            messages: { "old-message": { id: "old-message", role: "assistant", blockOrder: ["old-text"], blocks: { "old-text": { id: "old-text", type: "text", text: "x".repeat(1200) } } } }
+          }
+        }
+      },
+      recent: {
+        id: "recent", title: "Recent", revision: 2, activeTurnId: "turn", turnOrder: ["turn"],
+        turns: {
+          turn: {
+            id: "turn", status: "completed", messageOrder: ["text", "binary"],
+            messages: {
+              text: { id: "text", role: "assistant", blockOrder: ["body"], blocks: { body: { id: "body", type: "text", text: "offline readable" } } },
+              binary: { id: "binary", role: "assistant", blockOrder: ["blob"], blocks: { blob: { id: "blob", type: "attachment", data: "data:application/octet-stream;base64,SECRET-BINARY" } } }
+            },
+            artifacts: { private: { bytes: "SECRET-BINARY" } }, artifactOrder: ["private"]
+          }
+        }
+      }
+    },
+    history: { items: [{ id: "old", updated_at: 1 }, { id: "recent", updated_at: 2 }], loaded: true }
+  };
+
+  const cache = createOfflineReplicaCache(state, { maxBytes: 900, now: () => 123 });
+  const encoded = JSON.stringify(cache);
+  assert.ok(Buffer.byteLength(encoded) <= 900);
+  assert.doesNotMatch(encoded, /must never queue|SECRET-BINARY|data:application|"commands"/);
+  assert.match(encoded, /offline readable/);
+  const restored = restoreOfflineReplicaCache(cache);
+  assert.equal(restored.transport.status, "disconnected");
+  assert.equal(restored.presence.mac.status, "offline");
+  assert.deepEqual(restored.commands, {});
+  assert.deepEqual(restored.conversations.recent.turns.turn.artifactOrder, []);
+  assert.equal(restored.conversations.recent.turns.turn.messages.text.blocks.body.text, "offline readable");
+});
+
+test("offline cache can be cleared for purge or device revocation", () => {
+  const state = {
+    activeConversationId: "conversation",
+    conversations: { conversation: { id: "conversation", title: "Cached", revision: 1, activeTurnId: null, turnOrder: [], turns: {} } }
+  };
+  const cache = createOfflineReplicaCache(state, { maxBytes: 4096 });
+  assert.equal(Object.keys(restoreOfflineReplicaCache(cache).conversations).length, 1);
+  assert.deepEqual(restoreOfflineReplicaCache(null).conversations, {});
+});
+
+test("an oversized active conversation keeps its newest readable text instead of dropping the conversation", () => {
+  const state = {
+    activeConversationId: "active",
+    conversations: {
+      active: {
+        id: "active", title: "Active", revision: 1, activeTurnId: "turn", turnOrder: ["turn"],
+        turns: {
+          turn: {
+            id: "turn", status: "completed", messageOrder: ["message"],
+            messages: {
+              message: {
+                id: "message", role: "assistant", blockOrder: ["text"],
+                blocks: { text: { id: "text", type: "text", text: `${"x".repeat(4000)}NEWEST-TAIL` } }
+              }
+            }
+          }
+        }
+      }
+    }
+  };
+  const cache = createOfflineReplicaCache(state, { maxBytes: 900 });
+  const encoded = JSON.stringify(cache);
+  assert.ok(Buffer.byteLength(encoded) <= 900);
+  assert.equal(cache.active_conversation_id, "active");
+  assert.match(encoded, /NEWEST-TAIL/);
 });
