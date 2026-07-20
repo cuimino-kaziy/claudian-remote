@@ -23,6 +23,7 @@ import aiohttp
 from gateway.mac_companion.relay_ws_client import RelayWSClient, RelayWebSocket
 from gateway.mac_companion.sse_client import BridgeSSEClient
 from gateway.mac_companion.upload_receiver import UploadReceiveError, UploadReceiver
+from gateway.protocol.compatibility import COMPATIBILITY_SET
 
 
 CRITICAL_FRAME_TYPES = {
@@ -218,10 +219,17 @@ class LocalBridgeV2Client:
                 raise ValueError("Bridge response must be an object")
             return value
 
-    async def bind(self, path: str, session_id: str, generation: int) -> Dict[str, Any]:
+    async def bind(
+        self,
+        path: str,
+        session_id: str,
+        generation: int,
+        compatibility: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         return await self._post(path, {
             "mac_session_id": session_id,
             "mac_connection_generation": generation,
+            "compatibility": dict(compatibility or COMPATIBILITY_SET),
         })
 
     async def invalidate(self, path: str, session_id: str, generation: int) -> Dict[str, Any]:
@@ -507,7 +515,12 @@ class AsyncMacCompanion:
         generation = self.connection_generation
         dispatcher = CommandDispatcher(bridge, self.config.bridge_command_path, self.mac_session_id)
         dispatcher.activate(generation)
-        await bridge.bind(self.config.bridge_bind_path, self.mac_session_id, generation)
+        binding = await bridge.bind(
+            self.config.bridge_bind_path,
+            self.mac_session_id,
+            generation,
+            dict(COMPATIBILITY_SET),
+        )
         hello = {
             "type": "mac.hello",
             "protocol": "claudian.remote.v2",
@@ -515,6 +528,8 @@ class AsyncMacCompanion:
             "mac_connection_generation": generation,
             "last_relay_epoch": self.state.relay_epoch,
             "last_relay_cursor": self.state.relay_cursor,
+            "compatibility": dict(COMPATIBILITY_SET),
+            "bridge_compatibility": binding.get("compatibility") if isinstance(binding, dict) else None,
         }
         commands: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=32)
         uploads: "asyncio.Queue[Dict[str, Any]]" = asyncio.Queue(maxsize=1)

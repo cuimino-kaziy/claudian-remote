@@ -16,6 +16,7 @@ export function normalizeCapabilities(value = {}) {
 export function isInteractiveReplica(state) {
   return state?.transport?.status === "connected"
     && state?.presence?.mac?.status === "online"
+    && state?.compatibility?.writable !== false
     && state?.capabilities?.semantic_stream === true
     && state?.recovery?.required !== true;
 }

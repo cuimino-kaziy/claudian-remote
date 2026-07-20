@@ -112,6 +112,15 @@ export class DesktopAdapter {
     if (command.mac_connection_generation !== this.connectionGeneration) return outcome("connection_generation_mismatch", command);
     if (Date.parse(command.expires_at) <= this.clock()) return outcome("expired", command);
     if (!tab) return outcome("mac_offline", command);
+    const compatibility = this.capture.compatibility?.(tab);
+    if (compatibility?.writable === false) {
+      return outcome("compatibility_mismatch", command, {
+        error_code: compatibility.reason,
+        current_version: compatibility.current_version,
+        required_version: compatibility.required_version,
+        remediation: compatibility.remediation
+      });
+    }
     const conversationId = currentConversationId(tab);
     if (command.target?.conversation_id !== conversationId) return outcome("stale_conversation", command);
     const revision = this.capture.normalizer.revisionFor(conversationId);

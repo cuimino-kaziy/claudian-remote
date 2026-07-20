@@ -119,6 +119,7 @@ class WebSocketClient:
         self.last_cursor = 0
         self.live_buffer: List[CommittedEvent] = []
         self.closed_reason: Optional[str] = None
+        self.compatibility: Dict[str, Any] = {}
 
     def enqueue_nowait(self, frame: Dict[str, Any]) -> None:
         self.queue.put_nowait(frame)
@@ -187,8 +188,16 @@ class WebSocketHub:
         async with self._lock:
             self._mobiles.discard(client)
 
-    async def register_mac(self, client: WebSocketClient, session_id: str, generation: int) -> None:
-        old = await self.presence.register_mac(client.pairing_id, session_id, generation, client)
+    async def register_mac(
+        self,
+        client: WebSocketClient,
+        session_id: str,
+        generation: int,
+        compatibility: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        old = await self.presence.register_mac(
+            client.pairing_id, session_id, generation, client, compatibility
+        )
         async with self._lock:
             self._macs.add(client)
             if isinstance(old, WebSocketClient):
@@ -198,6 +207,7 @@ class WebSocketHub:
         await self.broadcast_ephemeral(client.pairing_id, {
             "type": "presence.changed", "role": "mac", "status": "online",
             "mac_session_id": session_id, "mac_connection_generation": generation,
+            "compatibility": dict(compatibility or {}),
         })
 
     async def unregister_mac(self, client: WebSocketClient) -> bool:

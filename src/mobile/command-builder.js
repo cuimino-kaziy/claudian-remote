@@ -8,6 +8,7 @@ export function buildCommand(state, commandType, payload = {}, { now = () => Dat
   const mac = state?.presence?.mac || {};
   const conversation = state?.activeConversationId ? state.conversations?.[state.activeConversationId] : null;
   if (mac.status !== "online" || !mac.sessionId || !mac.connectionGeneration) throw new Error("mac_offline");
+  if (state?.compatibility?.writable === false) throw new Error("compatibility_mismatch");
   if (!conversation) throw new Error("conversation_unavailable");
   const turnId = conversation.activeTurnId || undefined;
   const target = { conversation_id: conversation.id };

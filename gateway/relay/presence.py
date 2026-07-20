@@ -22,6 +22,7 @@ class MacBinding:
     mac_session_id: str
     connection_generation: int
     client: CommandTarget
+    compatibility: Dict[str, Any]
 
 
 class PresenceRegistry:
@@ -35,6 +36,7 @@ class PresenceRegistry:
         mac_session_id: str,
         connection_generation: int,
         client: CommandTarget,
+        compatibility: Optional[Dict[str, Any]] = None,
     ) -> Optional[CommandTarget]:
         if not mac_session_id or connection_generation < 1:
             raise ValueError("invalid_mac_hello")
@@ -48,7 +50,7 @@ class PresenceRegistry:
             ):
                 raise ValueError("stale_connection_generation")
             self._macs[pairing_id] = MacBinding(
-                pairing_id, mac_session_id, connection_generation, client
+                pairing_id, mac_session_id, connection_generation, client, dict(compatibility or {})
             )
             return current.client if current and current.client is not client else None
 
@@ -66,6 +68,11 @@ class PresenceRegistry:
             current = self._macs.get(pairing_id)
             if current is None:
                 return {"status": "mac_offline"}
+            if current.compatibility.get("writable") is False:
+                return {
+                    "status": "compatibility_mismatch",
+                    "remediation": current.compatibility.get("remediation") or "Update required components",
+                }
             if command.get("mac_session_id") != current.mac_session_id:
                 return {"status": "session_mismatch"}
             if command.get("mac_connection_generation") != current.connection_generation:
@@ -177,9 +184,10 @@ class PresenceRegistry:
         async with self._lock:
             current = self._macs.get(pairing_id)
             if current is None:
-                return {"online": False, "mac_session_id": None, "connection_generation": None}
+                return {"online": False, "mac_session_id": None, "connection_generation": None, "compatibility": None}
             return {
                 "online": True,
                 "mac_session_id": current.mac_session_id,
                 "connection_generation": current.connection_generation,
+                "compatibility": dict(current.compatibility),
             }

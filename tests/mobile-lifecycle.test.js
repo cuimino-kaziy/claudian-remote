@@ -5,6 +5,7 @@ import { MobileReplica } from "../src/mobile/reducer.js";
 import { MobileRecoveryController } from "../src/mobile/recovery.js";
 import { RemoteClient } from "../src/mobile/remote-client.js";
 import { createObsidianFetch } from "../src/mobile/obsidian-http.js";
+import { COMPATIBILITY_SET } from "../src/protocol/compatibility.js";
 
 class FakeTimers {
   constructor() { this.jobs = new Map(); this.next = 1; }
@@ -108,9 +109,14 @@ test("remote client keeps credentials out of WebSocket URL and authenticates wit
   socket.open();
   assert.deepEqual(socket.sent[0], {
     type: "authenticate", role: "mobile", ticket: "single-use-ticket", device_id: "iphone",
-    client_instance_id: "view", epoch: "epoch", cursor: 7
+    client_instance_id: "view", epoch: "epoch", cursor: 7, compatibility: COMPATIBILITY_SET
   });
   assert.equal(requests[0].options.headers.Authorization, "Bearer private-role-token");
+  await client.submit({ delivery_id: "delivery" });
+  assert.deepEqual(JSON.parse(requests[1].options.body), {
+    command: { delivery_id: "delivery" },
+    compatibility: COMPATIBILITY_SET
+  });
 });
 
 test("Obsidian native HTTP adapter keeps bounded binary chunks and disables CORS-dependent fetch", async () => {

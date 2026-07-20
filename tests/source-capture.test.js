@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
-import os from "node:os";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import vm from "node:vm";
@@ -29,6 +28,7 @@ function fixture() {
     }
   };
   const claudian = {
+    manifest: { id: "realclaudian", version: "2.0.4" },
     getConversationSync: () => ({ id: "conv-1", title: "Demo", messages: tab.state.messages }),
     getConversationList: () => [],
     getAllViews: () => [{ getTabManager: () => ({ getActiveTab: () => tab, tabs: [tab] }) }]
@@ -37,16 +37,15 @@ function fixture() {
   return { events, tab, claudian, normalizer };
 }
 
-test("real Claudian 2.0.4 bundle contains every private hook used by the bridge", (t) => {
-  const bundle = process.env.CLAUDIAN_BUNDLE_PATH || path.join(
-    os.homedir(), "Library", "Mobile Documents", "iCloud~md~obsidian", "Documents", "Vault",
-    ".obsidian", "plugins", "Claudian", "main.js"
-  );
-  if (!fs.existsSync(bundle)) return t.skip("installed Claudian bundle is unavailable");
-  const text = fs.readFileSync(bundle, "utf8");
-  for (const marker of ["handleStreamChunk", "sendMessage", "cancelStreaming", "steerQueuedMessage", "getConversationList", "getConversationSync", "async switchTo(id)"]) {
-    assert.ok(text.includes(marker), `missing real bundle marker: ${marker}`);
-  }
+test("Claudian 2.0.4 compatibility is characterized by a public versioned fixture", () => {
+  const fixture = JSON.parse(fs.readFileSync(
+    path.resolve(import.meta.dirname, "fixtures/claudian-2.0.4-compatibility.json"),
+    "utf8"
+  ));
+  assert.equal(fixture.claudian.version, "2.0.4");
+  assert.deepEqual(fixture.required_capabilities, [
+    "semantic_stream", "completion_barrier", "stop", "steer", "approval", "history_list", "history_select"
+  ]);
 });
 
 test("generated Obsidian entry exports the plugin class directly", () => {

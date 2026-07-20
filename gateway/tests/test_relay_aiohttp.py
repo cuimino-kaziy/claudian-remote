@@ -7,6 +7,7 @@ from aiohttp import WSMsgType
 from gateway.relay.app import STORE, create_app
 from gateway.relay.auth import AuthError, TicketStore, TokenAuthenticator, origin_allowed
 from gateway.relay.relay_server import RelayConfig, RelayToken
+from gateway.protocol.compatibility import COMPATIBILITY_SET
 
 
 def principals():
@@ -89,7 +90,16 @@ async def issue_mobile_ticket(client, *, device="iphone", instance="view-1"):
     return (await response.json())["ticket"]
 
 
-async def connect_mobile(client, ticket, *, device="iphone", instance="view-1", epoch=None, cursor=0):
+async def connect_mobile(
+    client,
+    ticket,
+    *,
+    device="iphone",
+    instance="view-1",
+    epoch=None,
+    cursor=0,
+    compatibility=COMPATIBILITY_SET,
+):
     socket = await client.ws_connect(
         "/api/v2/ws/mobile",
         protocols=("claudian.remote.v2",),
@@ -104,11 +114,46 @@ async def connect_mobile(client, ticket, *, device="iphone", instance="view-1", 
             "client_instance_id": instance,
             "epoch": epoch,
             "cursor": cursor,
+            "compatibility": compatibility,
         }
     )
     authenticated = await socket.receive_json(timeout=1)
     assert authenticated["type"] == "authenticated"
+    assert authenticated["compatibility"]["writable"] is (compatibility == COMPATIBILITY_SET)
     return socket
+
+
+@pytest.mark.asyncio
+async def test_mixed_mobile_component_authenticates_read_only_and_cannot_route_commands(aiohttp_client, tmp_path):
+    client = await aiohttp_client(create_app(relay_config(tmp_path)))
+    mac = await connect_mac(client)
+    ticket = await issue_mobile_ticket(client)
+    mobile = await connect_mobile(client, ticket, compatibility={**COMPATIBILITY_SET, "plugin": "0.1.0"})
+    await receive_type(mobile, "presence.changed")
+
+    await mobile.send_json({"type": "command", "command": command()})
+    rejected = await receive_type(mobile, "command.rejected")
+    assert rejected["status"] == "compatibility_mismatch"
+    assert rejected["remediation"]
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(mac.receive_json(), timeout=0.05)
+
+    for compatibility in ({**COMPATIBILITY_SET, "plugin": "0.1.0"}, None):
+        envelope = {"command": command(delivery=f"blocked-{compatibility is None}")}
+        if compatibility is not None:
+            envelope["compatibility"] = compatibility
+        blocked = await client.post(
+            "/api/v2/commands",
+            headers={"Authorization": "Bearer mobile-secret"},
+            json=envelope,
+        )
+        assert blocked.status == 409
+        blocked_body = await blocked.json()
+        assert blocked_body["status"] == "compatibility_mismatch"
+        assert blocked_body["remediation"]
+
+    await mobile.close()
+    await mac.close()
 
 
 async def connect_mac(client, session="mac-session", generation=1):
@@ -126,11 +171,67 @@ async def connect_mac(client, session="mac-session", generation=1):
             "protocol": "claudian.remote.v2",
             "mac_session_id": session,
             "mac_connection_generation": generation,
+            "compatibility": COMPATIBILITY_SET,
+            "bridge_compatibility": {
+                "writable": True,
+                "reason": "ready",
+                "actual": COMPATIBILITY_SET,
+                "required": COMPATIBILITY_SET,
+            },
         }
     )
     hello = await socket.receive_json(timeout=1)
     assert hello["type"] == "mac.hello.ack"
     return socket
+
+
+@pytest.mark.asyncio
+async def test_mixed_mac_compatibility_stays_visible_but_commands_are_read_only(aiohttp_client, tmp_path):
+    client = await aiohttp_client(create_app(relay_config(tmp_path)))
+    ticket = await issue_mobile_ticket(client)
+    mobile = await connect_mobile(client, ticket)
+    await receive_type(mobile, "presence.changed")
+
+    mac = await client.ws_connect(
+        "/api/v2/ws/mac",
+        protocols=("claudian.remote.v2",),
+        headers={"Origin": "app://obsidian.md", "Authorization": "Bearer mac-secret"},
+    )
+    await mac.send_json({
+        "type": "mac.hello",
+        "protocol": "claudian.remote.v2",
+        "mac_session_id": "mixed-session",
+        "mac_connection_generation": 1,
+        "compatibility": {**COMPATIBILITY_SET, "plugin": "0.1.0"},
+        "bridge_compatibility": {
+            "writable": True,
+            "reason": "ready",
+            "actual": COMPATIBILITY_SET,
+            "required": COMPATIBILITY_SET,
+        },
+    })
+    ack = await mac.receive_json(timeout=1)
+    assert ack["type"] == "mac.hello.ack"
+    assert ack["compatibility"]["writable"] is False
+    presence = await receive_type(mobile, "presence.changed")
+    assert presence["status"] == "online"
+    assert presence["compatibility"]["writable"] is False
+
+    blocked = await client.post(
+        "/api/v2/commands",
+        headers={"Authorization": "Bearer mobile-secret"},
+        json={
+            "command": command("mixed-session", 1, "mixed-delivery"),
+            "compatibility": COMPATIBILITY_SET,
+        },
+    )
+    assert blocked.status == 409
+    body = await blocked.json()
+    assert body["status"] == "compatibility_mismatch"
+    assert body["remediation"]
+
+    await mac.close()
+    await mobile.close()
 
 
 def command(session="mac-session", generation=1, delivery="delivery-1"):
@@ -245,7 +346,7 @@ async def test_https_command_receipt_generation_and_commands_never_enter_sqlite(
     response = await client.post(
         "/api/v2/commands",
         headers={"Authorization": "Bearer mobile-secret"},
-        json={"command": command()},
+        json={"command": command(), "compatibility": COMPATIBILITY_SET},
     )
     assert response.status == 202
     assert (await response.json())["type"] == "relay.accepted"
@@ -269,7 +370,10 @@ async def test_https_command_receipt_generation_and_commands_never_enter_sqlite(
     rejected = await client.post(
         "/api/v2/commands",
         headers={"Authorization": "Bearer mobile-secret"},
-        json=command(generation=1, delivery="stale-delivery"),
+        json={
+            "command": command(generation=1, delivery="stale-delivery"),
+            "compatibility": COMPATIBILITY_SET,
+        },
     )
     assert rejected.status == 409
     assert (await rejected.json())["status"] == "connection_generation_mismatch"

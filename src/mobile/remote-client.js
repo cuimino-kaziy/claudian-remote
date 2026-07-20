@@ -1,3 +1,5 @@
+import { COMPATIBILITY_SET } from "../protocol/compatibility.js";
+
 const PROTOCOL = "claudian.remote.v2";
 
 function trimSlash(value) {
@@ -59,7 +61,8 @@ export class RemoteClient {
         device_id: this.deviceId,
         client_instance_id: this.clientInstanceId,
         epoch,
-        cursor
+        cursor,
+        compatibility: COMPATIBILITY_SET
       }));
     }, { once: true });
     socket.addEventListener("message", (message) => {
@@ -80,7 +83,7 @@ export class RemoteClient {
     const response = await this.fetchImpl(`${this.baseUrl}/api/v2/commands`, {
       method: "POST",
       headers: { Authorization: `Bearer ${this.token()}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ command })
+      body: JSON.stringify({ command, compatibility: COMPATIBILITY_SET })
     });
     const body = await response.json();
     return { httpStatus: response.status, ...body };

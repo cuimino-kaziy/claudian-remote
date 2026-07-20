@@ -12,6 +12,7 @@ from gateway.mac_companion.stream_pump import (
     CompanionState,
     OutboundQueueFull,
 )
+from gateway.protocol.compatibility import COMPATIBILITY_SET
 
 
 def test_sse_decoder_handles_utf8_byte_splits_crlf_multiline_comments_and_empty_fields():
@@ -95,9 +96,9 @@ class FakeBridge:
         self.invalidations = []
         self.keyframes = []
 
-    async def bind(self, path, session_id, generation):
-        self.bindings.append((path, session_id, generation))
-        return {"ok": True}
+    async def bind(self, path, session_id, generation, compatibility=None):
+        self.bindings.append((path, session_id, generation, compatibility))
+        return {"ok": True, "compatibility": {"writable": True, "actual": COMPATIBILITY_SET}}
 
     async def invalidate(self, path, session_id, generation):
         self.invalidations.append((path, session_id, generation))
@@ -143,6 +144,33 @@ async def test_same_session_old_generation_command_never_crosses_reconnect():
     fresh = await dispatcher.dispatch(command("mac-session", 2, "delivery-2"), 2)
     assert fresh["status"] == "executed"
     assert len(bridge.commands) == 1
+
+
+@pytest.mark.asyncio
+async def test_companion_bridge_and_relay_hello_bind_exact_compatibility_metadata():
+    config = SimpleNamespace(
+        state_path="",
+        v2_state_path="",
+        outbound_max_events=32,
+        outbound_max_bytes=64_000,
+        bridge_command_path="/command",
+        bridge_bind_path="/bind",
+        bridge_invalidate_path="/invalidate",
+        bridge_keyframe_path="/keyframe",
+        bridge_import_path="/import",
+    )
+    runtime = AsyncMacCompanion(config)
+    bridge = FakeBridge()
+    socket = FakeSocket(runtime)
+    socket.receive_json = lambda: asyncio.sleep(0, result=None)
+    sse = FakeSSE()
+
+    await runtime.run_connection(socket, bridge, sse)
+
+    assert bridge.bindings[0][3] == COMPATIBILITY_SET
+    hello = socket.sent[0]
+    assert hello["type"] == "mac.hello"
+    assert hello["compatibility"] == COMPATIBILITY_SET
 
 
 class FakeSSE:

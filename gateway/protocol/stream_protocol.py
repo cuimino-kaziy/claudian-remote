@@ -33,7 +33,8 @@ class ProtocolError(ValueError):
 EVENT_FIELDS: Dict[str, Set[str]] = {
     "capability.state": {
         "mode", "supports_turn_steer", "supports_history", "supports_stop",
-        "supports_approval", "reason",
+        "supports_approval", "reason", "writable", "current_version",
+        "required_version", "missing_capabilities", "remediation",
     },
     "conversation.activated": {"conversation_id", "title"},
     "history.list": {"items", "next_page"},

@@ -1,5 +1,6 @@
 import { sha256 } from "../stream-normalizer.js";
 import { normalizeCapabilities } from "./capabilities.js";
+import { normalizeCompatibilityResult } from "../protocol/compatibility.js";
 
 function cleanId(value, fallback = "unknown") {
   const text = String(value ?? "").slice(0, 256);
@@ -109,7 +110,8 @@ export function createReplicaState(seed = {}) {
       ...(seed.presence || {})
     },
     capabilities: normalizeCapabilities(seed.capabilities),
-    compatibilityMode: false,
+    compatibility: seed.compatibility || null,
+    compatibilityMode: seed.compatibilityMode === true || seed.compatibility?.writable === false,
     activeConversationId: seed.activeConversationId || null,
     conversations: seed.conversations || {},
     history: { items: [], nextPage: null, loaded: false, ...(seed.history || {}) },
@@ -293,6 +295,10 @@ export class MobileReplica {
     if (!frame || typeof frame !== "object") return { ignored: true, reason: "invalid_frame" };
     if (frame.type === "authenticated") {
       this.state.transport.status = "connected";
+      if (frame.compatibility) {
+        this.state.compatibility = normalizeCompatibilityResult(frame.compatibility);
+        this.state.compatibilityMode = this.state.compatibility.writable === false;
+      }
       this.notify("transport");
       return { applied: true };
     }
@@ -324,6 +330,10 @@ export class MobileReplica {
           sessionId: frame.mac_session_id || null,
           connectionGeneration: Number(frame.mac_connection_generation) || null
         };
+        if (frame.compatibility) {
+          this.state.compatibility = normalizeCompatibilityResult(frame.compatibility);
+          this.state.compatibilityMode = this.state.compatibility.writable === false;
+        }
         if (frame.status !== "online") this.rejectUnacceptedCommands("mac_offline");
         this.notify("presence");
       }
@@ -480,6 +490,17 @@ export class MobileReplica {
         approval: payload.supports_approval
       });
       this.state.compatibilityMode = payload.mode === "compatibility";
+      if (typeof payload.writable === "boolean") {
+        this.state.compatibility = {
+          writable: payload.writable,
+          mode: payload.writable ? "streaming" : "read_only",
+          reason: String(payload.reason || (payload.writable ? "ready" : "compatibility_mismatch")),
+          current_version: payload.current_version || null,
+          required_version: payload.required_version || null,
+          missing_capabilities: Array.isArray(payload.missing_capabilities) ? [...payload.missing_capabilities] : [],
+          remediation: payload.remediation || null
+        };
+      }
     } else if (type === "conversation.activated") {
       conversation.title = String(payload.title || conversation.title || "");
       this.state.activeConversationId = conversation.id;

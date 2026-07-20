@@ -18,9 +18,20 @@
   },
   "claudian": {
     "exact_version": "2.0.4",
-    "unsupported_mode": "read_only"
+    "unsupported_mode": "read_only",
+    "manifest_schema": 1,
+    "required_capabilities": [
+      "semantic_stream",
+      "completion_barrier",
+      "stop",
+      "steer",
+      "approval",
+      "history_list",
+      "history_select"
+    ]
   },
   "components": {
+    "compatibility_set_id": "claudian-remote-0.2.0-beta.1",
     "plugin": "0.2.0-beta.1",
     "companion": "0.2.0-beta.1",
     "relay": "0.2.0-beta.1",

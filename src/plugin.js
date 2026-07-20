@@ -6,6 +6,7 @@ import { SemanticStreamNormalizer } from "./stream-normalizer.js";
 import { ClaudianRemoteMobileView, MOBILE_VIEW_TYPE } from "./mobile/view.js";
 import { recoveryMetadata, restoreRecoveryMetadata } from "./mobile/persistence.js";
 import { importFileIntoVault } from "./desktop/vault-import.js";
+import { COMPATIBILITY_SET, evaluateCompatibilitySet } from "./protocol/compatibility.js";
 
 function id(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
@@ -180,22 +181,36 @@ export default class ClaudianRemotePlugin extends Plugin {
       });
       api.addRoute("/claudian-remote/v2/capabilities").get((_request, response) => {
         const tab = this.getActiveTab();
+        const compatibility = this.capture?.compatibility(tab);
         json(response, 200, {
           ok: true, protocol: "claudian.remote.v2", mac_session_id: this.adapter?.macSessionId || null,
           mac_connection_generation: this.adapter?.connectionGeneration || null,
           revision: this.normalizer.revisionFor(tab?.conversationId || tab?.state?.currentConversationId || "conversation-pending"),
-          capabilities: this.capture?.capabilities(tab) || {}, compatibility_mode: Boolean(this.capture?.compatibilityMode)
+          capabilities: this.capture?.capabilities(tab) || {}, compatibility_mode: Boolean(this.capture?.compatibilityMode),
+          compatibility, component_set: COMPATIBILITY_SET
         });
       });
       api.addRoute("/claudian-remote/v2/transport/bind").post(async (request, response) => {
         try {
-          const binding = this.adapter.bindTransport(request.body || {});
+          const body = request.body || {};
+          const componentCompatibility = evaluateCompatibilitySet(body.compatibility);
+          const binding = this.adapter.bindTransport(body);
           const tab = this.getActiveTab();
           if (tab) {
             this.lastBootstrappedConversationId = tab?.conversationId || tab?.state?.currentConversationId || null;
             await this.capture.emitBootstrap(tab);
           }
-          json(response, 200, { ok: true, binding });
+          const claudianCompatibility = this.capture?.compatibility(tab);
+          const writable = componentCompatibility.writable && claudianCompatibility?.writable === true;
+          json(response, 200, {
+            ok: true,
+            binding,
+            compatibility: writable ? componentCompatibility : {
+              ...(componentCompatibility.writable ? claudianCompatibility : componentCompatibility),
+              writable: false,
+              mode: "read_only"
+            }
+          });
         }
         catch (error) { json(response, 400, { ok: false, error: error?.message || "invalid_transport_binding" }); }
       });

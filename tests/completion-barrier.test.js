@@ -4,6 +4,16 @@ import { DesktopAdapter } from "../src/desktop-adapter.js";
 import { SourceCapture } from "../src/source-capture.js";
 import { SemanticStreamNormalizer } from "../src/stream-normalizer.js";
 
+function supportedClaudian(tab, value = {}) {
+  const input = tab.controllers.inputController;
+  if (typeof input.cancelStreaming !== "function") input.cancelStreaming = () => {};
+  if (typeof input.steerQueuedMessage !== "function") input.steerQueuedMessage = async () => {};
+  if (typeof input.handleApprovalRequest !== "function") input.handleApprovalRequest = async () => "cancel";
+  const activeCapabilities = input.getActiveCapabilities?.bind(input);
+  input.getActiveCapabilities = () => ({ ...(activeCapabilities?.() || {}), supportsTurnSteer: true });
+  return { manifest: { id: "realclaudian", version: "2.0.4" }, ...value };
+}
+
 test("provider done is observable but completion waits for sendMessage save barrier", async () => {
   const events = [];
   let releaseSave;
@@ -18,7 +28,7 @@ test("provider done is observable but completion waits for sendMessage save barr
       conversationController: { switchTo() {} }
     }
   };
-  const claudian = { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] };
+  const claudian = supportedClaudian(tab, { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] });
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
   const capture = new SourceCapture({ claudian, normalizer });
   capture.instrument(tab);
@@ -46,7 +56,7 @@ test("queued send does not emit a false completion barrier", async () => {
     }
   };
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
-  const capture = new SourceCapture({ claudian: { getConversationSync: () => null, getConversationList: () => [] }, normalizer });
+  const capture = new SourceCapture({ claudian: supportedClaudian(tab, { getConversationSync: () => null, getConversationList: () => [] }), normalizer });
   capture.instrument(tab);
   await tab.controllers.inputController.sendMessage({ content: "queued" });
   assert.equal(events.some((event) => event.event_type === "turn.completed"), false);
@@ -64,7 +74,7 @@ test("error chunk converges to one failed terminal instead of completed plus fai
     }
   };
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
-  const capture = new SourceCapture({ claudian: { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] }, normalizer });
+  const capture = new SourceCapture({ claudian: supportedClaudian(tab, { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] }), normalizer });
   capture.instrument(tab);
   await tab.controllers.streamController.handleStreamChunk({ type: "error", content: "private provider failure" }, message);
   await tab.controllers.inputController.sendMessage({ content: "question" });
@@ -103,7 +113,7 @@ test("repeated stop emits one interrupted terminal after an interrupted final ke
       conversationController: { switchTo() {} }
     }
   };
-  const claudian = { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] };
+  const claudian = supportedClaudian(tab, { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] });
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
   const capture = new SourceCapture({ claudian, normalizer });
   capture.instrument(tab);
@@ -169,7 +179,7 @@ test("completion keyframe carries the observed mobile-safe operation, approvals,
       conversationController: { switchTo() {} }
     }
   };
-  const claudian = { getConversationSync: () => ({ title: "Stateful", messages: [message] }), getConversationList: () => [] };
+  const claudian = supportedClaudian(tab, { getConversationSync: () => ({ title: "Stateful", messages: [message] }), getConversationList: () => [] });
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
   const capture = new SourceCapture({ claudian, normalizer });
   capture.instrument(tab);

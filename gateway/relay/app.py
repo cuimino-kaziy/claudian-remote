@@ -12,6 +12,7 @@ from typing import Any, Dict, Optional
 from aiohttp import WSMsgType, web
 
 from gateway.protocol.stream_protocol import ProtocolError, validate_command, validate_event
+from gateway.protocol.compatibility import COMPATIBILITY_SET, combine_compatibility
 from gateway.relay.auth import AuthError, TicketStore, TokenAuthenticator, origin_allowed
 from gateway.relay.event_store import EventStore
 from gateway.relay.relay_server import RelayConfig, RelayService, VERSION
@@ -312,7 +313,13 @@ async def submit_command(request: web.Request) -> web.Response:
     try:
         principal = request.app[AUTH].authenticate(_bearer(request), required_role="mobile")
         body = await request.json()
-        raw_command = body.get("command") if isinstance(body, dict) and "command" in body else body
+        if not isinstance(body, dict) or "command" not in body:
+            raise TypeError("command envelope is required")
+        mobile_compatibility = combine_compatibility(
+            body.get("compatibility"),
+            {"writable": True, "reason": "ready"},
+        )
+        raw_command = body.get("command")
         command = dict(validate_command(raw_command or {}, now=datetime.now(timezone.utc)))
     except AuthError as exc:
         return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
@@ -323,6 +330,17 @@ async def submit_command(request: web.Request) -> web.Response:
 
     if request.app[REJECT_COMMANDS]["value"]:
         return _error("relay_shutting_down", 503)
+    if mobile_compatibility.get("writable") is not True:
+        return web.json_response(
+            {
+                "ok": False,
+                "type": "command.rejected",
+                "delivery_id": command["delivery_id"],
+                "status": "compatibility_mismatch",
+                "remediation": mobile_compatibility.get("remediation") or "Update required components",
+            },
+            status=409,
+        )
     routed = await request.app[HUB].presence.route_command(principal.pairing_id, command)
     status = routed.get("status")
     if status == "routed":
@@ -332,7 +350,7 @@ async def submit_command(request: web.Request) -> web.Response:
         )
     return web.json_response(
         {"ok": False, "type": "command.rejected", "delivery_id": command["delivery_id"], **routed},
-        status=409 if status in {"mac_offline", "session_mismatch", "connection_generation_mismatch"} else 503,
+        status=409 if status in {"mac_offline", "session_mismatch", "connection_generation_mismatch", "compatibility_mismatch"} else 503,
     )
 
 
@@ -362,6 +380,10 @@ async def mobile_websocket(request: web.Request) -> web.StreamResponse:
             device_id=str(frame.get("device_id") or ""),
             client_instance_id=str(frame.get("client_instance_id") or ""),
         )
+        mobile_compatibility = combine_compatibility(
+            frame.get("compatibility"),
+            {"writable": True, "reason": "ready"},
+        )
     except (AuthError, asyncio.TimeoutError, TypeError, ValueError, json.JSONDecodeError) as exc:
         code = exc.code if isinstance(exc, AuthError) else "ticket_auth_failed"
         await ws.close(code=1008, message=code.encode("utf-8"))
@@ -374,9 +396,14 @@ async def mobile_websocket(request: web.Request) -> web.StreamResponse:
         max_events=config.client_queue_max_events,
         max_bytes=config.client_queue_max_bytes,
     )
+    client.compatibility = mobile_compatibility
     writer = asyncio.create_task(client.writer(), name=f"mobile-writer-{client.connection_id}")
     try:
-        client.enqueue_nowait({"type": "authenticated", "protocol": "claudian.remote.v2"})
+        client.enqueue_nowait({
+            "type": "authenticated",
+            "protocol": "claudian.remote.v2",
+            "compatibility": mobile_compatibility,
+        })
         registration = await request.app[HUB].register_mobile(
             client,
             str(frame.get("epoch") or "") or None,
@@ -395,6 +422,7 @@ async def mobile_websocket(request: web.Request) -> web.StreamResponse:
                 "status": "online" if snapshot["online"] else "offline",
                 "mac_session_id": snapshot["mac_session_id"],
                 "mac_connection_generation": snapshot["connection_generation"],
+                "compatibility": snapshot["compatibility"],
             }
         )
         reader = asyncio.create_task(_mobile_receive(request.app, client, ws), name=f"mobile-reader-{client.connection_id}")
@@ -425,6 +453,13 @@ async def _mobile_receive(app: web.Application, client: WebSocketClient, ws: web
                 if not isinstance(frame, dict):
                     raise ValueError("frame_not_object")
                 if frame.get("type") == "command":
+                    if client.compatibility.get("writable") is False:
+                        client.enqueue_nowait({
+                            "type": "command.rejected",
+                            "status": "compatibility_mismatch",
+                            "remediation": client.compatibility.get("remediation") or "Update required components",
+                        })
+                        continue
                     if app[REJECT_COMMANDS]["value"]:
                         client.enqueue_nowait({"type": "command.rejected", "status": "relay_shutting_down"})
                         continue
@@ -477,6 +512,9 @@ async def mac_websocket(request: web.Request) -> web.StreamResponse:
         generation = int(hello.get("mac_connection_generation") or 0)
         if not session_id or generation < 1:
             raise ValueError("invalid_mac_hello")
+        compatibility = combine_compatibility(
+            hello.get("compatibility"), hello.get("bridge_compatibility")
+        )
     except (asyncio.TimeoutError, TypeError, ValueError, json.JSONDecodeError):
         await ws.close(code=1008, message=b"invalid_mac_hello")
         return ws
@@ -490,9 +528,13 @@ async def mac_websocket(request: web.Request) -> web.StreamResponse:
     )
     writer = asyncio.create_task(client.writer(), name=f"mac-writer-{client.connection_id}")
     try:
-        await request.app[HUB].register_mac(client, session_id, generation)
+        await request.app[HUB].register_mac(client, session_id, generation, compatibility)
         await request.app[UPLOADS].abort_except_binding(principal.pairing_id, session_id, generation)
-        client.enqueue_nowait({"type": "mac.hello.ack", "epoch": request.app[STORE].epoch})
+        client.enqueue_nowait({
+            "type": "mac.hello.ack",
+            "epoch": request.app[STORE].epoch,
+            "compatibility": compatibility,
+        })
         reader = asyncio.create_task(
             _mac_receive(request.app, client, ws, session_id, generation),
             name=f"mac-reader-{client.connection_id}",

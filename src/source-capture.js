@@ -1,4 +1,8 @@
 import { safeText, safeToolSummary, sha256 } from "./stream-normalizer.js";
+import {
+  claudianManifest,
+  evaluateClaudianCompatibility
+} from "./protocol/compatibility.js";
 
 const WRAP = Symbol.for("claudian.remote.v2.wrap");
 
@@ -63,6 +67,7 @@ export class SourceCapture {
     this.pendingDeliveries = new Map();
     this.originDeliveryIds = new Map();
     this.compatibilityMode = false;
+    this.compatibilityState = null;
   }
 
   expectDelivery(tab, deliveryId, content) {
@@ -115,6 +120,16 @@ export class SourceCapture {
     };
   }
 
+  compatibility(tab) {
+    const result = evaluateClaudianCompatibility({
+      manifest: claudianManifest(this.claudian),
+      capabilities: this.capabilities(tab)
+    });
+    this.compatibilityState = result;
+    this.compatibilityMode = !result.writable;
+    return result;
+  }
+
   async emitKeyframe(tab, { turnStatus = null } = {}) {
     if (!tab) throw new TypeError("active_claudian_tab_required");
     await this.normalizer.flushText();
@@ -149,17 +164,23 @@ export class SourceCapture {
   async emitBootstrap(tab) {
     if (!tab) throw new TypeError("active_claudian_tab_required");
     const capabilities = this.capabilities(tab);
+    const compatibility = this.compatibility(tab);
     const context = contextFor(tab, tab?.state?.messages?.at?.(-1));
     // Keyframe first: a Relay subscriber in reset mode promotes to live on the
     // final page, then receives the capability/activation events below.
     const keyframe = await this.emitKeyframe(tab);
     await this.normalizer.emit("capability.state", context, {
-      mode: this.compatibilityMode ? "compatibility" : "streaming",
+      mode: compatibility.writable ? "streaming" : "compatibility",
       supports_turn_steer: capabilities.steer,
       supports_history: capabilities.history_list && capabilities.history_select,
       supports_stop: capabilities.stop,
       supports_approval: capabilities.approval,
-      reason: this.compatibilityMode ? "required_hook_missing" : "ready"
+      reason: compatibility.reason,
+      writable: compatibility.writable,
+      current_version: compatibility.current_version,
+      required_version: compatibility.required_version,
+      missing_capabilities: compatibility.missing_capabilities,
+      remediation: compatibility.remediation
     });
     const conversation = this.claudian?.getConversationSync?.(context.conversationId);
     await this.normalizer.emit("conversation.activated", context, {
@@ -170,7 +191,31 @@ export class SourceCapture {
   }
 
   instrument(tab) {
-    if (!tab || this.restorers.has(tab)) return this.capabilities(tab);
+    if (!tab) return this.capabilities(tab);
+    if (this.restorers.has(tab)) {
+      const current = this.compatibility(tab);
+      if (current.writable) return this.capabilities(tab);
+      const restore = this.restorers.get(tab);
+      restore();
+      this.restorers.delete(tab);
+      this.diagnostic({
+        type: "compatibility_mode",
+        reason: current.reason,
+        current_version: current.current_version,
+        required_version: current.required_version
+      });
+      return this.capabilities(tab);
+    }
+    const compatibility = this.compatibility(tab);
+    if (!compatibility.writable) {
+      this.diagnostic({
+        type: "compatibility_mode",
+        reason: compatibility.reason,
+        current_version: compatibility.current_version,
+        required_version: compatibility.required_version
+      });
+      return this.capabilities(tab);
+    }
     const input = tab?.controllers?.inputController;
     const stream = tab?.controllers?.streamController;
     if (!input || !stream || typeof stream.handleStreamChunk !== "function" || typeof input.sendMessage !== "function") {
