@@ -1,0 +1,12 @@
+{
+  "description": "A retained-log gap is repaired by atomically replacing the mobile projection with this keyframe.",
+  "epoch": "relay-epoch-a",
+  "retained_floor": 420,
+  "requested_cursor": 100,
+  "projection": {
+    "conversation": {"id": "conv-1", "revision": 5, "title": "示例"},
+    "turns": [{"id": "turn-1", "status": "completed", "messages": [{"id": "msg-a", "blocks": [{"id": "block-a", "text": "修订后的完整回答。", "type": "text"}]}]}]
+  },
+  "checksum": "sha256:63000a001522e1e7c0a67d10e011ac014849c334ef51ea382f4045b4fb6e924d",
+  "recovery": {"action": "request_keyframe", "apply": "atomic_replace", "resume_after_cursor": 420}
+}

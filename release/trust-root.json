@@ -1,0 +1,5 @@
+{
+  "schema_version": 1,
+  "keys": [],
+  "note": "Fail-closed bootstrap placeholder. A maintainer must pin a real public Ed25519 key fingerprint before any beta publication. Private signing keys never belong in this repository."
+}

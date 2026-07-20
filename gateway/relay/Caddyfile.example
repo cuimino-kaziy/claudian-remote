@@ -1,0 +1,10 @@
+relay.example.invalid {
+  encode zstd gzip
+  reverse_proxy 127.0.0.1:8787
+
+  header {
+    -Server
+    X-Content-Type-Options nosniff
+    Referrer-Policy no-referrer
+  }
+}

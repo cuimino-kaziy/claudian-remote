@@ -1,0 +1,16 @@
+{
+  "tasks": [
+    {
+      "name": "morning-sync",
+      "cron": "30 7 * * *",
+      "prompt": "请根据当前 Vault 做一次晨间同步：今天主任务是什么，最小推进动作是什么？",
+      "catch_up": false
+    },
+    {
+      "name": "evening-review",
+      "cron": "0 21 * * *",
+      "prompt": "请帮我检查今天是否已经记录执行反馈，并指出一个最小补全动作。",
+      "catch_up": false
+    }
+  ]
+}

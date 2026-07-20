@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://claudian-remote.invalid/schemas/release-manifest-v1.json",
+  "title": "Claudian Remote signed release manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "release_tag", "release_version", "source_ref", "distribution_channel", "plugin_update_owner", "compatibility_set", "assets", "signature"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "release_tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
+    "release_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
+    "source_ref": {"type": "string", "pattern": "^refs/tags/v"},
+    "distribution_channel": {"enum": ["private_beta", "community"]},
+    "plugin_update_owner": {"enum": ["lifecycle_manager", "obsidian"]},
+    "compatibility_set": {"$ref": "#/$defs/compatibilitySet"},
+    "assets": {
+      "type": "array",
+      "minItems": 4,
+      "items": {"$ref": "#/$defs/asset"}
+    },
+    "signature": {"$ref": "#/$defs/signature"}
+  },
+  "$defs": {
+    "semver": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
+    "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "component": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version"],
+      "properties": {"version": {"$ref": "#/$defs/semver"}}
+    },
+    "compatibilitySet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin", "companion", "relay", "installer", "protocol", "configuration_schema", "claudian", "runtime"],
+      "properties": {
+        "plugin": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "version", "minimum_obsidian_version"],
+          "properties": {
+            "id": {"const": "claudian-remote"},
+            "version": {"$ref": "#/$defs/semver"},
+            "minimum_obsidian_version": {"type": "string"}
+          }
+        },
+        "companion": {"$ref": "#/$defs/component"},
+        "relay": {"$ref": "#/$defs/component"},
+        "installer": {"$ref": "#/$defs/component"},
+        "protocol": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["current", "compatible", "rollback"],
+          "properties": {
+            "current": {"type": "string", "minLength": 1},
+            "compatible": {"type": "array", "minItems": 1, "items": {"type": "string"}},
+            "rollback": {"type": "array", "minItems": 1, "items": {"type": "string"}}
+          }
+        },
+        "configuration_schema": {"type": "integer", "minimum": 1},
+        "claudian": {"type": "object", "additionalProperties": false, "required": ["exact_version"], "properties": {"exact_version": {"const": "2.0.4"}}},
+        "runtime": {"type": "object", "additionalProperties": false, "required": ["python", "uv"], "properties": {"python": {"type": "string"}, "uv": {"type": "string"}}}
+      }
+    },
+    "lock": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256"],
+      "properties": {"path": {"type": "string", "minLength": 1}, "sha256": {"$ref": "#/$defs/sha256"}}
+    },
+    "asset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "component", "sha256", "size", "license", "dependency_locks"],
+      "properties": {
+        "name": {"type": "string", "minLength": 1},
+        "component": {"enum": ["plugin", "companion", "relay", "installer"]},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "size": {"type": "integer", "minimum": 1},
+        "license": {"enum": ["MIT", "AGPL-3.0-only"]},
+        "dependency_locks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/lock"}}
+      }
+    },
+    "signature": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["algorithm", "key_fingerprint", "value"],
+      "properties": {
+        "algorithm": {"const": "ed25519"},
+        "key_fingerprint": {"$ref": "#/$defs/sha256"},
+        "value": {"type": "string", "minLength": 1, "contentEncoding": "base64"}
+      }
+    }
+  }
+}

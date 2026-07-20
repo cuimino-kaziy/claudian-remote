@@ -1,0 +1,57 @@
+{
+  "description": "Commands are valid only for one live Mac connection generation and expire instead of crossing reconnects.",
+  "valid": {
+    "protocol": "claudian.remote.v2",
+    "kind": "command",
+    "command_type": "turn.stop",
+    "delivery_id": "delivery-stop-1",
+    "mac_session_id": "mac-session-a",
+    "mac_connection_generation": 7,
+    "expires_at": "2099-12-31T23:59:59Z",
+    "expected_revision": 12,
+    "target": {"conversation_id": "conv-1", "turn_id": "turn-1"},
+    "payload": {}
+  },
+  "invalid": [
+    {
+      "name": "missing connection generation",
+      "error": "missing_mac_connection_generation",
+      "command": {
+        "protocol": "claudian.remote.v2", "kind": "command", "command_type": "turn.stop",
+        "delivery_id": "delivery-a", "mac_session_id": "mac-session-a",
+        "expires_at": "2099-12-31T23:59:59Z", "expected_revision": 12,
+        "target": {"conversation_id": "conv-1", "turn_id": "turn-1"}, "payload": {}
+      }
+    },
+    {
+      "name": "expired before reconnect",
+      "error": "command_expired",
+      "command": {
+        "protocol": "claudian.remote.v2", "kind": "command", "command_type": "turn.stop",
+        "delivery_id": "delivery-b", "mac_session_id": "mac-session-a", "mac_connection_generation": 7,
+        "expires_at": "2098-12-31T23:59:59Z", "expected_revision": 12,
+        "target": {"conversation_id": "conv-1", "turn_id": "turn-1"}, "payload": {}
+      }
+    },
+    {
+      "name": "missing revision",
+      "error": "missing_expected_revision",
+      "command": {
+        "protocol": "claudian.remote.v2", "kind": "command", "command_type": "turn.stop",
+        "delivery_id": "delivery-c", "mac_session_id": "mac-session-a", "mac_connection_generation": 7,
+        "expires_at": "2099-12-31T23:59:59Z",
+        "target": {"conversation_id": "conv-1", "turn_id": "turn-1"}, "payload": {}
+      }
+    },
+    {
+      "name": "stop without turn",
+      "error": "missing_turn_id",
+      "command": {
+        "protocol": "claudian.remote.v2", "kind": "command", "command_type": "turn.stop",
+        "delivery_id": "delivery-d", "mac_session_id": "mac-session-a", "mac_connection_generation": 7,
+        "expires_at": "2099-12-31T23:59:59Z", "expected_revision": 12,
+        "target": {"conversation_id": "conv-1"}, "payload": {}
+      }
+    }
+  ]
+}

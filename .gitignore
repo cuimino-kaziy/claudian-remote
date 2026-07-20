@@ -1,0 +1,38 @@
+# Dependencies and build output
+node_modules/
+main.js
+*.map
+dist/
+.release-work/
+
+# Python and test state
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Device-local/runtime state
+*.local.json
+*.local.*
+.token
+.env
+.env.*
+companion_state*.json
+scheduled_tasks.json
+data/
+logs/
+*.log
+*.db
+*.db-*
+*.sqlite
+*.sqlite3
+*.wal
+*.shm
+
+# macOS/editor state
+.DS_Store
+*.swp
+.idea/
+.vscode/

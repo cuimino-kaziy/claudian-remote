@@ -1,0 +1,62 @@
+{
+  "schema_version": 1,
+  "release_version": "0.2.0-beta.1",
+  "beta_scope": {
+    "invited_users_min": 5,
+    "invited_users_max": 10,
+    "macs_per_installation": 1,
+    "mobile_devices_per_installation": 1,
+    "vaults_per_installation": 1,
+    "desktop_os": ["macOS"],
+    "mobile_os": ["iOS", "iPadOS"]
+  },
+  "plugin": {
+    "id": "claudian-remote",
+    "migration_source_ids": ["whale-agent-bridge"],
+    "legacy_id_may_coexist": false,
+    "minimum_obsidian_version": "1.12.3"
+  },
+  "claudian": {
+    "exact_version": "2.0.4",
+    "unsupported_mode": "read_only"
+  },
+  "components": {
+    "plugin": "0.2.0-beta.1",
+    "companion": "0.2.0-beta.1",
+    "relay": "0.2.0-beta.1",
+    "installer": "0.2.0-beta.1",
+    "configuration_schema": 1
+  },
+  "protocol": {
+    "current": "claudian.remote.v2",
+    "compatible": ["claudian.remote.v2"],
+    "rollback": ["claudian.remote.v2"]
+  },
+  "runtime": {
+    "python": "3.12.11",
+    "uv": "0.10.12"
+  },
+  "distribution": {
+    "allowed_combinations": [
+      {
+        "distribution_channel": "private_beta",
+        "plugin_update_owner": "lifecycle_manager"
+      },
+      {
+        "distribution_channel": "community",
+        "plugin_update_owner": "obsidian"
+      }
+    ]
+  },
+  "relay_limits": {
+    "terminal_recovery_seconds": 3600,
+    "stale_in_flight_seconds": 21600,
+    "upload_after_terminal_seconds": 1800,
+    "upload_absolute_seconds": 7200,
+    "max_file_bytes": 268435456,
+    "max_outstanding_bytes_per_installation": 536870912,
+    "max_concurrent_uploads": 2,
+    "max_frame_bytes": 1048576,
+    "managed_volume_refusal_percent": 80
+  }
+}

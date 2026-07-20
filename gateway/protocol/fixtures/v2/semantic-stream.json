@@ -1,0 +1,93 @@
+{
+  "description": "Post-commit semantic stream with a non-prefix text repair and saved-state completion barrier.",
+  "events": [
+    {
+      "protocol": "claudian.remote.v2",
+      "kind": "event",
+      "event_type": "turn.started",
+      "source": {"instance_id": "bridge-a", "sequence": 1},
+      "entity": {"conversation_id": "conv-1", "turn_id": "turn-1"},
+      "revision": 1,
+      "occurred_at": "2099-01-01T00:00:01Z",
+      "payload": {"status": "running", "started_at": "2099-01-01T00:00:01Z"}
+    },
+    {
+      "protocol": "claudian.remote.v2",
+      "kind": "event",
+      "event_type": "text.delta",
+      "source": {"instance_id": "bridge-a", "sequence": 2},
+      "entity": {"conversation_id": "conv-1", "turn_id": "turn-1", "message_id": "msg-a", "block_id": "block-a"},
+      "revision": 2,
+      "occurred_at": "2099-01-01T00:00:02Z",
+      "payload": {"text": "初始回答", "base_revision": 1, "offset": 0}
+    },
+    {
+      "protocol": "claudian.remote.v2",
+      "kind": "event",
+      "event_type": "tool.started",
+      "source": {"instance_id": "bridge-a", "sequence": 3},
+      "entity": {"conversation_id": "conv-1", "turn_id": "turn-1", "message_id": "msg-a", "block_id": "tool-a"},
+      "revision": 3,
+      "occurred_at": "2099-01-01T00:00:03Z",
+      "payload": {"tool_name": "vault_search", "label": "正在搜索知识库", "status": "running", "started_at": "2099-01-01T00:00:03Z"}
+    },
+    {
+      "protocol": "claudian.remote.v2",
+      "kind": "event",
+      "event_type": "tool.completed",
+      "source": {"instance_id": "bridge-a", "sequence": 4},
+      "entity": {"conversation_id": "conv-1", "turn_id": "turn-1", "message_id": "msg-a", "block_id": "tool-a"},
+      "revision": 4,
+      "occurred_at": "2099-01-01T00:00:04Z",
+      "payload": {"tool_name": "vault_search", "label": "已搜索知识库", "status": "completed", "duration_ms": 220, "summary": "找到 3 条相关笔记"}
+    },
+    {
+      "protocol": "claudian.remote.v2",
+      "kind": "event",
+      "event_type": "text.replace",
+      "source": {"instance_id": "bridge-a", "sequence": 5},
+      "entity": {"conversation_id": "conv-1", "turn_id": "turn-1", "message_id": "msg-a", "block_id": "block-a"},
+      "revision": 5,
+      "occurred_at": "2099-01-01T00:00:05Z",
+      "payload": {"text": "修订后的完整回答。"}
+    },
+    {
+      "protocol": "claudian.remote.v2",
+      "kind": "event",
+      "event_type": "keyframe.page",
+      "source": {"instance_id": "bridge-a", "sequence": 6},
+      "entity": {"conversation_id": "conv-1", "turn_id": "turn-1"},
+      "revision": 5,
+      "occurred_at": "2099-01-01T00:00:06Z",
+      "payload": {
+        "keyframe_id": "kf-1",
+        "page_index": 0,
+        "page_count": 1,
+        "projection": {
+          "conversation": {"id": "conv-1", "revision": 5, "title": "示例"},
+          "turns": [{"id": "turn-1", "status": "completed", "messages": [{"id": "msg-a", "blocks": [{"id": "block-a", "text": "修订后的完整回答。", "type": "text"}]}]}]
+        }
+      }
+    },
+    {
+      "protocol": "claudian.remote.v2",
+      "kind": "event",
+      "event_type": "keyframe.final",
+      "source": {"instance_id": "bridge-a", "sequence": 7},
+      "entity": {"conversation_id": "conv-1", "turn_id": "turn-1"},
+      "revision": 5,
+      "occurred_at": "2099-01-01T00:00:07Z",
+      "payload": {"keyframe_id": "kf-1", "page_count": 1, "revision": 5, "checksum": "sha256:63000a001522e1e7c0a67d10e011ac014849c334ef51ea382f4045b4fb6e924d"}
+    },
+    {
+      "protocol": "claudian.remote.v2",
+      "kind": "event",
+      "event_type": "turn.completed",
+      "source": {"instance_id": "bridge-a", "sequence": 8},
+      "entity": {"conversation_id": "conv-1", "turn_id": "turn-1"},
+      "revision": 5,
+      "occurred_at": "2099-01-01T00:00:08Z",
+      "payload": {"status": "completed", "duration_ms": 7000, "checksum": "sha256:63000a001522e1e7c0a67d10e011ac014849c334ef51ea382f4045b4fb6e924d"}
+    }
+  ]
+}

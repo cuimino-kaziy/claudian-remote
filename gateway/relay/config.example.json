@@ -1,0 +1,45 @@
+{
+  "host": "127.0.0.1",
+  "port": 8787,
+  "public_base_url": "https://relay.example.invalid",
+  "fallback_base_url": "",
+  "presence_ttl_seconds": 45,
+  "max_events_per_poll": 100,
+  "max_stored_events": 5000,
+  "database_path": "/var/lib/claudian-remote-relay/relay-v2.db",
+  "enable_v1_compatibility": true,
+  "allowed_origins": [
+    "app://obsidian.md",
+    "capacitor://localhost"
+  ],
+  "ticket_ttl_seconds": 30,
+  "ticket_auth_timeout_seconds": 5,
+  "websocket_heartbeat_seconds": 20,
+  "websocket_max_message_bytes": 262144,
+  "client_queue_max_events": 256,
+  "client_queue_max_bytes": 2097152,
+  "retention_seconds": 86400,
+  "completed_grace_seconds": 3600,
+  "event_store_max_bytes": 67108864,
+  "event_store_max_rows": 100000,
+  "upload_root": "/var/lib/claudian-remote-relay/uploads",
+  "upload_ttl_seconds": 1800,
+  "upload_chunk_bytes": 1048576,
+  "upload_stream_bytes": 65536,
+  "upload_reserve_min_bytes": 1073741824,
+  "upload_reserve_fraction": 0.1,
+  "tokens": [
+    {
+      "name": "mac-primary",
+      "role": "mac",
+      "pairing_id": "replace-with-pairing-id",
+      "token": "replace-with-mac-relay-token"
+    },
+    {
+      "name": "mobile-primary",
+      "role": "mobile",
+      "pairing_id": "replace-with-pairing-id",
+      "token": "replace-with-mobile-relay-token"
+    }
+  ]
+}

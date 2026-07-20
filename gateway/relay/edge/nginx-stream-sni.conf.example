@@ -1,0 +1,30 @@
+# Nginx stream SNI router for sharing public :443 between Claudian Remote and
+# the existing x-ui managed xray REALITY inbound.
+#
+# Intended topology:
+# - public 0.0.0.0:443 -> nginx stream
+# - SNI relay.example.invalid -> Caddy on 127.0.0.1:8443
+# - everything else -> xray moved to 127.0.0.1:4443
+#
+# Do not install this until xray is backed up and reconfigured away from :443.
+
+stream {
+  map $ssl_preread_server_name $claudian_remote_backend {
+    relay.example.invalid claudian_remote_https;
+    default xray_reality;
+  }
+
+  upstream claudian_remote_https {
+    server 127.0.0.1:8443;
+  }
+
+  upstream xray_reality {
+    server 127.0.0.1:4443;
+  }
+
+  server {
+    listen 443;
+    proxy_pass $claudian_remote_backend;
+    ssl_preread on;
+  }
+}

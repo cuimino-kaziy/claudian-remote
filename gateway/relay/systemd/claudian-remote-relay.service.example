@@ -1,0 +1,32 @@
+[Unit]
+Description=Claudian Remote Relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/claudian-remote
+ExecStartPre=/opt/claudian-remote/gateway/.venv/bin/python -c "import sqlite3; assert sqlite3.sqlite_version_info >= (3, 35, 0)"
+ExecStart=/opt/claudian-remote/gateway/.venv/bin/python -m gateway.relay.relay_server --config /etc/claudian-remote/relay.json
+Restart=always
+RestartSec=5
+User=claudian-relay
+Group=claudian-relay
+Environment=PYTHONUNBUFFERED=1
+StateDirectory=claudian-remote-relay
+StateDirectoryMode=0700
+UMask=0077
+MemoryMax=384M
+TasksMax=128
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

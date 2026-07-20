@@ -1,0 +1,45 @@
+{
+  "description": "Each event represents source material that must be rejected before it leaves the Mac.",
+  "invalid_events": [
+    {
+      "name": "hidden reasoning field",
+      "error": "forbidden_source_field",
+      "event": {
+        "protocol": "claudian.remote.v2", "kind": "event", "event_type": "activity.updated",
+        "source": {"instance_id": "bridge-a", "sequence": 90},
+        "entity": {"conversation_id": "conv-1", "turn_id": "turn-1"}, "revision": 8,
+        "payload": {"stage": "model", "label": "正在处理", "status": "running", "thinking": "private reasoning"}
+      }
+    },
+    {
+      "name": "raw tool input field",
+      "error": "forbidden_source_field",
+      "event": {
+        "protocol": "claudian.remote.v2", "kind": "event", "event_type": "tool.started",
+        "source": {"instance_id": "bridge-a", "sequence": 91},
+        "entity": {"conversation_id": "conv-1", "turn_id": "turn-1"}, "revision": 9,
+        "payload": {"tool_name": "exec", "label": "执行操作", "status": "running", "tool_input": {"unsafe": true}}
+      }
+    },
+    {
+      "name": "Mac absolute path",
+      "error": "absolute_path_forbidden",
+      "event": {
+        "protocol": "claudian.remote.v2", "kind": "event", "event_type": "activity.updated",
+        "source": {"instance_id": "bridge-a", "sequence": 92},
+        "entity": {"conversation_id": "conv-1", "turn_id": "turn-1"}, "revision": 10,
+        "payload": {"stage": "file", "label": "正在读取", "detail": "打开 /Users/example/private.md", "status": "running"}
+      }
+    },
+    {
+      "name": "role credential value",
+      "error": "secret_value_forbidden",
+      "event": {
+        "protocol": "claudian.remote.v2", "kind": "event", "event_type": "activity.updated",
+        "source": {"instance_id": "bridge-a", "sequence": 93},
+        "entity": {"conversation_id": "conv-1", "turn_id": "turn-1"}, "revision": 11,
+        "payload": {"stage": "network", "label": "连接", "detail": "Authorization: Bearer token-example-12345678", "status": "running"}
+      }
+    }
+  ]
+}

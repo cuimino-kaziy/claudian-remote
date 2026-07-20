@@ -1,0 +1,19 @@
+# Caddy terminates TLS for relay.example.invalid after an SNI router forwards
+# relay.example.invalid traffic from public :443 to local 127.0.0.1:8443.
+
+{
+  http_port 8080
+  https_port 8443
+}
+
+relay.example.invalid:8443 {
+  bind 127.0.0.1
+  encode zstd gzip
+  reverse_proxy 127.0.0.1:8787
+
+  header {
+    -Server
+    X-Content-Type-Options nosniff
+    Referrer-Policy no-referrer
+  }
+}

@@ -1,0 +1,53 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  verify-and-publish:
+    runs-on: macos-14
+    timeout-minutes: 25
+    permissions:
+      contents: write
+    steps:
+      - name: Check out exact tagged revision
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          ref: ${{ github.ref }}
+      - name: Reject a mutable or mismatched release ref
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          test "${GITHUB_REF}" = "refs/tags/${RELEASE_TAG}"
+          test "${RELEASE_TAG}" = "v$(node -p "require('./package.json').version")"
+      - name: Install and verify locked dependencies
+        run: |
+          npm ci --ignore-scripts
+          python3.12 -m venv .release-venv
+          .release-venv/bin/pip install --require-hashes -r gateway/requirements.lock
+      - name: Run release gates
+        run: |
+          npm run check:source
+          npm test
+          .release-venv/bin/python -m pytest gateway/tests -q
+      - name: Build exact-tag assets
+        env:
+          CLAUDIAN_RELEASE_TAG: ${{ github.ref_name }}
+        run: npm run release:package
+      - name: Sign outside the repository and verify pinned trust root
+        env:
+          CLAUDIAN_RELEASE_SIGNING_KEY_B64: ${{ secrets.CLAUDIAN_RELEASE_SIGNING_KEY_B64 }}
+          CLAUDIAN_RELEASE_KEY_FINGERPRINT: ${{ vars.CLAUDIAN_RELEASE_KEY_FINGERPRINT }}
+          CLAUDIAN_RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          npm run release:sign
+          node release/packaging/verify-release.mjs
+      - name: Publish immutable GitHub Release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/release-manifest.json --verify-tag --title "Claudian Remote ${GITHUB_REF_NAME}" --notes "Private beta release. Verify the signed manifest before installation."
