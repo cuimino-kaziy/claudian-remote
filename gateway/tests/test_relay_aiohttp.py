@@ -13,7 +13,8 @@ from gateway.protocol.compatibility import COMPATIBILITY_SET
 def principals():
     return [
         RelayToken(name="mac", role="mac", pairing_id="room-a", token="mac-secret"),
-        RelayToken(name="mobile", role="mobile", pairing_id="room-a", token="mobile-secret"),
+        RelayToken(name="mobile", role="mobile", pairing_id="room-a", token="mobile-secret", device_id="iphone"),
+        RelayToken(name="admin", role="pairing_admin", pairing_id="room-a", token="admin-secret"),
     ]
 
 
@@ -24,6 +25,53 @@ def test_role_authentication_is_constant_scope_and_deny_by_default():
         auth.authenticate("Bearer mac-secret", "mobile")
     with pytest.raises(AuthError, match="unauthorized"):
         auth.authenticate("Bearer missing", "mac")
+
+
+def test_credentials_are_bound_to_installation_vault_device_role_and_profile_audience():
+    token = RelayToken(
+        name="mobile",
+        role="mobile",
+        pairing_id="room-a",
+        token="bound-secret",
+        installation_id="installation-a",
+        vault_id="vault-a",
+        device_id="iphone-a",
+        endpoint_audience="claudian-remote:local_tailscale:installation-a",
+    )
+    auth = TokenAuthenticator([token])
+    assert auth.authenticate(
+        "Bearer bound-secret",
+        "mobile",
+        installation_id="installation-a",
+        vault_id="vault-a",
+        device_id="iphone-a",
+        endpoint_audience="claudian-remote:local_tailscale:installation-a",
+    ) is token
+    for field, value, code in (
+        ("installation_id", "other", "wrong_installation"),
+        ("vault_id", "other", "wrong_vault"),
+        ("device_id", "other", "wrong_device"),
+        ("endpoint_audience", "claudian-remote:remote_vps:installation-a", "wrong_audience"),
+    ):
+        arguments = {
+            "installation_id": "installation-a",
+            "vault_id": "vault-a",
+            "device_id": "iphone-a",
+            "endpoint_audience": "claudian-remote:local_tailscale:installation-a",
+        }
+        arguments[field] = value
+        with pytest.raises(AuthError, match=code):
+            auth.authenticate("Bearer bound-secret", "mobile", **arguments)
+
+    revoked = RelayToken(
+        name="mobile",
+        role="mobile",
+        pairing_id="room-a",
+        token="revoked-secret",
+        revoked=True,
+    )
+    with pytest.raises(AuthError, match="revoked"):
+        TokenAuthenticator([revoked]).authenticate("Bearer revoked-secret", "mobile")
 
 
 @pytest.mark.asyncio
@@ -39,6 +87,19 @@ async def test_mobile_ticket_is_single_use_role_and_binding_scoped():
     assert consumed.pairing_id == "room-a"
     with pytest.raises(AuthError, match="ticket_invalid_or_used"):
         await store.consume(ticket, role="mobile", device_id="iphone", client_instance_id="view-1")
+
+
+@pytest.mark.asyncio
+async def test_ticket_issue_rejects_a_device_other_than_the_persistent_credential_binding():
+    token = RelayToken(
+        name="mobile",
+        role="mobile",
+        pairing_id="room-a",
+        token="mobile-secret",
+        device_id="iphone-a",
+    )
+    with pytest.raises(AuthError, match="wrong_device"):
+        await TicketStore().issue(token, "iphone-b", "view-1")
 
 
 @pytest.mark.asyncio
@@ -78,6 +139,20 @@ def relay_config(tmp_path):
         allowed_origins=["app://obsidian.md"],
         websocket_heartbeat_seconds=2,
     )
+
+
+@pytest.mark.asyncio
+async def test_health_is_private_and_requires_profile_bound_pairing_admin(aiohttp_client, tmp_path):
+    client = await aiohttp_client(create_app(relay_config(tmp_path)))
+    assert (await client.get("/health")).status == 401
+    assert (
+        await client.get("/health", headers={"Authorization": "Bearer mobile-secret"})
+    ).status == 403
+    response = await client.get("/health", headers={"Authorization": "Bearer admin-secret"})
+    assert response.status == 200
+    body = await response.json()
+    assert body["ok"] is True
+    assert "tokens" not in body
 
 
 async def issue_mobile_ticket(client, *, device="iphone", instance="view-1"):

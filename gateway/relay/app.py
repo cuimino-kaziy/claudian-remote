@@ -16,6 +16,7 @@ from gateway.protocol.compatibility import COMPATIBILITY_SET, combine_compatibil
 from gateway.relay.auth import AuthError, TicketStore, TokenAuthenticator, origin_allowed
 from gateway.relay.event_store import EventStore
 from gateway.relay.relay_server import RelayConfig, RelayService, VERSION
+from gateway.relay.retention import RetentionCoordinator
 from gateway.relay.upload_store import UploadError, UploadStore
 from gateway.relay.websocket_hub import SlowConsumer, WebSocketClient, WebSocketHub
 
@@ -29,6 +30,7 @@ LEGACY = web.AppKey("legacy", RelayService)
 PRUNE_TASK = web.AppKey("prune_task", asyncio.Task)
 REJECT_COMMANDS = web.AppKey("reject_commands", dict)
 UPLOADS = web.AppKey("uploads", UploadStore)
+RETENTION = web.AppKey("retention", RetentionCoordinator)
 
 
 def _error(code: str, status: int = 400) -> web.Response:
@@ -37,6 +39,17 @@ def _error(code: str, status: int = 400) -> web.Response:
 
 def _bearer(request: web.Request) -> str:
     return request.headers.get("Authorization", "")
+
+
+def _authenticate(request: web.Request, role: Optional[str]):
+    config = request.app[CONFIG]
+    return request.app[AUTH].authenticate(
+        _bearer(request),
+        required_role=role,
+        installation_id=config.installation_id,
+        vault_id=config.vault_id,
+        endpoint_audience=config.endpoint_audience,
+    )
 
 
 def _require_subprotocol(request: web.Request) -> None:
@@ -57,6 +70,10 @@ def _reject_url_credentials(request: web.Request) -> None:
 
 
 async def health(request: web.Request) -> web.Response:
+    try:
+        _authenticate(request, "pairing_admin")
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
     stats = await request.app[STORE].stats()
     upload_stats = await request.app[UPLOADS].stats()
     socket_stats = request.app[HUB].metrics()
@@ -78,6 +95,7 @@ async def health(request: web.Request) -> web.Response:
             "upload_disk_free_bytes": upload_stats["disk_free_bytes"],
             "upload_disk_reserve_bytes": upload_stats["disk_reserve_bytes"],
             "stream": socket_stats,
+            "retention": request.app[RETENTION].last_result,
             "v1_compatibility": request.app[CONFIG].enable_v1_compatibility,
         }
     )
@@ -97,7 +115,7 @@ def _binding(body: Dict[str, Any]) -> tuple[str, int]:
 
 async def begin_upload(request: web.Request) -> web.Response:
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mobile")
+        principal = _authenticate(request, "mobile")
         body = await request.json()
         if not isinstance(body, dict):
             raise UploadError("invalid_json")
@@ -107,6 +125,7 @@ async def begin_upload(request: web.Request) -> web.Response:
             session_id,
             generation,
             lambda: request.app[UPLOADS].begin(
+                installation_id=principal.installation_id,
                 pairing_id=principal.pairing_id,
                 mac_session_id=session_id,
                 mac_connection_generation=generation,
@@ -137,7 +156,7 @@ async def begin_upload(request: web.Request) -> web.Response:
 async def append_upload_chunk(request: web.Request) -> web.Response:
     upload_id = request.match_info["upload_id"]
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mobile")
+        principal = _authenticate(request, "mobile")
         session_id = request.headers.get("Upload-Session-ID") or request.headers.get("X-Mac-Session-ID") or ""
         generation = int(request.headers.get("Upload-Connection-Generation") or request.headers.get("X-Mac-Connection-Generation") or "0")
         index = int(request.match_info["index"])
@@ -175,7 +194,7 @@ async def append_upload_chunk(request: web.Request) -> web.Response:
 async def finalize_upload(request: web.Request) -> web.Response:
     upload_id = request.match_info["upload_id"]
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mobile")
+        principal = _authenticate(request, "mobile")
         body = await request.json()
         if not isinstance(body, dict):
             raise UploadError("invalid_json")
@@ -215,7 +234,7 @@ async def finalize_upload(request: web.Request) -> web.Response:
 
 async def upload_status(request: web.Request) -> web.Response:
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mobile")
+        principal = _authenticate(request, "mobile")
         result = await request.app[UPLOADS].status(request.match_info["upload_id"], principal.pairing_id)
     except AuthError as exc:
         return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
@@ -226,7 +245,7 @@ async def upload_status(request: web.Request) -> web.Response:
 
 async def cancel_upload(request: web.Request) -> web.Response:
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mobile")
+        principal = _authenticate(request, "mobile")
         removed = await request.app[UPLOADS].abort(request.match_info["upload_id"], principal.pairing_id)
     except AuthError as exc:
         return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
@@ -235,7 +254,7 @@ async def cancel_upload(request: web.Request) -> web.Response:
 
 async def download_upload(request: web.Request) -> web.StreamResponse:
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mac")
+        principal = _authenticate(request, "mac")
         session_id = request.headers.get("Upload-Session-ID") or request.headers.get("X-Mac-Session-ID") or ""
         generation = int(request.headers.get("Upload-Connection-Generation") or request.headers.get("X-Mac-Connection-Generation") or "0")
         if not await request.app[HUB].presence.binding_matches(principal.pairing_id, session_id, generation):
@@ -284,7 +303,7 @@ async def download_upload(request: web.Request) -> web.StreamResponse:
 
 async def issue_ticket(request: web.Request) -> web.Response:
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mobile")
+        principal = _authenticate(request, "mobile")
         body = await request.json()
         if not isinstance(body, dict):
             raise TypeError("ticket body must be an object")
@@ -311,7 +330,7 @@ async def issue_ticket(request: web.Request) -> web.Response:
 async def submit_command(request: web.Request) -> web.Response:
     """Route a command immediately; commands are never persisted or queued."""
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mobile")
+        principal = _authenticate(request, "mobile")
         body = await request.json()
         if not isinstance(body, dict) or "command" not in body:
             raise TypeError("command envelope is required")
@@ -380,6 +399,12 @@ async def mobile_websocket(request: web.Request) -> web.StreamResponse:
             device_id=str(frame.get("device_id") or ""),
             client_instance_id=str(frame.get("client_instance_id") or ""),
         )
+        if grant.installation_id != config.installation_id:
+            raise AuthError("wrong_installation")
+        if grant.vault_id != config.vault_id:
+            raise AuthError("wrong_vault")
+        if grant.endpoint_audience != config.endpoint_audience:
+            raise AuthError("wrong_audience")
         mobile_compatibility = combine_compatibility(
             frame.get("compatibility"),
             {"writable": True, "reason": "ready"},
@@ -491,7 +516,7 @@ async def mac_websocket(request: web.Request) -> web.StreamResponse:
     _require_subprotocol(request)
     _require_origin(request)
     try:
-        principal = request.app[AUTH].authenticate(_bearer(request), required_role="mac")
+        principal = _authenticate(request, "mac")
     except AuthError as exc:
         return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
     config = request.app[CONFIG]
@@ -641,6 +666,8 @@ async def _commit_mac_event(
         }
     )
     if committed.inserted:
+        if event["event_type"] in {"turn.completed", "turn.interrupted", "turn.failed"}:
+            await app[UPLOADS].mark_terminal(client.pairing_id)
         await app[HUB].broadcast_committed(committed, client.pairing_id)
 
 
@@ -735,9 +762,10 @@ def _legacy_enabled(request: web.Request) -> Optional[web.Response]:
 async def legacy_join(request: web.Request) -> web.Response:
     if disabled := _legacy_enabled(request):
         return disabled
-    token = request.app[LEGACY].authenticate(_bearer(request))
-    if token is None:
-        return _error("unauthorized", 401)
+    try:
+        token = _authenticate(request, None)
+    except AuthError as exc:
+        return _error(exc.code, 401)
     body = await request.json()
     result = await asyncio.to_thread(request.app[LEGACY].join, token, str(body.get("session_id") or "") or None)
     return web.json_response(result)
@@ -746,18 +774,20 @@ async def legacy_join(request: web.Request) -> web.Response:
 async def legacy_heartbeat(request: web.Request) -> web.Response:
     if disabled := _legacy_enabled(request):
         return disabled
-    token = request.app[LEGACY].authenticate(_bearer(request))
-    if token is None:
-        return _error("unauthorized", 401)
+    try:
+        token = _authenticate(request, None)
+    except AuthError as exc:
+        return _error(exc.code, 401)
     return web.json_response(await asyncio.to_thread(request.app[LEGACY].heartbeat, token))
 
 
 async def legacy_submit(request: web.Request) -> web.Response:
     if disabled := _legacy_enabled(request):
         return disabled
-    token = request.app[LEGACY].authenticate(_bearer(request))
-    if token is None:
-        return _error("unauthorized", 401)
+    try:
+        token = _authenticate(request, None)
+    except AuthError as exc:
+        return _error(exc.code, 401)
     status, result = await asyncio.to_thread(request.app[LEGACY].submit, token, await request.json())
     return web.json_response(result, status=status)
 
@@ -765,9 +795,10 @@ async def legacy_submit(request: web.Request) -> web.Response:
 async def legacy_poll(request: web.Request) -> web.Response:
     if disabled := _legacy_enabled(request):
         return disabled
-    token = request.app[LEGACY].authenticate(_bearer(request))
-    if token is None:
-        return _error("unauthorized", 401)
+    try:
+        token = _authenticate(request, None)
+    except AuthError as exc:
+        return _error(exc.code, 401)
     try:
         since = int(request.query.get("since", "0"))
         timeout = float(request.query.get("timeout", "0"))
@@ -780,9 +811,7 @@ async def legacy_poll(request: web.Request) -> web.Response:
 async def _prune_loop(app: web.Application) -> None:
     while True:
         await asyncio.sleep(60)
-        await app[STORE].prune()
-        await app[STORE].checkpoint("PASSIVE")
-        await app[UPLOADS].cleanup_expired()
+        await app[RETENTION].run_once()
 
 
 async def _startup(app: web.Application) -> None:
@@ -798,6 +827,12 @@ async def _startup(app: web.Application) -> None:
     uploads = UploadStore(
         Path(config.upload_root),
         ttl_seconds=config.upload_ttl_seconds,
+        terminal_ttl_seconds=config.upload_ttl_seconds,
+        absolute_ttl_seconds=config.upload_absolute_seconds,
+        max_file_bytes=config.upload_max_file_bytes,
+        max_outstanding_bytes_per_installation=config.upload_max_outstanding_bytes_per_installation,
+        max_concurrent_uploads=config.upload_max_concurrent,
+        managed_volume_refusal_percent=config.managed_volume_refusal_percent,
         max_chunk_bytes=config.upload_chunk_bytes,
         stream_bytes=config.upload_stream_bytes,
         reserve_min_bytes=config.upload_reserve_min_bytes,
@@ -806,6 +841,7 @@ async def _startup(app: web.Application) -> None:
     await uploads.start()
     app[STORE] = store
     app[UPLOADS] = uploads
+    app[RETENTION] = RetentionCoordinator(store, uploads)
     app[AUTH] = TokenAuthenticator(config.tokens)
     app[TICKETS] = TicketStore(config.ticket_ttl_seconds)
     app[HUB] = WebSocketHub(store)
@@ -856,6 +892,8 @@ def create_app(config: RelayConfig) -> web.Application:
 
 
 def run_relay(config: RelayConfig) -> None:
+    if config.host not in {"127.0.0.1", "::1", "localhost"}:
+        raise ValueError("relay_must_bind_loopback")
     web.run_app(
         create_app(config),
         host=config.host,

@@ -48,14 +48,24 @@ class EventStore:
         self,
         path: Path,
         *,
-        retention_seconds: float = 24 * 60 * 60,
+        retention_seconds: float = 6 * 60 * 60,
         completed_grace_seconds: float = 60 * 60,
+        terminal_recovery_seconds: Optional[float] = None,
+        stale_in_flight_seconds: Optional[float] = None,
         max_bytes: int = 64 * 1024 * 1024,
         max_rows: int = 100_000,
     ) -> None:
         self.path = Path(path)
-        self.retention_seconds = retention_seconds
-        self.completed_grace_seconds = completed_grace_seconds
+        self.stale_in_flight_seconds = float(
+            retention_seconds if stale_in_flight_seconds is None else stale_in_flight_seconds
+        )
+        self.terminal_recovery_seconds = float(
+            completed_grace_seconds if terminal_recovery_seconds is None else terminal_recovery_seconds
+        )
+        # Backward-compatible attribute names are retained for callers while
+        # the actual policy names match the support matrix.
+        self.retention_seconds = self.stale_in_flight_seconds
+        self.completed_grace_seconds = self.terminal_recovery_seconds
         self.max_bytes = max_bytes
         self.max_rows = max_rows
         self._requests: asyncio.Queue[Optional[_Request]] = asyncio.Queue()
@@ -317,43 +327,61 @@ class EventStore:
 
     def _prune(self, connection: sqlite3.Connection, now: float) -> Dict[str, int]:
         before = int(connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
-        cutoff = now - self.retention_seconds
-        terminal_cutoff = now - self.completed_grace_seconds
+        stale_cutoff = now - self.stale_in_flight_seconds
+        terminal_cutoff = now - self.terminal_recovery_seconds
         connection.execute("BEGIN IMMEDIATE")
         try:
             expired = connection.execute(
                 """
                 SELECT pairing_id,MAX(cursor) AS floor FROM events e
-                WHERE created_at<?
-                  AND (turn_id IS NULL OR EXISTS(
-                    SELECT 1 FROM events done
-                    WHERE done.pairing_id=e.pairing_id AND done.turn_id=e.turn_id AND done.terminal=1
-                  ))
-                  AND NOT EXISTS(
-                    SELECT 1 FROM events recent_done
-                    WHERE recent_done.pairing_id=e.pairing_id AND recent_done.turn_id=e.turn_id
-                      AND recent_done.terminal=1 AND recent_done.created_at>=?
+                WHERE (
+                    turn_id IS NULL AND created_at<?
+                  ) OR (
+                    turn_id IS NOT NULL AND EXISTS(
+                      SELECT 1 FROM events done
+                      WHERE done.pairing_id=e.pairing_id AND done.turn_id=e.turn_id AND done.terminal=1
+                    ) AND (
+                      SELECT MAX(done.created_at) FROM events done
+                      WHERE done.pairing_id=e.pairing_id AND done.turn_id=e.turn_id AND done.terminal=1
+                    ) < ?
+                  ) OR (
+                    turn_id IS NOT NULL AND NOT EXISTS(
+                      SELECT 1 FROM events done
+                      WHERE done.pairing_id=e.pairing_id AND done.turn_id=e.turn_id AND done.terminal=1
+                    ) AND (
+                      SELECT MAX(active.created_at) FROM events active
+                      WHERE active.pairing_id=e.pairing_id AND active.turn_id=e.turn_id
+                    ) < ?
                   )
                 GROUP BY pairing_id
                 """,
-                (cutoff, terminal_cutoff),
+                (terminal_cutoff, terminal_cutoff, stale_cutoff),
             ).fetchall()
             self._record_floors(connection, expired)
             connection.execute(
                 """
                 DELETE FROM events AS e
-                WHERE created_at<?
-                  AND (turn_id IS NULL OR EXISTS(
-                    SELECT 1 FROM events done
-                    WHERE done.pairing_id=e.pairing_id AND done.turn_id=e.turn_id AND done.terminal=1
-                  ))
-                  AND NOT EXISTS(
-                    SELECT 1 FROM events recent_done
-                    WHERE recent_done.pairing_id=e.pairing_id AND recent_done.turn_id=e.turn_id
-                      AND recent_done.terminal=1 AND recent_done.created_at>=?
+                WHERE (
+                    turn_id IS NULL AND created_at<?
+                  ) OR (
+                    turn_id IS NOT NULL AND EXISTS(
+                      SELECT 1 FROM events done
+                      WHERE done.pairing_id=e.pairing_id AND done.turn_id=e.turn_id AND done.terminal=1
+                    ) AND (
+                      SELECT MAX(done.created_at) FROM events done
+                      WHERE done.pairing_id=e.pairing_id AND done.turn_id=e.turn_id AND done.terminal=1
+                    ) < ?
+                  ) OR (
+                    turn_id IS NOT NULL AND NOT EXISTS(
+                      SELECT 1 FROM events done
+                      WHERE done.pairing_id=e.pairing_id AND done.turn_id=e.turn_id AND done.terminal=1
+                    ) AND (
+                      SELECT MAX(active.created_at) FROM events active
+                      WHERE active.pairing_id=e.pairing_id AND active.turn_id=e.turn_id
+                    ) < ?
                   )
                 """,
-                (cutoff, terminal_cutoff),
+                (terminal_cutoff, terminal_cutoff, stale_cutoff),
             )
             while True:
                 row = connection.execute("SELECT COUNT(*),COALESCE(SUM(event_bytes),0) FROM events").fetchone()

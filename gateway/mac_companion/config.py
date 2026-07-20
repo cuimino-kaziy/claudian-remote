@@ -124,6 +124,10 @@ class CompanionRuntimeConfig:
     relay_token: str
     pairing_id: str
     bridge_credential: str
+    connection_mode: str = ""
+    installation_id: str = ""
+    vault_id: str = ""
+    endpoint_audience: str = ""
     bridge_credential_id: str = "installation-bridge"
     bridge_host: str = "127.0.0.1"
     bridge_port: int = 27124
@@ -147,12 +151,27 @@ class CompanionRuntimeConfig:
     @classmethod
     def from_file(cls, path: Path, keychain: Optional[Keychain] = None) -> "CompanionRuntimeConfig":
         data = json.loads(path.read_text(encoding="utf-8"))
+        profile = None
+        profile_path = str(data.get("connection_profile_path") or "")
+        if profile_path:
+            from installer.claudian_remote_lifecycle.connection_profile import ConnectionProfile
+
+            selected = Path(profile_path)
+            if not selected.is_absolute():
+                selected = path.parent / selected
+            profile = ConnectionProfile.from_dict(json.loads(selected.read_text(encoding="utf-8")))
+            if str(data.get("relay_token_ref") or "") != profile.companion_credential_ref:
+                raise KeychainError("profile_credential_binding_mismatch")
         values = load_secret_fields(data, keychain or MacOSKeychain())
         return cls(
-            relay_base_url=str(data.get("relay_base_url") or "").rstrip("/"),
+            relay_base_url=(profile.endpoint if profile else str(data.get("relay_base_url") or "").rstrip("/")),
             relay_token=values["relay_token"],
             pairing_id=str(data.get("pairing_id") or ""),
             bridge_credential=values["bridge_credential"],
+            connection_mode=profile.mode if profile else "",
+            installation_id=profile.installation_id if profile else "",
+            vault_id=profile.vault_id if profile else "",
+            endpoint_audience=profile.endpoint_audience if profile else "",
             bridge_credential_id=str(data.get("bridge_credential_id") or "installation-bridge"),
             bridge_host=str(data.get("bridge_host") or "127.0.0.1"),
             bridge_port=int(data.get("bridge_port") or 27124),
@@ -174,6 +193,14 @@ class CompanionRuntimeConfig:
             raise KeychainError("missing companion runtime configuration")
         if self.bridge_host != "127.0.0.1" or self.bridge_port != 27124:
             raise KeychainError("invalid loopback Bridge configuration")
+        if self.connection_mode and self.connection_mode not in {"local_tailscale", "local_lan", "remote_vps"}:
+            raise KeychainError("unsupported_connection_mode")
+        if self.connection_mode and (
+            not self.installation_id
+            or not self.vault_id
+            or self.endpoint_audience != f"claudian-remote:{self.connection_mode}:{self.installation_id}"
+        ):
+            raise KeychainError("connection_profile_binding_mismatch")
 
     def resolved_relay_ws_url(self) -> str:
         if self.relay_ws_url:

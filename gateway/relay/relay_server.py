@@ -15,8 +15,10 @@ from urllib.parse import parse_qs, urlparse
 
 try:
     from .crypto import redact_text
+    from .config import DEFAULT_LIMITS
 except ImportError:  # pragma: no cover - script execution fallback
     from crypto import redact_text
+    from config import DEFAULT_LIMITS
 
 
 VERSION = "0.2.0-beta.1"
@@ -33,6 +35,12 @@ class RelayToken:
     role: str
     pairing_id: str
     token: str
+    installation_id: str = ""
+    vault_id: str = ""
+    device_id: str = ""
+    endpoint_audience: str = ""
+    revoked: bool = False
+    generation: int = 1
 
 
 @dataclass
@@ -41,29 +49,73 @@ class RelayConfig:
     port: int = 8787
     public_base_url: str = "https://relay.example.invalid"
     fallback_base_url: str = ""
+    installation_id: str = "installation-test"
+    vault_id: str = "vault-test"
+    endpoint_audience: str = "claudian-remote:local_tailscale:installation-test"
     presence_ttl_seconds: float = 45.0
     max_events_per_poll: int = 100
     max_stored_events: int = 5000
     tokens: List[RelayToken] = field(default_factory=list)
     database_path: str = "/var/lib/claudian-remote-relay/relay-v2.db"
-    enable_v1_compatibility: bool = True
+    enable_v1_compatibility: bool = False
     allowed_origins: List[str] = field(default_factory=lambda: ["app://obsidian.md", "capacitor://localhost"])
     ticket_ttl_seconds: float = 30.0
     ticket_auth_timeout_seconds: float = 5.0
     websocket_heartbeat_seconds: float = 20.0
-    websocket_max_message_bytes: int = 256 * 1024
+    websocket_max_message_bytes: int = DEFAULT_LIMITS.max_frame_bytes
     client_queue_max_events: int = 256
     client_queue_max_bytes: int = 2 * 1024 * 1024
-    retention_seconds: float = 24 * 60 * 60
-    completed_grace_seconds: float = 60 * 60
+    retention_seconds: float = DEFAULT_LIMITS.stale_in_flight_seconds
+    completed_grace_seconds: float = DEFAULT_LIMITS.terminal_recovery_seconds
     event_store_max_bytes: int = 64 * 1024 * 1024
     event_store_max_rows: int = 100_000
     upload_root: str = "/var/lib/claudian-remote-relay/uploads"
-    upload_ttl_seconds: float = 30 * 60
+    upload_ttl_seconds: float = DEFAULT_LIMITS.upload_after_terminal_seconds
+    upload_absolute_seconds: float = DEFAULT_LIMITS.upload_absolute_seconds
+    upload_max_file_bytes: int = DEFAULT_LIMITS.max_file_bytes
+    upload_max_outstanding_bytes_per_installation: int = DEFAULT_LIMITS.max_outstanding_bytes_per_installation
+    upload_max_concurrent: int = DEFAULT_LIMITS.max_concurrent_uploads
+    managed_volume_refusal_percent: int = DEFAULT_LIMITS.managed_volume_refusal_percent
     upload_chunk_bytes: int = 1024 * 1024
     upload_stream_bytes: int = 64 * 1024
     upload_reserve_min_bytes: int = 1024 * 1024 * 1024
     upload_reserve_fraction: float = 0.10
+
+    def __post_init__(self) -> None:
+        if self.host not in {"127.0.0.1", "::1", "localhost"}:
+            raise ValueError("relay_must_bind_loopback")
+        if self.fallback_base_url:
+            raise ValueError("relay_fallback_forbidden")
+        exact_limits = {
+            "retention_seconds": DEFAULT_LIMITS.stale_in_flight_seconds,
+            "completed_grace_seconds": DEFAULT_LIMITS.terminal_recovery_seconds,
+            "upload_ttl_seconds": DEFAULT_LIMITS.upload_after_terminal_seconds,
+            "upload_absolute_seconds": DEFAULT_LIMITS.upload_absolute_seconds,
+            "upload_max_file_bytes": DEFAULT_LIMITS.max_file_bytes,
+            "upload_max_outstanding_bytes_per_installation": DEFAULT_LIMITS.max_outstanding_bytes_per_installation,
+            "upload_max_concurrent": DEFAULT_LIMITS.max_concurrent_uploads,
+            "websocket_max_message_bytes": DEFAULT_LIMITS.max_frame_bytes,
+            "managed_volume_refusal_percent": DEFAULT_LIMITS.managed_volume_refusal_percent,
+        }
+        if any(float(getattr(self, name)) != float(expected) for name, expected in exact_limits.items()):
+            raise ValueError("relay_limit_drift")
+        bound = []
+        for item in self.tokens:
+            bound.append(
+                RelayToken(
+                    name=item.name,
+                    role=item.role,
+                    pairing_id=item.pairing_id,
+                    token=item.token,
+                    installation_id=item.installation_id or self.installation_id,
+                    vault_id=item.vault_id or self.vault_id,
+                    device_id=item.device_id or item.name,
+                    endpoint_audience=item.endpoint_audience or self.endpoint_audience,
+                    revoked=item.revoked,
+                    generation=item.generation,
+                )
+            )
+        self.tokens = bound
 
     @classmethod
     def from_file(cls, path: Path) -> "RelayConfig":
@@ -74,6 +126,12 @@ class RelayConfig:
                 role=str(item["role"]),
                 pairing_id=str(item["pairing_id"]),
                 token=str(item["token"]),
+                installation_id=str(item.get("installation_id") or ""),
+                vault_id=str(item.get("vault_id") or ""),
+                device_id=str(item.get("device_id") or ""),
+                endpoint_audience=str(item.get("endpoint_audience") or ""),
+                revoked=bool(item.get("revoked", False)),
+                generation=int(item.get("generation", 1)),
             )
             for item in data.get("tokens", [])
         ]
@@ -82,25 +140,33 @@ class RelayConfig:
             port=int(data.get("port", 8787)),
             public_base_url=str(data.get("public_base_url", "https://relay.example.invalid")),
             fallback_base_url=str(data.get("fallback_base_url", "")),
+            installation_id=str(data.get("installation_id") or "installation-test"),
+            vault_id=str(data.get("vault_id") or "vault-test"),
+            endpoint_audience=str(data.get("endpoint_audience") or "claudian-remote:local_tailscale:installation-test"),
             presence_ttl_seconds=float(data.get("presence_ttl_seconds", 45)),
             max_events_per_poll=int(data.get("max_events_per_poll", 100)),
             max_stored_events=int(data.get("max_stored_events", 5000)),
             tokens=tokens,
             database_path=str(data.get("database_path", "/var/lib/claudian-remote-relay/relay-v2.db")),
-            enable_v1_compatibility=bool(data.get("enable_v1_compatibility", True)),
+            enable_v1_compatibility=bool(data.get("enable_v1_compatibility", False)),
             allowed_origins=[str(item) for item in data.get("allowed_origins", ["app://obsidian.md", "capacitor://localhost"])],
             ticket_ttl_seconds=float(data.get("ticket_ttl_seconds", 30)),
             ticket_auth_timeout_seconds=float(data.get("ticket_auth_timeout_seconds", 5)),
             websocket_heartbeat_seconds=float(data.get("websocket_heartbeat_seconds", 20)),
-            websocket_max_message_bytes=int(data.get("websocket_max_message_bytes", 256 * 1024)),
+            websocket_max_message_bytes=int(data.get("websocket_max_message_bytes", DEFAULT_LIMITS.max_frame_bytes)),
             client_queue_max_events=int(data.get("client_queue_max_events", 256)),
             client_queue_max_bytes=int(data.get("client_queue_max_bytes", 2 * 1024 * 1024)),
-            retention_seconds=float(data.get("retention_seconds", 24 * 60 * 60)),
-            completed_grace_seconds=float(data.get("completed_grace_seconds", 60 * 60)),
+            retention_seconds=float(data.get("retention_seconds", DEFAULT_LIMITS.stale_in_flight_seconds)),
+            completed_grace_seconds=float(data.get("completed_grace_seconds", DEFAULT_LIMITS.terminal_recovery_seconds)),
             event_store_max_bytes=int(data.get("event_store_max_bytes", 64 * 1024 * 1024)),
             event_store_max_rows=int(data.get("event_store_max_rows", 100_000)),
             upload_root=str(data.get("upload_root", "/var/lib/claudian-remote-relay/uploads")),
-            upload_ttl_seconds=float(data.get("upload_ttl_seconds", 30 * 60)),
+            upload_ttl_seconds=float(data.get("upload_ttl_seconds", DEFAULT_LIMITS.upload_after_terminal_seconds)),
+            upload_absolute_seconds=float(data.get("upload_absolute_seconds", DEFAULT_LIMITS.upload_absolute_seconds)),
+            upload_max_file_bytes=int(data.get("upload_max_file_bytes", DEFAULT_LIMITS.max_file_bytes)),
+            upload_max_outstanding_bytes_per_installation=int(data.get("upload_max_outstanding_bytes_per_installation", DEFAULT_LIMITS.max_outstanding_bytes_per_installation)),
+            upload_max_concurrent=int(data.get("upload_max_concurrent", DEFAULT_LIMITS.max_concurrent_uploads)),
+            managed_volume_refusal_percent=int(data.get("managed_volume_refusal_percent", DEFAULT_LIMITS.managed_volume_refusal_percent)),
             upload_chunk_bytes=min(1024 * 1024, max(1, int(data.get("upload_chunk_bytes", 1024 * 1024)))),
             upload_stream_bytes=min(64 * 1024, max(4096, int(data.get("upload_stream_bytes", 64 * 1024)))),
             upload_reserve_min_bytes=max(0, int(data.get("upload_reserve_min_bytes", 1024 * 1024 * 1024))),

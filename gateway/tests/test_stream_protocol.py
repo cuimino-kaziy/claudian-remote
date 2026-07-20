@@ -76,7 +76,7 @@ def test_role_auth_matrix_does_not_allow_role_confusion():
     assert not authorize_route("POST", "/api/v2/commands", "mac")
     assert authorize_route("GET", "/api/v2/ws/mac", "mac")
     assert not authorize_route("GET", "/api/v2/ws/mac", "mobile")
-    assert authorize_route("GET", "/health", "public")
+    assert authorize_route("GET", "/health", "pairing_admin")
 
 
 def test_v1_is_not_silently_treated_as_v2():

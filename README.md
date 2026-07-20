@@ -51,6 +51,10 @@ integrity root. Depending on the selected mode, users operate Tailscale or a
 user-owned VPS. A VPS terminates TLS and can read Relay plaintext; this beta
 does not claim end-to-end encryption.
 
+Connection-mode security and exact recovery limits are documented in
+[`docs/security.md`](docs/security.md). The narrow user-owned VPS profile is in
+[`docs/self-host-vps.md`](docs/self-host-vps.md).
+
 ## Development gates
 
 ```sh

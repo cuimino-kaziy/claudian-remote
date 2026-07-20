@@ -37,6 +37,7 @@ class ChunkRecord:
 @dataclass
 class UploadSession:
     upload_id: str
+    installation_id: str
     pairing_id: str
     mac_session_id: str
     mac_connection_generation: int
@@ -48,6 +49,7 @@ class UploadSession:
     ready_path: Path
     created_at: float
     updated_at: float
+    terminal_at: Optional[float] = None
     received_bytes: int = 0
     next_index: int = 0
     state: str = "uploading"
@@ -77,6 +79,13 @@ class AcknowledgedUpload:
     expires_at: float
 
 
+@dataclass(frozen=True)
+class ManagedDiskUsage:
+    total: int
+    used: int
+    free: int
+
+
 def normalize_sha256(value: Any) -> str:
     digest = str(value or "").lower()
     if digest.startswith("sha256:"):
@@ -102,6 +111,12 @@ class UploadStore:
         root: Path,
         *,
         ttl_seconds: float = 30 * 60,
+        terminal_ttl_seconds: Optional[float] = None,
+        absolute_ttl_seconds: float = 2 * 60 * 60,
+        max_file_bytes: int = 256 * MIB,
+        max_outstanding_bytes_per_installation: int = 512 * MIB,
+        max_concurrent_uploads: int = 2,
+        managed_volume_refusal_percent: int = 80,
         max_chunk_bytes: int = MIB,
         stream_bytes: int = STREAM_BYTES,
         reserve_min_bytes: int = GIB,
@@ -110,15 +125,22 @@ class UploadStore:
         disk_usage: Callable[[Path], Any] = shutil.disk_usage,
     ) -> None:
         self.root = Path(root)
-        self.ttl_seconds = ttl_seconds
+        self.ttl_seconds = float(ttl_seconds)
+        self.terminal_ttl_seconds = float(ttl_seconds if terminal_ttl_seconds is None else terminal_ttl_seconds)
+        self.absolute_ttl_seconds = float(absolute_ttl_seconds)
+        self.max_file_bytes = int(max_file_bytes)
+        self.max_outstanding_bytes_per_installation = int(max_outstanding_bytes_per_installation)
+        self.max_concurrent_uploads = int(max_concurrent_uploads)
+        self.managed_volume_refusal_percent = int(managed_volume_refusal_percent)
         self.max_chunk_bytes = min(max(1, int(max_chunk_bytes)), MIB)
         self.stream_bytes = min(max(4096, int(stream_bytes)), STREAM_BYTES)
         self.reserve_min_bytes = max(0, int(reserve_min_bytes))
         self.reserve_fraction = max(0.0, min(float(reserve_fraction), 0.90))
         self.clock = clock
         self.disk_usage = disk_usage
+        self.watermark_usage = self._managed_usage if disk_usage is shutil.disk_usage else disk_usage
         self._sessions: Dict[str, UploadSession] = {}
-        self._active_by_pairing: Dict[str, str] = {}
+        self._active_by_installation: Dict[str, set[str]] = {}
         self._acknowledged: Dict[str, AcknowledgedUpload] = {}
         self._lock = asyncio.Lock()
 
@@ -130,13 +152,14 @@ class UploadStore:
         async with self._lock:
             sessions = list(self._sessions.values())
             self._sessions.clear()
-            self._active_by_pairing.clear()
+            self._active_by_installation.clear()
             self._acknowledged.clear()
         await asyncio.gather(*(asyncio.to_thread(self._delete_files, item) for item in sessions))
 
     async def begin(
         self,
         *,
+        installation_id: str = "",
         pairing_id: str,
         mac_session_id: str,
         mac_connection_generation: int,
@@ -149,17 +172,27 @@ class UploadStore:
             raise UploadError("invalid_upload_binding")
         if isinstance(total_bytes, bool) or not isinstance(total_bytes, int) or total_bytes < 0:
             raise UploadError("invalid_total_bytes")
+        if total_bytes > self.max_file_bytes:
+            raise UploadError("file_too_large", 413)
+        installation = str(installation_id or pairing_id)
         name = safe_display_name(display_name)
         digest = normalize_sha256(sha256)
         mime = str(content_type or "application/octet-stream")[:255]
         async with self._lock:
             await self._cleanup_expired_locked(self.clock())
-            if pairing_id in self._active_by_pairing:
-                raise UploadError("upload_already_active", 409)
+            active = self._active_by_installation.get(installation, set())
+            if len(active) >= self.max_concurrent_uploads:
+                raise UploadError("upload_concurrency_limit", 429)
+            outstanding = sum(
+                item.total_bytes for item in self._sessions.values() if item.installation_id == installation
+            )
+            if outstanding + total_bytes > self.max_outstanding_bytes_per_installation:
+                raise UploadError("installation_upload_quota", 413)
             await asyncio.to_thread(self._assert_disk_space, total_bytes)
             upload_id = str(uuid.uuid4())
             session = UploadSession(
                 upload_id=upload_id,
+                installation_id=installation,
                 pairing_id=pairing_id,
                 mac_session_id=mac_session_id,
                 mac_connection_generation=mac_connection_generation,
@@ -174,7 +207,7 @@ class UploadStore:
             )
             await asyncio.to_thread(self._create_part, session.part_path)
             self._sessions[upload_id] = session
-            self._active_by_pairing[pairing_id] = upload_id
+            self._active_by_installation.setdefault(installation, set()).add(upload_id)
             return session.public()
 
     async def append_chunk(
@@ -380,19 +413,34 @@ class UploadStore:
         async with self._lock:
             return await self._cleanup_expired_locked(self.clock())
 
+    async def mark_terminal(self, pairing_id: str, *, now: Optional[float] = None) -> int:
+        terminal_at = self.clock() if now is None else float(now)
+        async with self._lock:
+            matches = [item for item in self._sessions.values() if item.pairing_id == pairing_id]
+            for item in matches:
+                item.terminal_at = terminal_at
+            return len(matches)
+
     async def stats(self) -> Dict[str, int]:
         async with self._lock:
             usage = await asyncio.to_thread(self.disk_usage, self.root)
             reserve = max(self.reserve_min_bytes, int(usage.total * self.reserve_fraction))
             return {
                 "active": len(self._sessions),
-                "bytes": sum(item.received_bytes for item in self._sessions.values()),
+                "bytes": sum(item.total_bytes for item in self._sessions.values()),
                 "disk_free_bytes": int(usage.free),
                 "disk_reserve_bytes": reserve,
             }
 
     async def _cleanup_expired_locked(self, now: float) -> int:
-        expired = [item for item in self._sessions.values() if now - item.updated_at >= self.ttl_seconds]
+        expired = [
+            item for item in self._sessions.values()
+            if now - item.created_at >= self.absolute_ttl_seconds
+            or (
+                item.terminal_at is not None
+                and now - item.terminal_at >= self.terminal_ttl_seconds
+            )
+        ]
         for item in expired:
             await self._remove_locked(item)
         self._acknowledged = {
@@ -415,15 +463,33 @@ class UploadStore:
 
     async def _remove_locked(self, session: UploadSession) -> None:
         self._sessions.pop(session.upload_id, None)
-        if self._active_by_pairing.get(session.pairing_id) == session.upload_id:
-            self._active_by_pairing.pop(session.pairing_id, None)
+        active = self._active_by_installation.get(session.installation_id)
+        if active is not None:
+            active.discard(session.upload_id)
+            if not active:
+                self._active_by_installation.pop(session.installation_id, None)
         await asyncio.to_thread(self._delete_files, session)
 
     def _assert_disk_space(self, incoming_bytes: int) -> None:
+        managed = self.watermark_usage(self.root)
+        projected_used = int(managed.used) + max(0, int(incoming_bytes))
+        if projected_used * 100 >= int(managed.total) * self.managed_volume_refusal_percent:
+            raise UploadError("managed_volume_watermark", 507)
         usage = self.disk_usage(self.root)
         reserve = max(self.reserve_min_bytes, int(usage.total * self.reserve_fraction))
         if int(usage.free) - max(0, int(incoming_bytes)) < reserve:
             raise UploadError("insufficient_storage", 507)
+
+    def _managed_usage(self, _root: Path) -> Any:
+        # The managed volume is the owned upload spool, not the user's entire
+        # system disk. Physical free space is checked separately below.
+        used = sum(item.stat().st_size for item in self.root.iterdir() if item.is_file())
+        total = max(
+            1,
+            (self.max_outstanding_bytes_per_installation * 100)
+            // self.managed_volume_refusal_percent,
+        )
+        return ManagedDiskUsage(total, used, max(0, total - used))
 
     def _prepare_root_and_remove_orphans(self) -> None:
         self.root.mkdir(parents=True, exist_ok=True)

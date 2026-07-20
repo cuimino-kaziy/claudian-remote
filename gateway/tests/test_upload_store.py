@@ -115,7 +115,7 @@ async def test_multichunk_duplicate_finalize_atomic_ack_and_opaque_paths(tmp_pat
 
 
 @pytest.mark.asyncio
-async def test_single_active_dynamic_disk_reserve_and_no_product_size_cap(tmp_path):
+async def test_concurrent_uploads_dynamic_disk_reserve_and_product_size_cap(tmp_path):
     disk = {"value": usage()}
     store = await UploadStore(
         tmp_path / "spool",
@@ -123,28 +123,22 @@ async def test_single_active_dynamic_disk_reserve_and_no_product_size_cap(tmp_pa
         reserve_min_bytes=GIB,
         reserve_fraction=0.10,
     ).start()
-    huge = await store.begin(
-        pairing_id="room-a",
-        mac_session_id="session-a",
-        mac_connection_generation=1,
-        display_name="huge.bin",
-        content_type="application/octet-stream",
-        total_bytes=2 * GIB,
-        sha256="a" * 64,
-    )
-    with pytest.raises(UploadError, match="upload_already_active"):
-        await begin(store, b"other")
-    await store.abort(huge["upload_id"], "room-a")
+    with pytest.raises(UploadError, match="file_too_large"):
+        await store.begin(
+            pairing_id="room-a", mac_session_id="session-a", mac_connection_generation=1,
+            display_name="huge.bin", content_type="application/octet-stream",
+            total_bytes=2 * GIB, sha256="a" * 64,
+        )
 
     disk["value"] = usage(total=20 * GIB, free=2 * GIB)
-    with pytest.raises(UploadError, match="insufficient_storage") as error:
+    with pytest.raises(UploadError, match="managed_volume_watermark") as error:
         await begin(store, b"x" * MIB)
     assert error.value.status == 507
 
     disk["value"] = usage()
     active = await begin(store, b"x" * MIB)
     disk["value"] = usage(total=20 * GIB, free=2 * GIB - 1)
-    with pytest.raises(UploadError, match="insufficient_storage"):
+    with pytest.raises(UploadError, match="managed_volume_watermark"):
         await store.append_chunk(
             active["upload_id"], pairing_id="room-a", mac_session_id="session-a",
             mac_connection_generation=1, index=0, offset=0,
@@ -183,6 +177,7 @@ async def test_conflict_hash_ttl_binding_and_restart_orphans_are_removed(tmp_pat
     assert not list(root.iterdir())
 
     expiring = await begin(store, data)
+    await store.mark_terminal("room-a", now=10.0)
     now[0] = 41.0
     assert await store.cleanup_expired() == 1
     assert not list(root.iterdir())

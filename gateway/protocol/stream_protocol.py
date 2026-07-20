@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, Mapping, Optional, Set
 PROTOCOL = "claudian.remote.v2"
 WS_SUBPROTOCOL = PROTOCOL
 MAX_EVENT_BYTES = 64 * 1024
-MAX_FRAME_BYTES = 256 * 1024
+MAX_FRAME_BYTES = 1024 * 1024
 
 
 class ProtocolError(ValueError):
@@ -78,7 +78,10 @@ ROUTE_AUTH_MATRIX = {
     ("POST", "/api/v2/commands"): {"mobile"},
     ("POST", "/api/v2/uploads"): {"mobile"},
     ("GET", "/api/v2/uploads"): {"mac"},
-    ("GET", "/health"): {"public"},
+    ("GET", "/health"): {"pairing_admin"},
+    ("POST", "/api/v2/pairing/claims"): {"pairing_admin"},
+    ("POST", "/api/v2/pairing/redeem"): {"pairing_claim"},
+    ("POST", "/api/v2/pairing/approve"): {"pairing_admin"},
 }
 
 _BASE_EVENT_KEYS = {

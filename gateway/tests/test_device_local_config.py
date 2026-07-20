@@ -92,3 +92,45 @@ def test_production_runtime_config_is_loopback_bridge_only(tmp_path):
     assert config.bridge_credential == "bridge-secret"
     assert not hasattr(config, "adapter_base_url")
     assert config.resolved_relay_ws_url() == "wss://relay.example.invalid/api/v2/ws/mac"
+
+
+def test_companion_consumes_authoritative_connection_profile_and_matching_credential_ref(tmp_path):
+    profile = tmp_path / "connection-profile.json"
+    profile.write_text(json.dumps({
+        "schema_version": 1,
+        "mode": "local_tailscale",
+        "installation_id": "installation-a",
+        "vault_id": "vault-a",
+        "endpoint": "https://mac.tailnet.ts.net",
+        "endpoint_audience": "claudian-remote:local_tailscale:installation-a",
+        "companion_credential_ref": "installation-a:local_tailscale:companion",
+        "mobile_credential_ref": "installation-a:local_tailscale:mobile",
+        "cursor": 0,
+        "epoch": "epoch-a",
+    }), encoding="utf-8")
+    path = tmp_path / "config.json"
+    path.write_text(json.dumps({
+        "connection_profile_path": str(profile),
+        "relay_token_ref": "installation-a:local_tailscale:companion",
+        "pairing_id": "installation-a",
+        "bridge_credential_ref": "installation-a:bridge",
+    }), encoding="utf-8")
+    config = CompanionRuntimeConfig.from_file(path, InMemoryKeychain({
+        "installation-a:local_tailscale:companion": "relay-secret",
+        "installation-a:bridge": "bridge-secret",
+    }))
+    config.validate()
+    assert config.relay_base_url == "https://mac.tailnet.ts.net"
+    assert config.connection_mode == "local_tailscale"
+    assert config.installation_id == "installation-a"
+    assert config.vault_id == "vault-a"
+    assert config.endpoint_audience == "claudian-remote:local_tailscale:installation-a"
+
+    document = json.loads(path.read_text())
+    document["relay_token_ref"] = "installation-a:remote_vps:companion"
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(KeychainError, match="profile_credential_binding_mismatch"):
+        CompanionRuntimeConfig.from_file(path, InMemoryKeychain({
+            "installation-a:remote_vps:companion": "wrong",
+            "installation-a:bridge": "bridge-secret",
+        }))
