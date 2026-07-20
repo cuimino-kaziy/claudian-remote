@@ -166,3 +166,34 @@ test("built mobile bundle has no top-level Node or Electron import", () => {
   assert.equal(bundle.includes('require("node:'), false);
   assert.equal(/(?:^|;)var [A-Za-z_$][\w$]*=require\("(?:fs|path|crypto|child_process|net|tls|http|https|os)"\)/.test(bundle), false);
 });
+
+test("beta plugin and companion assets have no Local REST transport dependency", () => {
+  execFileSync(process.execPath, ["esbuild.config.mjs", "production"], { cwd: root, stdio: "pipe" });
+  const bundle = readFileSync(join(root, "main.js"), "utf8");
+  assert.equal(bundle.includes("obsidian-local-rest-api"), false);
+  assert.equal(bundle.includes("/claudian-remote/v2/events"), false);
+  assert.equal(bundle.includes("LocalSseHub"), false);
+  const config = readFileSync(join(root, "gateway/mac_companion/config.example.json"), "utf8");
+  assert.equal(config.includes("adapter_base_url"), false);
+  assert.equal(config.includes("adapter_token"), false);
+  assert.equal(config.includes("bridge_sse_path"), false);
+});
+
+test("packaged Companion contains only the loopback Bridge production runtime", () => {
+  execFileSync("sh", ["release/packaging/build-assets.sh"], { cwd: root, stdio: "pipe" });
+  const asset = join(root, "dist", `claudian-remote-companion-${pluginManifest.version}.tar.gz`);
+  const listing = execFileSync("tar", ["-tzf", asset], { encoding: "utf8" });
+  assert.equal(listing.includes("__pycache__"), false);
+  assert.equal(listing.includes("companion.py"), false);
+  assert.equal(listing.includes("sse_client.py"), false);
+  const paths = [
+    "./gateway/mac_companion/config.example.json",
+    "./gateway/mac_companion/runner.py",
+    "./gateway/mac_companion/stream_pump.py"
+  ];
+  const contents = paths.map((entry) => execFileSync("tar", ["-xOzf", asset, entry], { encoding: "utf8" })).join("\n");
+  for (const forbidden of [
+    "obsidian-local-rest-api", "adapter_base_url", "adapter_token",
+    "bridge_sse_path", "/claudian-remote/v2/events", "LocalBridgeV2Client"
+  ]) assert.equal(contents.includes(forbidden), false, `forbidden packaged dependency: ${forbidden}`);
+});

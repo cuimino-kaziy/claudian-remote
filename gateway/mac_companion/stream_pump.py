@@ -21,7 +21,7 @@ from typing import Any, Deque, Dict, Mapping, Optional
 import aiohttp
 
 from gateway.mac_companion.relay_ws_client import RelayWSClient, RelayWebSocket
-from gateway.mac_companion.sse_client import BridgeSSEClient
+from gateway.mac_companion.bridge_server import BridgeIdentityStore, CompanionBridgeServer
 from gateway.mac_companion.upload_receiver import UploadReceiveError, UploadReceiver
 from gateway.protocol.compatibility import COMPATIBILITY_SET
 
@@ -199,59 +199,10 @@ class CompanionState:
         temporary.replace(self.path)
 
 
-class LocalBridgeV2Client:
-    def __init__(self, session: aiohttp.ClientSession, base_url: str, token: str, timeout: float = 10.0) -> None:
-        self.session = session
-        self.base_url = base_url.rstrip("/")
-        self.headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
-        self.timeout = aiohttp.ClientTimeout(total=timeout)
-
-    async def _post(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        async with self.session.post(
-            self.base_url + path,
-            json=body,
-            headers=self.headers,
-            timeout=self.timeout,
-        ) as response:
-            response.raise_for_status()
-            value = await response.json()
-            if not isinstance(value, dict):
-                raise ValueError("Bridge response must be an object")
-            return value
-
-    async def bind(
-        self,
-        path: str,
-        session_id: str,
-        generation: int,
-        compatibility: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        return await self._post(path, {
-            "mac_session_id": session_id,
-            "mac_connection_generation": generation,
-            "compatibility": dict(compatibility or COMPATIBILITY_SET),
-        })
-
-    async def invalidate(self, path: str, session_id: str, generation: int) -> Dict[str, Any]:
-        return await self._post(path, {
-            "mac_session_id": session_id,
-            "mac_connection_generation": generation,
-        })
-
-    async def command(self, path: str, command: Dict[str, Any]) -> Dict[str, Any]:
-        return await self._post(path, command)
-
-    async def keyframe(self, path: str) -> Dict[str, Any]:
-        return await self._post(path, {})
-
-    async def import_upload(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
-        return await self._post(path, body)
-
-
 class CommandDispatcher:
     """Generation gate and bounded idempotency cache for live commands."""
 
-    def __init__(self, bridge: LocalBridgeV2Client, path: str, session_id: str, max_results: int = 1024) -> None:
+    def __init__(self, bridge: Any, path: str, session_id: str, max_results: int = 1024) -> None:
         self.bridge = bridge
         self.path = path
         self.session_id = session_id
@@ -320,7 +271,7 @@ class AsyncMacCompanion:
     async def stop(self) -> None:
         self.stop_event.set()
 
-    async def _event_pump(self, sse: BridgeSSEClient, bridge: LocalBridgeV2Client, generation: int) -> None:
+    async def _event_pump(self, sse: Any, bridge: Any, generation: int) -> None:
         async for message in sse.events(self.state.last_bridge_event_id):
             if generation != self.connection_generation:
                 return
@@ -356,7 +307,7 @@ class AsyncMacCompanion:
     async def _reader(
         self,
         socket: RelayWebSocket,
-        bridge: LocalBridgeV2Client,
+        bridge: Any,
         generation: int,
         commands: "asyncio.Queue[Dict[str, Any]]",
         uploads: Optional["asyncio.Queue[Dict[str, Any]]"] = None,
@@ -443,7 +394,7 @@ class AsyncMacCompanion:
     async def _upload_worker(
         self,
         receiver: UploadReceiver,
-        bridge: LocalBridgeV2Client,
+        bridge: Any,
         generation: int,
         uploads: "asyncio.Queue[Dict[str, Any]]",
     ) -> None:
@@ -507,8 +458,8 @@ class AsyncMacCompanion:
     async def run_connection(
         self,
         socket: RelayWebSocket,
-        bridge: LocalBridgeV2Client,
-        sse: BridgeSSEClient,
+        bridge: Any,
+        sse: Any,
         upload_receiver: Optional[UploadReceiver] = None,
     ) -> None:
         self.connection_generation += 1
@@ -573,53 +524,52 @@ class AsyncMacCompanion:
 
     async def run_forever(self) -> None:
         delay = self.config.reconnect_min_seconds
-        async with self.session_factory() as session:
-            bridge = LocalBridgeV2Client(
-                session,
-                self.config.adapter_base_url,
-                self.config.adapter_token,
-                self.config.request_timeout_seconds,
-            )
-            sse = BridgeSSEClient(
-                session,
-                self.config.adapter_base_url,
-                self.config.adapter_token,
-                self.config.bridge_sse_path,
-            )
-            relay = RelayWSClient(
-                session,
-                self.config.resolved_relay_ws_url(),
-                self.config.relay_token,
-                self.config.relay_heartbeat_seconds,
-            )
-            upload_receiver = await UploadReceiver(
-                session,
-                self.config.relay_base_url,
-                self.config.relay_token,
-                Path(self.config.upload_temp_dir),
-                stream_bytes=self.config.upload_stream_bytes,
-            ).start()
-            while not self.stop_event.is_set():
-                socket: Optional[RelayWebSocket] = None
-                try:
-                    socket = await relay.connect()
-                    await self.run_connection(socket, bridge, sse, upload_receiver)
-                    delay = self.config.reconnect_min_seconds
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    # Log only the failure type; URLs, bodies, tokens and local
-                    # paths are intentionally excluded.
-                    print(f"companion_v2_reconnect error_type={type(exc).__name__}")
-                finally:
-                    if socket:
-                        with contextlib.suppress(Exception):
-                            await socket.close()
-                if not self.stop_event.is_set():
+        identities = BridgeIdentityStore()
+        identities.issue(self.config.bridge_credential_id, self.config.bridge_credential)
+        bridge = CompanionBridgeServer(
+            host=self.config.bridge_host,
+            port=self.config.bridge_port,
+            identities=identities,
+        )
+        await bridge.start()
+        try:
+            async with self.session_factory() as session:
+                relay = RelayWSClient(
+                    session,
+                    self.config.resolved_relay_ws_url(),
+                    self.config.relay_token,
+                    self.config.relay_heartbeat_seconds,
+                )
+                upload_receiver = await UploadReceiver(
+                    session,
+                    self.config.relay_base_url,
+                    self.config.relay_token,
+                    Path(self.config.upload_temp_dir),
+                    stream_bytes=self.config.upload_stream_bytes,
+                ).start()
+                while not self.stop_event.is_set():
+                    socket: Optional[RelayWebSocket] = None
                     try:
-                        await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
-                    except asyncio.TimeoutError:
-                        pass
-                    delay = min(self.config.reconnect_max_seconds, max(delay * 2, self.config.reconnect_min_seconds))
-            await upload_receiver.cleanup_all()
+                        socket = await relay.connect()
+                        await self.run_connection(socket, bridge, bridge, upload_receiver)
+                        delay = self.config.reconnect_min_seconds
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        # Log only the failure type; URLs, bodies, tokens and local
+                        # paths are intentionally excluded.
+                        print(f"companion_v2_reconnect error_type={type(exc).__name__}")
+                    finally:
+                        if socket:
+                            with contextlib.suppress(Exception):
+                                await socket.close()
+                    if not self.stop_event.is_set():
+                        try:
+                            await asyncio.wait_for(self.stop_event.wait(), timeout=delay)
+                        except asyncio.TimeoutError:
+                            pass
+                        delay = min(self.config.reconnect_max_seconds, max(delay * 2, self.config.reconnect_min_seconds))
+                await upload_receiver.cleanup_all()
+        finally:
+            await bridge.close()
         await self.outbound.close()

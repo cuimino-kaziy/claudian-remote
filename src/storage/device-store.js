@@ -42,7 +42,7 @@ export class DeviceStore {
   }
 
   clearRemoteState({ includeMigration = false } = {}) {
-    const names = ["identity", "local-preferences", "recovery", "offline-cache"];
+    const names = ["identity", "bridge-identity", "local-preferences", "recovery", "offline-cache"];
     if (includeMigration) names.push("migration");
     return names.map((name) => this.remove(name)).every(Boolean);
   }

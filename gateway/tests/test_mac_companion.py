@@ -220,7 +220,7 @@ def test_file_config_keeps_request_timeout_longer_than_poll_timeout(tmp_path):
         "relay_token_ref": "relay",
         "pairing_id": "room-a",
         "adapter_base_url": "http://127.0.0.1:27123",
-        "adapter_token_ref": "bridge",
+        "bridge_credential_ref": "bridge",
         "poll_timeout_seconds": 15,
         "request_timeout_seconds": 10,
     }

@@ -128,3 +128,14 @@ test("revocation and purge clear cache while keeping ordinary synchronized prefe
   assert.equal(deviceStore.read("offline-cache"), null);
   assert.equal(deviceStore.read("recovery"), null);
 });
+
+test("full device-local purge removes the Companion bridge identity", () => {
+  const deviceStore = new DeviceStore({ storage: memoryStorage(), namespace: "mac" });
+  deviceStore.write("bridge-identity", {
+    credential_id: "bridge-credential",
+    secret: "bridge-secret"
+  });
+
+  assert.equal(deviceStore.clearRemoteState({ includeMigration: true }), true);
+  assert.equal(deviceStore.read("bridge-identity"), null);
+});

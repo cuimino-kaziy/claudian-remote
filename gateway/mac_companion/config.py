@@ -11,12 +11,16 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import json
+import urllib.parse
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, Mapping, Optional, Protocol
 
 
 SERVICE = "com.claudian.remote"
 REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-SECRET_FIELDS = ("relay_token", "adapter_token", "payload_secret")
+SECRET_FIELDS = ("relay_token", "bridge_credential", "adapter_token", "payload_secret")
 
 
 class KeychainError(RuntimeError):
@@ -104,7 +108,7 @@ def load_secret_fields(data: Mapping[str, object], keychain: Keychain) -> Dict[s
         if data.get(field):
             raise KeychainError("plaintext credential is forbidden in public config")
     resolved: Dict[str, str] = {}
-    for field in ("relay_token", "adapter_token"):
+    for field in ("relay_token", "bridge_credential"):
         reference = str(data.get(field + "_ref") or "")
         if not reference:
             raise KeychainError("missing secret reference")
@@ -112,3 +116,68 @@ def load_secret_fields(data: Mapping[str, object], keychain: Keychain) -> Dict[s
     payload_reference = str(data.get("payload_secret_ref") or "")
     resolved["payload_secret"] = keychain.get(payload_reference) if payload_reference else ""
     return resolved
+
+
+@dataclass
+class CompanionRuntimeConfig:
+    relay_base_url: str
+    relay_token: str
+    pairing_id: str
+    bridge_credential: str
+    bridge_credential_id: str = "installation-bridge"
+    bridge_host: str = "127.0.0.1"
+    bridge_port: int = 27124
+    relay_ws_url: str = ""
+    payload_secret: str = ""
+    request_timeout_seconds: float = 30.0
+    v2_state_path: str = ""
+    bridge_command_path: str = "command.execute"
+    bridge_bind_path: str = "transport.bind"
+    bridge_invalidate_path: str = "transport.invalidate"
+    bridge_keyframe_path: str = "keyframe.request"
+    bridge_import_path: str = "upload.import"
+    upload_temp_dir: str = ""
+    upload_stream_bytes: int = 64 * 1024
+    outbound_max_events: int = 256
+    outbound_max_bytes: int = 2 * 1024 * 1024
+    relay_heartbeat_seconds: float = 20.0
+    reconnect_min_seconds: float = 0.25
+    reconnect_max_seconds: float = 10.0
+
+    @classmethod
+    def from_file(cls, path: Path, keychain: Optional[Keychain] = None) -> "CompanionRuntimeConfig":
+        data = json.loads(path.read_text(encoding="utf-8"))
+        values = load_secret_fields(data, keychain or MacOSKeychain())
+        return cls(
+            relay_base_url=str(data.get("relay_base_url") or "").rstrip("/"),
+            relay_token=values["relay_token"],
+            pairing_id=str(data.get("pairing_id") or ""),
+            bridge_credential=values["bridge_credential"],
+            bridge_credential_id=str(data.get("bridge_credential_id") or "installation-bridge"),
+            bridge_host=str(data.get("bridge_host") or "127.0.0.1"),
+            bridge_port=int(data.get("bridge_port") or 27124),
+            relay_ws_url=str(data.get("relay_ws_url") or ""),
+            payload_secret=values["payload_secret"],
+            request_timeout_seconds=float(data.get("request_timeout_seconds") or 30),
+            v2_state_path=str(data.get("v2_state_path") or path.with_name("companion_state_v2.json")),
+            upload_temp_dir=str(data.get("upload_temp_dir") or path.with_name("upload_temp")),
+            upload_stream_bytes=min(64 * 1024, max(4096, int(data.get("upload_stream_bytes") or 64 * 1024))),
+            outbound_max_events=max(16, int(data.get("outbound_max_events") or 256)),
+            outbound_max_bytes=max(64 * 1024, int(data.get("outbound_max_bytes") or 2 * 1024 * 1024)),
+            relay_heartbeat_seconds=float(data.get("relay_heartbeat_seconds") or 20),
+            reconnect_min_seconds=max(0.05, float(data.get("reconnect_min_seconds") or 0.25)),
+            reconnect_max_seconds=max(0.25, float(data.get("reconnect_max_seconds") or 10)),
+        )
+
+    def validate(self) -> None:
+        if not self.relay_base_url or not self.relay_token or not self.pairing_id or not self.bridge_credential:
+            raise KeychainError("missing companion runtime configuration")
+        if self.bridge_host != "127.0.0.1" or self.bridge_port != 27124:
+            raise KeychainError("invalid loopback Bridge configuration")
+
+    def resolved_relay_ws_url(self) -> str:
+        if self.relay_ws_url:
+            return self.relay_ws_url
+        parsed = urllib.parse.urlsplit(self.relay_base_url)
+        scheme = "wss" if parsed.scheme == "https" else "ws"
+        return urllib.parse.urlunsplit((scheme, parsed.netloc, "/api/v2/ws/mac", "", ""))

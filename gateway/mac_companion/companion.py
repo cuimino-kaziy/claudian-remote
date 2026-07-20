@@ -38,8 +38,14 @@ class CompanionConfig:
     relay_base_url: str
     relay_token: str
     pairing_id: str
-    adapter_base_url: str
-    adapter_token: str
+    bridge_credential: str = ""
+    bridge_credential_id: str = "installation-bridge"
+    bridge_host: str = "127.0.0.1"
+    bridge_port: int = 27124
+    # Development-only rollback fields. The beta runner does not consume them
+    # and the public config never contains them.
+    adapter_base_url: str = ""
+    adapter_token: str = ""
     payload_secret: str = ""
     poll_timeout_seconds: float = 15.0
     poll_interval_seconds: float = 2.0
@@ -73,8 +79,10 @@ class CompanionConfig:
             relay_base_url=str(data.get("relay_base_url", "")).rstrip("/"),
             relay_token=secrets["relay_token"],
             pairing_id=str(data.get("pairing_id", "")),
-            adapter_base_url=str(data.get("adapter_base_url", "")).rstrip("/"),
-            adapter_token=secrets["adapter_token"],
+            bridge_credential=secrets["bridge_credential"],
+            bridge_credential_id=str(data.get("bridge_credential_id") or "installation-bridge"),
+            bridge_host=str(data.get("bridge_host") or "127.0.0.1"),
+            bridge_port=int(data.get("bridge_port") or 27124),
             payload_secret=secrets["payload_secret"],
             poll_timeout_seconds=poll_timeout_seconds,
             poll_interval_seconds=float(data.get("poll_interval_seconds", 2)),
@@ -83,12 +91,11 @@ class CompanionConfig:
             state_path=str(data.get("state_path") or path.with_name("companion_state.json")),
             v2_state_path=str(data.get("v2_state_path") or path.with_name("companion_state_v2.json")),
             relay_ws_url=str(data.get("relay_ws_url") or ""),
-            bridge_sse_path=str(data.get("bridge_sse_path") or "/claudian-remote/v2/events"),
-            bridge_command_path=str(data.get("bridge_command_path") or "/claudian-remote/v2/command"),
-            bridge_bind_path=str(data.get("bridge_bind_path") or "/claudian-remote/v2/transport/bind"),
-            bridge_invalidate_path=str(data.get("bridge_invalidate_path") or "/claudian-remote/v2/transport/invalidate"),
-            bridge_keyframe_path=str(data.get("bridge_keyframe_path") or "/claudian-remote/v2/keyframe"),
-            bridge_import_path=str(data.get("bridge_import_path") or "/claudian-remote/v2/import"),
+            bridge_command_path="command.execute",
+            bridge_bind_path="transport.bind",
+            bridge_invalidate_path="transport.invalidate",
+            bridge_keyframe_path="keyframe.request",
+            bridge_import_path="upload.import",
             upload_temp_dir=str(data.get("upload_temp_dir") or path.with_name("upload_temp")),
             upload_stream_bytes=min(64 * 1024, max(4096, int(data.get("upload_stream_bytes", 64 * 1024)))),
             outbound_max_events=max(16, int(data.get("outbound_max_events", 256))),
@@ -107,14 +114,14 @@ class CompanionConfig:
         return urllib.parse.urlunsplit((scheme, parsed.netloc, "/api/v2/ws/mac", "", ""))
 
     def validate(self) -> None:
+        bridge_credential = self.bridge_credential or self.adapter_token
         missing = [
             name
             for name, value in [
                 ("relay_base_url", self.relay_base_url),
                 ("relay_token", self.relay_token),
                 ("pairing_id", self.pairing_id),
-                ("adapter_base_url", self.adapter_base_url),
-                ("adapter_token", self.adapter_token),
+                ("bridge_credential", bridge_credential),
             ]
             if not value
         ]

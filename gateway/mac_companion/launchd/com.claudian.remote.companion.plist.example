@@ -8,7 +8,7 @@
   <array>
     <string>/absolute/path/to/zhouhuan/gateway/.venv/bin/python</string>
     <string>-m</string>
-    <string>gateway.mac_companion.companion</string>
+    <string>gateway.mac_companion.runner</string>
     <string>--config</string>
     <string>/absolute/path/to/zhouhuan/gateway/mac_companion/config.json</string>
   </array>

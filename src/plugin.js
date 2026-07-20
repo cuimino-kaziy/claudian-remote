@@ -1,6 +1,9 @@
 import { Platform, Plugin, PluginSettingTab, Setting } from "obsidian";
-import { DesktopAdapter } from "./desktop-adapter.js";
-import { LocalSseHub } from "./local-sse.js";
+import { DesktopAdapter } from "./desktop/adapter.js";
+import {
+  CompanionChannel,
+  DesktopBridgeRouter
+} from "./desktop/companion-channel.js";
 import { SourceCapture, discoverClaudianTabs } from "./source-capture.js";
 import { SemanticStreamNormalizer } from "./stream-normalizer.js";
 import { ClaudianRemoteMobileView, MOBILE_VIEW_TYPE } from "./mobile/view.js";
@@ -17,13 +20,6 @@ import { sanitizeSyncPreferences } from "./storage/sync-preferences.js";
 
 function id(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
-}
-
-function json(response, status, body) {
-  response.status?.(status);
-  response.statusCode = status;
-  response.json?.(body);
-  if (!response.json) response.end?.(JSON.stringify(body));
 }
 
 class RemoteSettingsTab extends PluginSettingTab {
@@ -69,24 +65,21 @@ export default class ClaudianRemotePlugin extends Plugin {
     this.addSettingTab(new RemoteSettingsTab(this.app, this));
     if (Platform.isMobileApp) this.addRibbonIcon("message-circle", "Claudian Remote", () => void this.openMobileView());
     if (Platform.isMobileApp) return;
-    this.sse = new LocalSseHub();
     this.normalizer = new SemanticStreamNormalizer({
       sourceInstanceId: id("bridge"),
       exactSecrets: this.sourceFirewallSecrets(),
-      emit: (event) => this.sse.publish(event)
+      emit: (event) => this.companionChannel?.publish(event)
     });
     this.refreshRuntime();
     this.registerEvent(this.app.workspace.on("layout-change", () => this.refreshRuntime()));
     this.registerEvent(this.app.workspace.on("active-leaf-change", () => this.refreshRuntime()));
-    this.registerEvent(this.app.workspace.on("obsidian-local-rest-api:loaded", () => this.registerRoutes()));
     this.registerInterval(globalThis.setInterval(() => this.refreshRuntime(), 2000));
-    this.registerRoutes();
   }
 
   onunload() {
     this.capture?.unload();
     this.adapter?.unload?.();
-    this.sse?.closeAll();
+    this.companionChannel?.disconnect();
     this.normalizer?.dispose();
   }
 
@@ -150,7 +143,8 @@ export default class ClaudianRemotePlugin extends Plugin {
   }
 
   sourceFirewallSecrets() {
-    return new Set([this.settings?.mobile_token].filter(Boolean));
+    const bridge = this.deviceStore?.read("bridge-identity") || {};
+    return new Set([this.settings?.mobile_token, bridge.secret].filter(Boolean));
   }
 
   recoverySeed() {
@@ -208,6 +202,29 @@ export default class ClaudianRemotePlugin extends Plugin {
         claudian, capture: this.capture, getActiveTab: () => this.getActiveTab(),
         macSessionId: null, connectionGeneration: null
       });
+      this.companionChannel?.disconnect();
+      this.bridgeRouter = new DesktopBridgeRouter({
+        adapter: this.adapter,
+        capture: this.capture,
+        getActiveTab: () => this.getActiveTab(),
+        evaluateCompatibility: evaluateCompatibilitySet,
+        componentSet: COMPATIBILITY_SET,
+        importUpload: async (body) => {
+          const tab = this.getActiveTab();
+          if (!tab) throw new Error("active_claudian_tab_required");
+          const result = await importFileIntoVault({ app: this.app, body, directory: this.settings.upload_directory });
+          const conversationId = tab?.conversationId || tab?.state?.currentConversationId || "conversation-pending";
+          const turnId = tab?.state?.remoteTurnId || `turn-${conversationId}`;
+          await this.normalizer.emit("artifact.available", { conversationId, turnId }, result);
+          return result;
+        }
+      });
+      this.companionChannel = new CompanionChannel({
+        credentialProvider: async () => this.deviceStore.read("bridge-identity"),
+        router: this.bridgeRouter,
+        diagnostic: (item) => console.warn("Claudian Remote bridge event", item.type)
+      });
+      if (this.deviceStore.read("bridge-identity")) this.companionChannel.connect();
     }
     const tabs = discoverClaudianTabs(claudian);
     this.capture.refresh(tabs);
@@ -222,91 +239,16 @@ export default class ClaudianRemotePlugin extends Plugin {
     }
   }
 
-  registerRoutes() {
-    if (this.routesRegistered) return;
-    const localRest = this.app.plugins?.plugins?.["obsidian-local-rest-api"];
-    if (!localRest?.getPublicApi) return;
-    try {
-      const api = localRest.getPublicApi(this.manifest);
-      api.addRoute("/claudian-remote/v2/events").get((request, response) => {
-        const last = request.headers?.["last-event-id"] || request.get?.("Last-Event-ID") || 0;
-        this.sse.open(response, last);
-      });
-      api.addRoute("/claudian-remote/v2/capabilities").get((_request, response) => {
-        const tab = this.getActiveTab();
-        const compatibility = this.capture?.compatibility(tab);
-        json(response, 200, {
-          ok: true, protocol: "claudian.remote.v2", mac_session_id: this.adapter?.macSessionId || null,
-          mac_connection_generation: this.adapter?.connectionGeneration || null,
-          revision: this.normalizer.revisionFor(tab?.conversationId || tab?.state?.currentConversationId || "conversation-pending"),
-          capabilities: this.capture?.capabilities(tab) || {}, compatibility_mode: Boolean(this.capture?.compatibilityMode),
-          compatibility, component_set: COMPATIBILITY_SET
-        });
-      });
-      api.addRoute("/claudian-remote/v2/transport/bind").post(async (request, response) => {
-        try {
-          const body = request.body || {};
-          const componentCompatibility = evaluateCompatibilitySet(body.compatibility);
-          const binding = this.adapter.bindTransport(body);
-          const tab = this.getActiveTab();
-          if (tab) {
-            this.lastBootstrappedConversationId = tab?.conversationId || tab?.state?.currentConversationId || null;
-            await this.capture.emitBootstrap(tab);
-          }
-          const claudianCompatibility = this.capture?.compatibility(tab);
-          const writable = componentCompatibility.writable && claudianCompatibility?.writable === true;
-          json(response, 200, {
-            ok: true,
-            binding,
-            compatibility: writable ? componentCompatibility : {
-              ...(componentCompatibility.writable ? claudianCompatibility : componentCompatibility),
-              writable: false,
-              mode: "read_only"
-            }
-          });
-        }
-        catch (error) { json(response, 400, { ok: false, error: error?.message || "invalid_transport_binding" }); }
-      });
-      api.addRoute("/claudian-remote/v2/transport/invalidate").post((request, response) => {
-        json(response, 200, { ok: true, invalidated: this.adapter.invalidateTransport(request.body || {}) });
-      });
-      api.addRoute("/claudian-remote/v2/command").post(async (request, response) => {
-        try { json(response, 200, { ok: true, result: await this.adapter.execute(request.body || {}) }); }
-        catch (error) { json(response, 400, { ok: false, error: error?.name || "command_failed" }); }
-      });
-      const keyframeHandler = async (_request, response) => {
-        const tab = this.getActiveTab();
-        if (!tab) return json(response, 503, { ok: false, error: "active_claudian_tab_required" });
-        try {
-          const result = await this.capture.emitBootstrap(tab);
-          json(response, 200, { ok: true, ...result });
-        } catch (error) {
-          json(response, 500, { ok: false, error: error?.name || "keyframe_failed" });
-        }
-      };
-      const keyframeRoute = api.addRoute("/claudian-remote/v2/keyframe");
-      keyframeRoute.get(keyframeHandler);
-      keyframeRoute.post(keyframeHandler);
-      api.addRoute("/claudian-remote/v2/import").post(async (request, response) => {
-        const tab = this.getActiveTab();
-        if (!tab) return json(response, 503, { ok: false, error: "active_claudian_tab_required" });
-        try {
-          const result = await importFileIntoVault({
-            app: this.app,
-            body: request.body || {},
-            directory: this.settings.upload_directory
-          });
-          const conversationId = tab?.conversationId || tab?.state?.currentConversationId || "conversation-pending";
-          const turnId = tab?.state?.remoteTurnId || `turn-${conversationId}`;
-          await this.normalizer.emit("artifact.available", { conversationId, turnId }, result);
-          json(response, 200, { ok: true, result });
-        } catch (error) {
-          json(response, 400, { ok: false, error: error?.message || "vault_import_failed" });
-        }
-      });
-      this.routesRegistered = true;
-    } catch (error) {
-      console.warn("Claudian Remote v2 routes unavailable", error?.name || "Error");
+  installBridgeIdentity(identity, { confirmed = false } = {}) {
+    if (!confirmed || !identity?.credential_id || !identity?.secret) {
+      throw new Error("bridge_bootstrap_not_confirmed");
     }
+    if (!this.deviceStore.write("bridge-identity", {
+      credential_id: String(identity.credential_id),
+      secret: String(identity.secret)
+    })) throw new Error("device_local_persistence_unavailable");
+    this.normalizer?.setExactSecrets(this.sourceFirewallSecrets());
+    this.companionChannel?.connect();
+    return { installed: true };
   }
 }

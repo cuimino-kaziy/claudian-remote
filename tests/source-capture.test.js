@@ -4,7 +4,8 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import vm from "node:vm";
 import test from "node:test";
-import { DesktopAdapter } from "../src/desktop-adapter.js";
+import { DesktopAdapter } from "../src/desktop/adapter.js";
+import { DesktopBridgeRouter } from "../src/desktop/companion-channel.js";
 import { SourceCapture, discoverClaudianTabs, safeKeyframe } from "../src/source-capture.js";
 import { canonicalJson, SemanticStreamNormalizer, sha256 } from "../src/stream-normalizer.js";
 
@@ -76,11 +77,16 @@ test("generated Obsidian entry exports the plugin class directly", () => {
   assert.ok(module.exports.prototype instanceof Plugin);
 });
 
-test("desktop keyframe route emits a complete bootstrap with capabilities", () => {
-  const source = fs.readFileSync(path.resolve(import.meta.dirname, "../src/plugin.js"), "utf8");
-  const handler = source.match(/const keyframeHandler[\s\S]*?const keyframeRoute/)?.[0] || "";
-  assert.match(handler, /capture\.emitBootstrap\(tab\)/);
-  assert.doesNotMatch(handler, /capture\.emitKeyframe\(tab\)/);
+test("desktop loopback keyframe request emits a complete bootstrap with capabilities", async () => {
+  const { tab, claudian, normalizer } = fixture();
+  const capture = new SourceCapture({ claudian, normalizer });
+  const router = new DesktopBridgeRouter({
+    adapter: {}, capture, getActiveTab: () => tab,
+    evaluateCompatibility: () => ({ writable: true }), componentSet: {}, importUpload: async () => ({})
+  });
+  const result = await router.handle("keyframe.request", {});
+  assert.match(result.keyframe_id, /^kf-/);
+  assert.ok(result.checksum.startsWith("sha256:"));
 });
 
 test("post-commit capture observes canonical text and never emits raw thinking", async () => {
