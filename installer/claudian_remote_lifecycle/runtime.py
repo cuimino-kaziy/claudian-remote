@@ -16,6 +16,7 @@ import platform
 import re
 import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.request
@@ -278,8 +279,11 @@ def _safe_extract(archive: Path, destination: Path) -> None:
         # The lifecycle initially runs on the macOS bootstrap Python (3.9 on
         # supported older systems) before it installs the pinned 3.12 runtime.
         # The checks above provide the subset enforced by tarfile's newer data
-        # filter without relying on the Python 3.12-only ``filter`` argument.
-        bundle.extractall(destination)
+        # filter when its Python 3.12-only ``filter`` argument is unavailable.
+        if sys.version_info >= (3, 12):
+            bundle.extractall(destination, filter="data")
+        else:
+            bundle.extractall(destination)
 
 
 def _validate_runtime_distribution(manifest: Mapping[str, Any]) -> None:
