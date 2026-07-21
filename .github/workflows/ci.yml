@@ -32,5 +32,7 @@ jobs:
         run: .ci-venv/bin/pip install --require-hashes -r gateway/requirements.lock
       - name: Test Companion, Relay, and protocol
         run: .ci-venv/bin/python -m pytest gateway/tests -q
-      - name: Build unsigned release assets
-        run: npm run release:package
+      - name: Test lifecycle contract and resume behavior
+        run: .ci-venv/bin/python -m pytest installer/tests -q
+      - name: Build and inspect unsigned release assets
+        run: sh release/packaging/build-assets.sh --assets-only

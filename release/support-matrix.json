@@ -45,7 +45,38 @@
   },
   "runtime": {
     "python": "3.12.11",
-    "uv": "0.10.12"
+    "uv": "0.10.12",
+    "delivery": "private_release_asset",
+    "required_assets": [
+      {
+        "platform": "darwin",
+        "arch": "arm64",
+        "python": {
+          "version": "3.12.11",
+          "url_env": "CLAUDIAN_PYTHON_DARWIN_ARM64_URL",
+          "sha256_env": "CLAUDIAN_PYTHON_DARWIN_ARM64_SHA256"
+        },
+        "uv": {
+          "version": "0.10.12",
+          "url_env": "CLAUDIAN_UV_DARWIN_ARM64_URL",
+          "sha256_env": "CLAUDIAN_UV_DARWIN_ARM64_SHA256"
+        }
+      },
+      {
+        "platform": "darwin",
+        "arch": "x86_64",
+        "python": {
+          "version": "3.12.11",
+          "url_env": "CLAUDIAN_PYTHON_DARWIN_X86_64_URL",
+          "sha256_env": "CLAUDIAN_PYTHON_DARWIN_X86_64_SHA256"
+        },
+        "uv": {
+          "version": "0.10.12",
+          "url_env": "CLAUDIAN_UV_DARWIN_X86_64_URL",
+          "sha256_env": "CLAUDIAN_UV_DARWIN_X86_64_SHA256"
+        }
+      }
+    ]
   },
   "distribution": {
     "allowed_combinations": [

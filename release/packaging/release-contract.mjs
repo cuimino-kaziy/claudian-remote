@@ -7,6 +7,7 @@ export const LEGACY_PLUGIN_ID = "whale-agent-bridge";
 export const REQUIRED_CLAUDIAN_VERSION = "2.0.4";
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMPONENTS = ["plugin", "companion", "relay", "installer"];
+const RUNTIME_TARGETS = ["darwin/arm64", "darwin/x86_64"];
 
 export class ReleaseContractError extends Error {
   constructor(errors) {
@@ -41,6 +42,104 @@ export function publicKeyFingerprint(publicKeyPem) {
   return sha256Bytes(createPublicKey(publicKeyPem).export({ type: "spki", format: "der" }));
 }
 
+function validHttpsAssetUrl(value) {
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:"
+      && parsed.username === ""
+      && parsed.password === ""
+      && parsed.search === ""
+      && parsed.hash === "";
+  } catch {
+    return false;
+  }
+}
+
+export function resolveRuntimeAssets(runtime, environment = process.env) {
+  const errors = [];
+  const assets = [];
+  const required = Array.isArray(runtime?.required_assets) ? runtime.required_assets : [];
+  const targets = new Set();
+
+  for (const target of required) {
+    const key = `${target?.platform}/${target?.arch}`;
+    if (!RUNTIME_TARGETS.includes(key) || targets.has(key)) {
+      errors.push(`invalid or duplicate runtime target: ${key}`);
+      continue;
+    }
+    targets.add(key);
+    const resolved = { platform: target.platform, arch: target.arch };
+    for (const component of ["python", "uv"]) {
+      const descriptor = target?.[component] ?? {};
+      const url = descriptor.url ?? environment[descriptor.url_env ?? ""];
+      const sha256 = descriptor.sha256 ?? environment[descriptor.sha256_env ?? ""];
+      if (descriptor.version !== runtime?.[component]) errors.push(`${key} ${component} version does not match the support matrix`);
+      if (!validHttpsAssetUrl(url)) errors.push(`${key} ${component} runtime asset URL is missing or unsafe`);
+      if (!SHA256.test(sha256 ?? "")) errors.push(`${key} ${component} runtime asset digest is missing or invalid`);
+      resolved[component] = { version: descriptor.version, url, sha256 };
+    }
+    assets.push(resolved);
+  }
+  for (const target of RUNTIME_TARGETS) {
+    if (!targets.has(target)) errors.push(`required runtime target is missing: ${target}`);
+  }
+  if (runtime?.delivery !== "private_release_asset") errors.push("runtime delivery must be private_release_asset");
+  if (errors.length) throw new ReleaseContractError(errors);
+  return assets;
+}
+
+function validateRuntimeDistribution(runtime, matrixRuntime, errors) {
+  if (runtime?.python !== matrixRuntime?.python || runtime?.uv !== matrixRuntime?.uv) {
+    errors.push("runtime versions disagree");
+  }
+  if (runtime?.delivery !== "private_release_asset" || matrixRuntime?.delivery !== "private_release_asset") {
+    errors.push("runtime delivery must be private_release_asset");
+  }
+  const manifestAssets = Array.isArray(runtime?.assets) ? runtime.assets : [];
+  const matrixAssets = Array.isArray(matrixRuntime?.required_assets) ? matrixRuntime.required_assets : [];
+  const manifestByTarget = new Map();
+  const matrixByTarget = new Map();
+  for (const asset of manifestAssets) {
+    const key = `${asset?.platform}/${asset?.arch}`;
+    if (manifestByTarget.has(key)) errors.push(`duplicate runtime target: ${key}`);
+    manifestByTarget.set(key, asset);
+  }
+  for (const descriptor of matrixAssets) {
+    const key = `${descriptor?.platform}/${descriptor?.arch}`;
+    if (matrixByTarget.has(key)) errors.push(`duplicate support-matrix runtime target: ${key}`);
+    matrixByTarget.set(key, descriptor);
+  }
+  for (const key of RUNTIME_TARGETS) {
+    const asset = manifestByTarget.get(key);
+    const descriptor = matrixByTarget.get(key);
+    if (!asset) {
+      errors.push(`required runtime asset is missing: ${key}`);
+      continue;
+    }
+    if (!descriptor) {
+      errors.push(`support-matrix runtime target is missing: ${key}`);
+      continue;
+    }
+    for (const component of ["python", "uv"]) {
+      const value = asset?.[component] ?? {};
+      const expected = descriptor?.[component] ?? {};
+      if (value.version !== matrixRuntime?.[component] || expected.version !== matrixRuntime?.[component]) {
+        errors.push(`${key} ${component} version does not match the support matrix`);
+      }
+      if (!validHttpsAssetUrl(value.url)) errors.push(`${key} ${component} runtime asset URL is missing or unsafe`);
+      if (!SHA256.test(value.sha256 ?? "")) errors.push(`${key} ${component} runtime asset digest is missing or invalid`);
+      if (expected.url && value.url !== expected.url) errors.push(`${key} ${component} runtime asset URL disagrees with the support matrix`);
+      if (expected.sha256 && value.sha256 !== expected.sha256) errors.push(`${key} ${component} runtime asset digest disagrees with the support matrix`);
+    }
+  }
+  for (const key of manifestByTarget.keys()) {
+    if (!RUNTIME_TARGETS.includes(key)) errors.push(`unsupported runtime target: ${key}`);
+  }
+  for (const key of matrixByTarget.keys()) {
+    if (!RUNTIME_TARGETS.includes(key)) errors.push(`unsupported support-matrix runtime target: ${key}`);
+  }
+}
+
 export function validateReleaseContract(manifest, context) {
   const errors = [];
   const compatibility = manifest?.compatibility_set ?? {};
@@ -64,7 +163,7 @@ export function validateReleaseContract(manifest, context) {
   if (compatibility.protocol?.current !== matrix.protocol?.current
     || canonicalJson(compatibility.protocol?.compatible) !== canonicalJson(matrix.protocol?.compatible)
     || canonicalJson(compatibility.protocol?.rollback) !== canonicalJson(matrix.protocol?.rollback)) errors.push("protocol compatibility ranges disagree");
-  if (canonicalJson(compatibility.runtime) !== canonicalJson(matrix.runtime)) errors.push("runtime versions disagree");
+  validateRuntimeDistribution(compatibility.runtime, matrix.runtime, errors);
   if (compatibility.claudian?.exact_version !== REQUIRED_CLAUDIAN_VERSION || matrix.claudian?.exact_version !== REQUIRED_CLAUDIAN_VERSION) errors.push("Claudian 2.0.4 is the only writable beta version");
   if (plugin.minimum_obsidian_version !== matrix.plugin?.minimum_obsidian_version) errors.push("minimum Obsidian versions disagree");
 

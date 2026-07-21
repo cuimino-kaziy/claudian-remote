@@ -8,6 +8,7 @@ import test from "node:test";
 import {
   canonicalJson,
   publicKeyFingerprint,
+  resolveRuntimeAssets,
   sha256Bytes,
   sha256File,
   unsignedManifest,
@@ -19,6 +20,28 @@ const root = resolve(import.meta.dirname, "..");
 const pluginManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
 const versions = JSON.parse(readFileSync(join(root, "versions.json"), "utf8"));
 const supportMatrix = JSON.parse(readFileSync(join(root, "release/support-matrix.json"), "utf8"));
+
+function runtimeFixture() {
+  return {
+    python: supportMatrix.runtime.python,
+    uv: supportMatrix.runtime.uv,
+    delivery: "private_release_asset",
+    assets: supportMatrix.runtime.required_assets.map(({ platform, arch, python, uv }) => ({
+      platform,
+      arch,
+      python: {
+        version: python.version,
+        url: `https://downloads.example.test/${arch}/python.tar.gz`,
+        sha256: sha256Bytes(`python-${arch}`)
+      },
+      uv: {
+        version: uv.version,
+        url: `https://downloads.example.test/${arch}/uv.tar.gz`,
+        sha256: sha256Bytes(`uv-${arch}`)
+      }
+    }))
+  };
+}
 
 function fixture() {
   const directory = mkdtempSync(join(tmpdir(), "claudian-release-contract-"));
@@ -57,7 +80,7 @@ function fixture() {
       protocol: supportMatrix.protocol,
       configuration_schema: supportMatrix.components.configuration_schema,
       claudian: { exact_version: "2.0.4" },
-      runtime: supportMatrix.runtime
+      runtime: runtimeFixture()
     },
     assets,
     signature: { algorithm: "ed25519", key_fingerprint: fingerprint, value: "" }
@@ -121,6 +144,39 @@ test("unsupported Claudian and missing asset digests fail closed", () => {
   assert.throws(() => validateReleaseContract(missingDigest.manifest, missingDigest.context), /asset digest/);
 });
 
+test("both macOS runtime architectures require private HTTPS URLs, digests, and exact versions", () => {
+  const valid = fixture();
+  assert.equal(validateReleaseContract(valid.manifest, valid.context), true);
+
+  for (const mutate of [
+    ({ manifest }) => { manifest.compatibility_set.runtime.assets.pop(); },
+    ({ manifest }) => { manifest.compatibility_set.runtime.assets[0].python.url = "http://downloads.example.test/python.tar.gz"; },
+    ({ manifest }) => { manifest.compatibility_set.runtime.assets[0].python.url = "https://token@downloads.example.test/python.tar.gz"; },
+    ({ manifest }) => { manifest.compatibility_set.runtime.assets[0].uv.sha256 = ""; },
+    ({ manifest }) => { manifest.compatibility_set.runtime.assets[1].python.version = "3.13.0"; }
+  ]) {
+    const subject = fixture();
+    mutate(subject);
+    assert.throws(() => validateReleaseContract(subject.manifest, subject.context), /runtime|support matrix/);
+  }
+});
+
+test("runtime asset preparation fails closed until all release variables are real", () => {
+  assert.throws(
+    () => resolveRuntimeAssets(supportMatrix.runtime, {}),
+    /runtime asset URL is missing or unsafe/
+  );
+  const environment = {};
+  for (const target of supportMatrix.runtime.required_assets) {
+    for (const component of ["python", "uv"]) {
+      environment[target[component].url_env] = `https://downloads.example.test/${target.arch}/${component}.tar.gz`;
+      environment[target[component].sha256_env] = sha256Bytes(`${target.arch}-${component}`);
+    }
+  }
+  const assets = resolveRuntimeAssets(supportMatrix.runtime, environment);
+  assert.deepEqual(assets.map(({ platform, arch }) => `${platform}/${arch}`).sort(), ["darwin/arm64", "darwin/x86_64"]);
+});
+
 test("old plugin id is migration-only and beta update ownership is fixed", () => {
   assert.deepEqual(supportMatrix.plugin.migration_source_ids, ["whale-agent-bridge"]);
   assert.equal(supportMatrix.plugin.legacy_id_may_coexist, false);
@@ -155,6 +211,19 @@ test("release schema and support matrix pin the public contract", () => {
   assert.equal(pluginManifest.id, "claudian-remote");
   assert.equal(versions[pluginManifest.version], pluginManifest.minAppVersion);
   assert.equal(supportMatrix.distribution.allowed_combinations.length, 2);
+  assert.equal(schema.$defs.runtimeDistribution.properties.delivery.const, "private_release_asset");
+  assert.deepEqual(
+    supportMatrix.runtime.required_assets.map(({ platform, arch }) => `${platform}/${arch}`).sort(),
+    ["darwin/arm64", "darwin/x86_64"]
+  );
+  for (const target of supportMatrix.runtime.required_assets) {
+    for (const component of ["python", "uv"]) {
+      assert.equal(Object.hasOwn(target[component], "url"), false);
+      assert.equal(Object.hasOwn(target[component], "sha256"), false);
+      assert.match(target[component].url_env, /^CLAUDIAN_[A-Z0-9_]+_URL$/);
+      assert.match(target[component].sha256_env, /^CLAUDIAN_[A-Z0-9_]+_SHA256$/);
+    }
+  }
   assert.match(readFileSync(join(root, "gateway/relay/relay_server.py"), "utf8"), /VERSION = "0\.2\.0-beta\.1"/);
   assert.match(readFileSync(join(root, "gateway/mac_companion/__init__.py"), "utf8"), /__version__ = "0\.2\.0-beta\.1"/);
 });
@@ -180,7 +249,7 @@ test("beta plugin and companion assets have no Local REST transport dependency",
 });
 
 test("packaged Companion contains only the loopback Bridge production runtime", () => {
-  execFileSync("sh", ["release/packaging/build-assets.sh"], { cwd: root, stdio: "pipe" });
+  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
   const asset = join(root, "dist", `claudian-remote-companion-${pluginManifest.version}.tar.gz`);
   const listing = execFileSync("tar", ["-tzf", asset], { encoding: "utf8" });
   assert.equal(listing.includes("__pycache__"), false);
@@ -196,4 +265,58 @@ test("packaged Companion contains only the loopback Bridge production runtime", 
     "obsidian-local-rest-api", "adapter_base_url", "adapter_token",
     "bridge_sse_path", "/claudian-remote/v2/events", "LocalBridgeV2Client"
   ]) assert.equal(contents.includes(forbidden), false, `forbidden packaged dependency: ${forbidden}`);
+});
+
+test("packaged lifecycle asset contains the guide, Python package, entrypoint, and a content lock", () => {
+  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
+  const asset = join(root, "dist", `claudian-remote-lifecycle-${pluginManifest.version}.tar.gz`);
+  const listing = execFileSync("tar", ["-tzf", asset], { encoding: "utf8" });
+  for (const path of [
+    "./CLAUDIAN_REMOTE_INSTALL.md",
+    "./bin/claudian-remote-lifecycle",
+    "./installer/__init__.py",
+    "./installer/claudian_remote_lifecycle/__init__.py",
+    "./installer/claudian_remote_lifecycle/cli.py",
+    "./installer/claudian_remote_lifecycle/model.py",
+    "./release/lifecycle-runtime.lock.json",
+    "./release/lifecycle-dependencies.lock.json",
+    "./release/support-matrix.json",
+    "./release/trust-root.json"
+  ]) assert.equal(listing.includes(path), true, `missing lifecycle bundle path: ${path}`);
+  assert.equal(listing.includes("__pycache__"), false);
+  assert.equal(listing.includes(".pyc"), false);
+
+  const lock = JSON.parse(execFileSync("tar", ["-xOzf", asset, "./release/lifecycle-runtime.lock.json"], { encoding: "utf8" }));
+  assert.equal(lock.entrypoint, "bin/claudian-remote-lifecycle");
+  assert.equal(lock.guide, "CLAUDIAN_REMOTE_INSTALL.md");
+  assert.equal(lock.dependency_lock.path, "release/lifecycle-dependencies.lock.json");
+  assert.equal(
+    lock.dependency_lock.sha256,
+    sha256Bytes(execFileSync("tar", ["-xOzf", asset, "./release/lifecycle-dependencies.lock.json"]))
+  );
+  assert.deepEqual(lock.runtime.required_targets, [
+    { platform: "darwin", arch: "arm64" },
+    { platform: "darwin", arch: "x86_64" }
+  ]);
+  for (const [path, digest] of Object.entries(lock.source_files)) {
+    const bytes = execFileSync("tar", ["-xOzf", asset, `./${path}`]);
+    assert.equal(sha256Bytes(bytes), digest, `lifecycle content lock drift: ${path}`);
+  }
+});
+
+test("all workflow Actions are immutable and permissions remain least-privilege", () => {
+  for (const workflowName of ["ci.yml", "release.yml"]) {
+    const workflow = readFileSync(join(root, ".github/workflows", workflowName), "utf8");
+    const actionRefs = [...workflow.matchAll(/^\s*uses:\s*[^@\s]+@([^\s#]+)/gm)].map((match) => match[1]);
+    assert.ok(actionRefs.length > 0, `${workflowName} must declare at least one Action`);
+    for (const ref of actionRefs) assert.match(ref, /^[a-f0-9]{40}$/, `${workflowName} contains a mutable Action ref`);
+    assert.equal(/permissions:\s*write-all/.test(workflow), false);
+    assert.equal(/pull-requests:\s*write/.test(workflow), false);
+    assert.equal(/actions:\s*write/.test(workflow), false);
+  }
+  const ci = readFileSync(join(root, ".github/workflows/ci.yml"), "utf8");
+  assert.match(ci, /^permissions:\n\s+contents:\s+read/m);
+  const release = readFileSync(join(root, ".github/workflows/release.yml"), "utf8");
+  assert.match(release, /^permissions:\n\s+contents:\s+read/m);
+  assert.match(release, /^\s{6}contents:\s+write/m);
 });

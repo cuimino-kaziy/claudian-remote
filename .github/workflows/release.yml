@@ -35,9 +35,18 @@ jobs:
           npm run check:source
           npm test
           .release-venv/bin/python -m pytest gateway/tests -q
+          .release-venv/bin/python -m pytest installer/tests -q
       - name: Build exact-tag assets
         env:
           CLAUDIAN_RELEASE_TAG: ${{ github.ref_name }}
+          CLAUDIAN_PYTHON_DARWIN_ARM64_URL: ${{ vars.CLAUDIAN_PYTHON_DARWIN_ARM64_URL }}
+          CLAUDIAN_PYTHON_DARWIN_ARM64_SHA256: ${{ vars.CLAUDIAN_PYTHON_DARWIN_ARM64_SHA256 }}
+          CLAUDIAN_UV_DARWIN_ARM64_URL: ${{ vars.CLAUDIAN_UV_DARWIN_ARM64_URL }}
+          CLAUDIAN_UV_DARWIN_ARM64_SHA256: ${{ vars.CLAUDIAN_UV_DARWIN_ARM64_SHA256 }}
+          CLAUDIAN_PYTHON_DARWIN_X86_64_URL: ${{ vars.CLAUDIAN_PYTHON_DARWIN_X86_64_URL }}
+          CLAUDIAN_PYTHON_DARWIN_X86_64_SHA256: ${{ vars.CLAUDIAN_PYTHON_DARWIN_X86_64_SHA256 }}
+          CLAUDIAN_UV_DARWIN_X86_64_URL: ${{ vars.CLAUDIAN_UV_DARWIN_X86_64_URL }}
+          CLAUDIAN_UV_DARWIN_X86_64_SHA256: ${{ vars.CLAUDIAN_UV_DARWIN_X86_64_SHA256 }}
         run: npm run release:package
       - name: Sign outside the repository and verify pinned trust root
         env:
@@ -50,4 +59,4 @@ jobs:
       - name: Publish immutable GitHub Release assets
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/release-manifest.json --verify-tag --title "Claudian Remote ${GITHUB_REF_NAME}" --notes "Private beta release. Verify the signed manifest before installation."
+        run: gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/release-manifest.json --verify-tag --prerelease --title "Claudian Remote ${GITHUB_REF_NAME}" --notes "Private beta release. Verify the signed manifest before installation."

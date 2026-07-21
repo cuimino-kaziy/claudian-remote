@@ -66,3 +66,10 @@ python3.12 -m pytest gateway/tests -q
 Release metadata lives in `release/`. Publication remains fail-closed until a
 maintainer configures a real signing key and pins its public fingerprint in the
 trusted lifecycle bootstrap; no signing secret is stored here.
+
+The lifecycle release asset includes the Agent guide, executable entrypoint,
+Python package, and a per-file content lock. Private macOS arm64 and x86_64
+CPython/uv asset URLs and SHA-256 values are supplied only by the release job;
+the repository contains variable names and exact versions, not invented
+downloads or digests. See [`docs/beta-checklist.md`](docs/beta-checklist.md) for
+the remaining maintainer and real-device release gates.

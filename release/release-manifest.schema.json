@@ -59,7 +59,44 @@
         },
         "configuration_schema": {"type": "integer", "minimum": 1},
         "claudian": {"type": "object", "additionalProperties": false, "required": ["exact_version"], "properties": {"exact_version": {"const": "2.0.4"}}},
-        "runtime": {"type": "object", "additionalProperties": false, "required": ["python", "uv"], "properties": {"python": {"type": "string"}, "uv": {"type": "string"}}}
+        "runtime": {"$ref": "#/$defs/runtimeDistribution"}
+      }
+    },
+    "runtimeArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["version", "url", "sha256"],
+      "properties": {
+        "version": {"$ref": "#/$defs/semver"},
+        "url": {"type": "string", "pattern": "^https://[^?#]+$"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "runtimeTarget": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["platform", "arch", "python", "uv"],
+      "properties": {
+        "platform": {"const": "darwin"},
+        "arch": {"enum": ["arm64", "x86_64"]},
+        "python": {"$ref": "#/$defs/runtimeArtifact"},
+        "uv": {"$ref": "#/$defs/runtimeArtifact"}
+      }
+    },
+    "runtimeDistribution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["python", "uv", "delivery", "assets"],
+      "properties": {
+        "python": {"$ref": "#/$defs/semver"},
+        "uv": {"$ref": "#/$defs/semver"},
+        "delivery": {"const": "private_release_asset"},
+        "assets": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/runtimeTarget"}
+        }
       }
     },
     "lock": {

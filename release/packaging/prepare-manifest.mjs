@@ -1,6 +1,6 @@
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { sha256File } from "./release-contract.mjs";
+import { resolveRuntimeAssets, sha256File } from "./release-contract.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const tag = process.argv[2];
@@ -14,7 +14,7 @@ const descriptions = [
   ["plugin", `claudian-remote-plugin-${plugin.version}.tar.gz`, "MIT", [lock("package-lock.json")]],
   ["companion", `claudian-remote-companion-${plugin.version}.tar.gz`, "MIT", [lock("gateway/requirements.lock")]],
   ["relay", `claudian-remote-relay-${plugin.version}.tar.gz`, "AGPL-3.0-only", [lock("gateway/requirements.lock")]],
-  ["installer", `claudian-remote-lifecycle-contract-${plugin.version}.tar.gz`, "MIT", [lock("package-lock.json"), lock("gateway/requirements.lock")]]
+  ["installer", `claudian-remote-lifecycle-${plugin.version}.tar.gz`, "MIT", [lock("release/lifecycle-dependencies.lock.json")]]
 ];
 const assets = descriptions.map(([component, name, license, dependency_locks]) => {
   const path = join(dist, name);
@@ -35,7 +35,12 @@ const manifest = {
     protocol: matrix.protocol,
     configuration_schema: matrix.components.configuration_schema,
     claudian: { exact_version: matrix.claudian.exact_version },
-    runtime: matrix.runtime
+    runtime: {
+      python: matrix.runtime.python,
+      uv: matrix.runtime.uv,
+      delivery: matrix.runtime.delivery,
+      assets: resolveRuntimeAssets(matrix.runtime)
+    }
   },
   assets,
   signature: { algorithm: "ed25519", key_fingerprint: "", value: "" }

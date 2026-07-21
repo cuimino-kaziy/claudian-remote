@@ -1,0 +1,7 @@
+{
+  "schema_version": 1,
+  "python": "3.12.11",
+  "uv": "0.10.12",
+  "packages": [],
+  "note": "The beta lifecycle package currently uses only the Python standard library. Any future third-party package must be added here with an immutable version and hashes before release."
+}
