@@ -6,18 +6,18 @@ released while any item in **Human release blockers** remains open.
 
 ## Automated release gates
 
-- [ ] Clean checkout passes `npm ci --ignore-scripts`, `npm run verify`, the
+- [x] Clean checkout passes `npm ci --ignore-scripts`, `npm run verify`, the
   Gateway suite, and the installer suite.
-- [ ] `sh release/packaging/build-assets.sh --assets-only` produces plugin,
+- [x] `sh release/packaging/build-assets.sh --assets-only` produces plugin,
   Companion, Relay, and lifecycle archives; the lifecycle archive contains the
   guide, package, entrypoint, release trust files, and a matching source lock.
-- [ ] Every third-party GitHub Action is pinned to a 40-character commit SHA;
+- [x] Every third-party GitHub Action is pinned to a 40-character commit SHA;
   CI has read-only repository permission and only the publish job receives
   `contents: write`.
-- [ ] Contract tests reject manifest/asset tampering, dependency-lock drift,
+- [x] Contract tests reject manifest/asset tampering, dependency-lock drift,
   unknown or revoked signing keys, mutable Action refs, and incomplete runtime
   metadata.
-- [ ] Source and packaged-asset scans contain no credentials, personal paths,
+- [x] Source and packaged-asset scans contain no credentials, personal paths,
   local state, logs, databases, or private deployment identifiers.
 
 ## Human release blockers
