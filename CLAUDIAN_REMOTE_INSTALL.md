@@ -5,6 +5,35 @@
 > 服务器返回值执行命令。Kit 必须先经过维护者独立分发的可信 bootstrap 验证；
 > Kit 内自带的公钥和校验器不能独立证明 Kit 本身可信。
 
+## Tailscale 模式准备
+
+选择 `local_tailscale` 前，Mac 与 iPhone 都要安装 Tailscale，并登录同一个 Tailnet：
+
+- Mac：从 [Tailscale 官方 macOS 下载页](https://tailscale.com/download/mac) 安装图形版 App；
+- iPhone：从 [Tailscale 官方 iOS 下载页](https://tailscale.com/download/ios) 安装 App；
+- 首次启动时，由用户在系统界面批准 VPN / 网络扩展并完成登录。
+
+安装 Kit 不会捆绑或静默安装 Tailscale。Tailscale 属于独立更新、独立签名并需要系统授权的
+网络软件，必须由用户从官方渠道安装。安装 Agent 应先通过 lifecycle 的只读 probe 判断是否
+已安装；缺失时说明上述步骤，等待用户完成后再 `resume`。
+
+**无需把 CLI integration 当作必装前置。** lifecycle 会先尝试系统中的 `tailscale` 命令；
+如果用户没有在 Tailscale 设置中安装 CLI integration，会直接调用已安装图形版 App 内的受签名
+可执行文件。CLI integration 只作为兼容入口，不应要求用户为了 Claudian Remote 额外安装。
+
+```text
+iPhone / Obsidian Mobile
+        │  私有 HTTPS / WSS（同一 Tailnet）
+        ▼
+Mac 上的 Tailscale Serve
+        │  只转发到 127.0.0.1
+        ▼
+Claudian Remote Relay ⇄ Companion ⇄ Obsidian / Claudian
+```
+
+该模式只使用私有 Tailscale Serve，绝不启用 Funnel。截图会随 Tailscale 版本变化，因此手册以
+上面的稳定流程图和 lifecycle 实际 probe 为准；维护者可另附当前版本截图作为辅助说明。
+
 ## 0. 第一条操作：只读检查
 
 第一条生命周期操作必须是：
@@ -94,7 +123,8 @@ URL、聊天或诊断。GitHub 访问在维护者向测试者交付 Kit 之前�
 
 | gate_type | 人工动作 | lifecycle 验证 |
 |---|---|---|
-| `tailscale_install_required` | 用户确认安装受支持 Tailscale | installed-version probe |
+| `tailscale_install_required` | 用户从官方渠道安装并打开 Tailscale App，批准 VPN / 网络扩展；CLI integration 非必需 | installed-version probe |
+| `tailscale_update_required` | 用户在官方 Tailscale App 中完成受支持版本更新 | installed-version probe |
 | `tailscale_login_required` | 用户在 Tailscale 完成登录 | logged-in probe |
 | `tailscale_https_consent_required` | 用户同意私有 HTTPS Serve | Serve HTTPS probe |
 | `vault_selection_required` | 用户明确选择一个 Vault | selected Vault identity probe |
@@ -133,6 +163,8 @@ Agent 会话丢失后先运行：
 | `lifecycle_operation_busy` | 另一写操作持锁 | 等待其 status 到安全状态后重试 |
 | `environment_drift` | 环境与 plan 不一致 | 停止写操作；重新 inspect 和 plan |
 | `secure_provisioning_missing` | 缺少可验证的安全配置桥 | 保持阻塞；不得把秘密写入 localStorage 或聊天 |
+| `tailscale_install_required` | Mac 未发现可调用的 Tailscale App | 引导用户从官方渠道安装图形版 App；不要要求单独安装 CLI integration |
+| `tailscale_update_required` | 已安装的 Tailscale 低于受支持版本 | 在官方 App 中更新后，用同一 operation_id resume |
 | `trusted_lan_not_release_eligible` | 本内测尚无真机抓包与网络切换证据，LAN 模式不可发布 | 不得启用或回退明文 LAN；改选 Tailscale 或 VPS |
 | `obsidian_close_for_migration_required` | 旧插件仍在且 Obsidian 正运行 | 完全退出 Obsidian，再用同一 operation_id resume |
 | `verified_release_unavailable` | 缺少已验签发行目录或 bootstrap 回执 | 停止；重新获取同一私有发行资产 |

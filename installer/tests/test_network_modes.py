@@ -3,6 +3,8 @@ import json
 
 import pytest
 
+import installer.claudian_remote_lifecycle.tailscale as tailscale_module
+
 from installer.claudian_remote_lifecycle.connection_profile import (
     ConnectionProfile,
     ConnectionProfileStore,
@@ -221,6 +223,52 @@ def test_tailscale_controller_uses_real_status_shape_serve_and_never_funnel():
         "http://127.0.0.1:8787", "off",
     ] in calls
     assert ["tailscale", "serve", "reset"] not in calls
+
+
+def test_tailscale_controller_accepts_real_long_version_suffix():
+    status = {
+        "BackendState": "Running",
+        "Version": "1.98.9-t4fb758c39-g200941d74",
+        "Self": {"DNSName": "mac.tailnet.ts.net."},
+        "CertDomains": ["mac.tailnet.ts.net"],
+    }
+    controller = TailscaleController(
+        runner=lambda _args: CommandResult(0, json.dumps(status), "")
+    )
+
+    assert controller.preflight() == {
+        "state": "ready",
+        "endpoint": "https://mac.tailnet.ts.net",
+    }
+
+
+def test_tailscale_controller_uses_app_binary_when_cli_integration_is_missing(monkeypatch):
+    calls = []
+    status = {
+        "BackendState": "Running",
+        "Version": "1.80.0",
+        "Self": {"DNSName": "mac.tailnet.ts.net."},
+        "CertDomains": ["mac.tailnet.ts.net"],
+    }
+
+    def fake_run(arguments, **_kwargs):
+        calls.append(list(arguments))
+        if arguments[0] == "tailscale":
+            raise FileNotFoundError("CLI integration is not installed")
+        if arguments[0] == "/Applications/Tailscale.app/Contents/MacOS/Tailscale":
+            return CommandResult(0, json.dumps(status), "")
+        raise FileNotFoundError(arguments[0])
+
+    monkeypatch.setattr(tailscale_module.subprocess, "run", fake_run)
+
+    assert TailscaleController().preflight() == {
+        "state": "ready",
+        "endpoint": "https://mac.tailnet.ts.net",
+    }
+    assert calls[:2] == [
+        ["tailscale", "status", "--json"],
+        ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "status", "--json"],
+    ]
 
 
 def test_tailscale_controller_requires_https_consent_before_serve_mutation():

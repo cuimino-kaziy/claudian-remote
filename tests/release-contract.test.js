@@ -215,8 +215,14 @@ test("release schema and support matrix pin the public contract", () => {
       assert.equal(Object.hasOwn(target[component], "sha256_env"), false);
     }
   }
-  assert.match(readFileSync(join(root, "gateway/relay/relay_server.py"), "utf8"), /VERSION = "0\.2\.0-beta\.1"/);
-  assert.match(readFileSync(join(root, "gateway/mac_companion/__init__.py"), "utf8"), /__version__ = "0\.2\.0-beta\.1"/);
+  assert.ok(
+    readFileSync(join(root, "gateway/relay/relay_server.py"), "utf8")
+      .includes(`VERSION = "${pluginManifest.version}"`)
+  );
+  assert.ok(
+    readFileSync(join(root, "gateway/mac_companion/__init__.py"), "utf8")
+      .includes(`__version__ = "${pluginManifest.version}"`)
+  );
 });
 
 test("built mobile bundle has no top-level Node or Electron import", () => {

@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import urllib.parse
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 
@@ -17,10 +19,17 @@ class CommandResult:
 
 
 def _version(value: str) -> tuple[int, ...]:
-    try:
-        return tuple(int(part) for part in value.split(".")[:3])
-    except ValueError:
-        return (0,)
+    match = re.fullmatch(
+        r"\s*(\d+)\.(\d+)\.(\d+)(?:[-+][0-9A-Za-z.-]+)?\s*",
+        value,
+    )
+    return tuple(int(part) for part in match.groups()) if match else (0,)
+
+
+TAILSCALE_APP_EXECUTABLES = (
+    Path("/Applications/Tailscale.app/Contents/MacOS/Tailscale"),
+    Path.home() / "Applications/Tailscale.app/Contents/MacOS/Tailscale",
+)
 
 
 class TailscalePlanner:
@@ -53,7 +62,10 @@ class TailscalePlanner:
         except json.JSONDecodeError:
             status = {"installed": False}
         if not status.get("installed"):
-            return self._gate("tailscale_install_required", "Install the supported Tailscale app.")
+            return self._gate(
+                "tailscale_install_required",
+                "Install and open the official Tailscale app, approve its macOS VPN/network extension, and sign in. CLI integration is optional.",
+            )
         if _version(str(status.get("version") or "0")) < self.MINIMUM_VERSION:
             return self._gate("tailscale_update_required", "Update Tailscale to the supported version.")
         if not status.get("logged_in"):
@@ -95,17 +107,27 @@ class TailscaleController:
 
     @staticmethod
     def _run(arguments: Sequence[str]) -> CommandResult:
-        try:
-            result = subprocess.run(
-                list(arguments),
-                text=True,
-                capture_output=True,
-                check=False,
-                timeout=15,
-            )
-        except (OSError, subprocess.TimeoutExpired):
-            return CommandResult(127, "", "tailscale unavailable")
-        return CommandResult(result.returncode, result.stdout, result.stderr)
+        candidates = [list(arguments)]
+        if arguments and arguments[0] == "tailscale":
+            candidates.extend([
+                [str(executable), *arguments[1:]]
+                for executable in TAILSCALE_APP_EXECUTABLES
+            ])
+        for candidate in candidates:
+            try:
+                result = subprocess.run(
+                    candidate,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                    timeout=15,
+                )
+            except OSError:
+                continue
+            except subprocess.TimeoutExpired:
+                return CommandResult(124, "", "tailscale timed out")
+            return CommandResult(result.returncode, result.stdout, result.stderr)
+        return CommandResult(127, "", "tailscale unavailable")
 
     @staticmethod
     def _blocked(code: str, action: str, probe: str) -> dict:
@@ -170,7 +192,7 @@ class TailscaleController:
         if status is None:
             return self._blocked(
                 "tailscale_install_required",
-                "Install the supported Tailscale app on this Mac.",
+                "Install and open the official Tailscale app on this Mac, approve its VPN/network extension, and sign in. CLI integration is optional.",
                 "tailscale_installed",
             )
         version = str(status.get("Version") or status.get("version") or "0")

@@ -31,7 +31,7 @@ def _vault_ids(snapshot: Mapping[str, Any]) -> set[str]:
 
 @dataclass(frozen=True)
 class PlanBuilder:
-    compatibility_set_id: str = "claudian-remote-0.2.0-beta.1"
+    compatibility_set_id: str = "claudian-remote-0.2.0-beta.2"
 
     def build(
         self,
