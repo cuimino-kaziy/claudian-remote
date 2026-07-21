@@ -11,7 +11,7 @@ from installer.claudian_remote_lifecycle.connection_profile import (
 )
 from installer.claudian_remote_lifecycle.lan_gateway import LanGatewayPlanner, LanNetworkGuard
 from installer.claudian_remote_lifecycle.network_modes import ConnectionModeController, LocalRuntimePlanner
-from installer.claudian_remote_lifecycle.tailscale import CommandResult, TailscalePlanner
+from installer.claudian_remote_lifecycle.tailscale import CommandResult, TailscaleController, TailscalePlanner
 from installer.claudian_remote_lifecycle.vps import RelayArtifact, VpsDeploymentPlanner, VpsHost
 
 
@@ -162,10 +162,127 @@ def test_tailscale_serve_plan_is_private_loopback_https_and_never_funnel():
     encoded = json.dumps(result)
     assert result["state"] == "prepared"
     assert result["endpoint"] == "https://mac.tailnet.ts.net"
-    assert result["commands"] == [["tailscale", "serve", "--bg", "http://127.0.0.1:8787"]]
+    assert result["commands"] == [[
+        "tailscale", "serve", "--bg", "--https=443", "--set-path=/",
+        "http://127.0.0.1:8787",
+    ]]
     assert "funnel" not in encoded.lower()
     assert "installation-a:tailscale:test" not in encoded
     assert result["probe"]["credential_ref"] == "<secure-reference>"
+
+
+def test_tailscale_controller_uses_real_status_shape_serve_and_never_funnel():
+    calls = []
+    removed = False
+
+    def runner(args):
+        nonlocal removed
+        calls.append(list(args))
+        if list(args) == ["tailscale", "status", "--json"]:
+            return CommandResult(
+                0,
+                json.dumps({
+                    "BackendState": "Running",
+                    "Version": "1.80.0",
+                    "Self": {"DNSName": "mac.tailnet.ts.net."},
+                    "CertDomains": ["mac.tailnet.ts.net"],
+                }),
+                "",
+            )
+        if list(args) == ["tailscale", "serve", "status", "--json"]:
+            if removed:
+                return CommandResult(0, "{}", "")
+            return CommandResult(0, json.dumps({
+                "TCP": {"443": {"HTTPS": True}},
+                "Web": {
+                    "mac.tailnet.ts.net:443": {
+                        "Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}},
+                    },
+                },
+                "AllowFunnel": {"mac.tailnet.ts.net:443": False},
+            }), "")
+        if list(args)[-1:] == ["off"]:
+            removed = True
+        return CommandResult(0, "", "")
+
+    controller = TailscaleController(runner=runner)
+    assert controller.preflight() == {"state": "ready", "endpoint": "https://mac.tailnet.ts.net"}
+    controller.activate_serve(8787)
+    assert controller.verify("https://mac.tailnet.ts.net") is True
+    controller.remove_serve()
+    encoded = json.dumps(calls).lower()
+    assert "funnel" not in encoded
+    assert [
+        "tailscale", "serve", "--bg", "--https=443", "--set-path=/",
+        "http://127.0.0.1:8787",
+    ] in calls
+    assert [
+        "tailscale", "serve", "--https=443", "--set-path=/",
+        "http://127.0.0.1:8787", "off",
+    ] in calls
+    assert ["tailscale", "serve", "reset"] not in calls
+
+
+def test_tailscale_controller_requires_https_consent_before_serve_mutation():
+    status = {
+        "BackendState": "Running",
+        "Version": "1.80.0",
+        "Self": {"DNSName": "mac.tailnet.ts.net."},
+        "CertDomains": [],
+    }
+    controller = TailscaleController(
+        runner=lambda _args: CommandResult(0, json.dumps(status), "")
+    )
+
+    outcome = controller.preflight()
+
+    assert outcome["state"] == "blocked"
+    assert outcome["code"] == "tailscale_https_consent_required"
+    assert outcome["gate"]["verification_probe"] == "tailscale_https_ready"
+    assert controller.installed() is True
+    assert controller.logged_in() is True
+    assert controller.https_ready() is False
+
+
+def test_tailscale_remove_fails_closed_when_owned_proxy_survives():
+    target = "http://127.0.0.1:8787"
+
+    def runner(args):
+        if list(args) == ["tailscale", "serve", "status", "--json"]:
+            return CommandResult(0, json.dumps({
+                "TCP": {"443": {"HTTPS": True}},
+                "Web": {"mac.tailnet.ts.net:443": {"Handlers": {"/": {"Proxy": target}}}},
+            }), "")
+        return CommandResult(0, "", "")
+
+    with pytest.raises(RuntimeError, match="tailscale_serve_remove_unverified"):
+        TailscaleController(runner=runner).remove_serve()
+
+
+@pytest.mark.parametrize(
+    "status",
+    [
+        {"TCP": {"443": {"HTTPS": True}}},
+        {
+            "TCP": {"443": {"HTTPS": True}},
+            "Web": {"other.tailnet.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}}},
+        },
+        {
+            "TCP": {"443": {"HTTPS": True}},
+            "Web": {"mac.tailnet.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:9999"}}}},
+        },
+        {
+            "TCP": {"443": {"HTTPS": True}},
+            "Web": {"mac.tailnet.ts.net:443": {"Handlers": {"/": {"Proxy": "http://127.0.0.1:8787"}}}},
+            "AllowFunnel": {"mac.tailnet.ts.net:443": True},
+        },
+    ],
+)
+def test_tailscale_verify_rejects_unowned_wrong_or_public_routes(status):
+    controller = TailscaleController(
+        runner=lambda _args: CommandResult(0, json.dumps(status), "")
+    )
+    assert controller.verify("https://mac.tailnet.ts.net") is False
 
 
 def test_lan_gateway_requires_consent_private_interface_tls_auth_and_network_guard():
@@ -230,9 +347,10 @@ def test_vps_plan_uses_exact_artifact_data_only_narrow_surface_and_compensating_
     assert "shell" not in encoded.lower()
 
     failed = planner.verify_or_rollback(result, {"tls": False, "wss": True, "storage": True, "protocol": True})
-    assert failed["state"] == "rolled_back"
+    assert failed["state"] == "blocked"
+    assert failed["code"] == "vps_verification_failed"
     assert failed["paired"] is False
-    assert failed["completed_compensations"] == result["rollback"]
+    assert failed["completed_compensations"] == []
 
 
 def test_vps_invalid_inputs_and_unconfirmed_host_key_fail_closed():

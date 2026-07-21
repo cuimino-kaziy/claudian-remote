@@ -20,7 +20,13 @@ from typing import Dict, Mapping, Optional, Protocol
 
 SERVICE = "com.claudian.remote"
 REFERENCE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
-SECRET_FIELDS = ("relay_token", "bridge_credential", "adapter_token", "payload_secret")
+SECRET_FIELDS = (
+    "relay_token",
+    "bridge_credential",
+    "pairing_admin_credential",
+    "adapter_token",
+    "payload_secret",
+)
 
 
 class KeychainError(RuntimeError):
@@ -115,6 +121,9 @@ def load_secret_fields(data: Mapping[str, object], keychain: Keychain) -> Dict[s
         resolved[field] = keychain.get(reference)
     payload_reference = str(data.get("payload_secret_ref") or "")
     resolved["payload_secret"] = keychain.get(payload_reference) if payload_reference else ""
+    pairing_admin_reference = str(data.get("pairing_admin_credential_ref") or "")
+    if pairing_admin_reference:
+        resolved["pairing_admin_credential"] = keychain.get(pairing_admin_reference)
     return resolved
 
 
@@ -129,10 +138,13 @@ class CompanionRuntimeConfig:
     vault_id: str = ""
     endpoint_audience: str = ""
     bridge_credential_id: str = "installation-bridge"
+    bridge_bootstrap_ack_path: str = ""
+    bootstrap_generation: str = ""
     bridge_host: str = "127.0.0.1"
     bridge_port: int = 27124
     relay_ws_url: str = ""
     payload_secret: str = ""
+    pairing_admin_credential: str = ""
     request_timeout_seconds: float = 30.0
     v2_state_path: str = ""
     bridge_command_path: str = "command.execute"
@@ -173,10 +185,13 @@ class CompanionRuntimeConfig:
             vault_id=profile.vault_id if profile else "",
             endpoint_audience=profile.endpoint_audience if profile else "",
             bridge_credential_id=str(data.get("bridge_credential_id") or "installation-bridge"),
+            bridge_bootstrap_ack_path=str(data.get("bridge_bootstrap_ack_path") or ""),
+            bootstrap_generation=str(data.get("bootstrap_generation") or ""),
             bridge_host=str(data.get("bridge_host") or "127.0.0.1"),
             bridge_port=int(data.get("bridge_port") or 27124),
             relay_ws_url=str(data.get("relay_ws_url") or ""),
             payload_secret=values["payload_secret"],
+            pairing_admin_credential=values.get("pairing_admin_credential", ""),
             request_timeout_seconds=float(data.get("request_timeout_seconds") or 30),
             v2_state_path=str(data.get("v2_state_path") or path.with_name("companion_state_v2.json")),
             upload_temp_dir=str(data.get("upload_temp_dir") or path.with_name("upload_temp")),
@@ -193,6 +208,12 @@ class CompanionRuntimeConfig:
             raise KeychainError("missing companion runtime configuration")
         if self.bridge_host != "127.0.0.1" or self.bridge_port != 27124:
             raise KeychainError("invalid loopback Bridge configuration")
+        if self.connection_mode and (
+            not self.bridge_bootstrap_ack_path
+            or not Path(self.bridge_bootstrap_ack_path).is_absolute()
+            or not re.fullmatch(r"bootstrap-[A-Za-z0-9_-]{16,128}", self.bootstrap_generation)
+        ):
+            raise KeychainError("invalid_bridge_bootstrap_ack_configuration")
         if self.connection_mode and self.connection_mode not in {"local_tailscale", "local_lan", "remote_vps"}:
             raise KeychainError("unsupported_connection_mode")
         if self.connection_mode and (

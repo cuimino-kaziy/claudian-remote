@@ -11,11 +11,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import ipaddress
 import json
+import math
+import re
 import secrets
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, Mapping, Optional
 
 from aiohttp import WSMsgType, web
 
@@ -24,6 +27,8 @@ BRIDGE_SUBPROTOCOL = "claudian.remote.bridge.v1"
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = 27124
 MAX_BRIDGE_FRAME_BYTES = 1024 * 1024
+MAX_INFLIGHT_MANAGEMENT = 8
+SAFE_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{2,63}$")
 
 
 class BridgeServerError(RuntimeError):
@@ -125,7 +130,12 @@ class CompanionBridgeServer:
         host: str = BRIDGE_HOST,
         port: int = BRIDGE_PORT,
         identities: BridgeIdentityStore,
+        management_handler: Optional[
+            Callable[[str, Mapping[str, Any]], Awaitable[Mapping[str, Any]]]
+        ] = None,
+        authenticated_handler: Optional[Callable[[str], Any]] = None,
         auth_timeout_seconds: float = 5.0,
+        request_timeout_seconds: float = 30.0,
     ) -> None:
         try:
             address = ipaddress.ip_address(host)
@@ -138,7 +148,13 @@ class CompanionBridgeServer:
         self.host = str(address)
         self.port = int(port)
         self.identities = identities
+        self.management_handler = management_handler
+        self.authenticated_handler = authenticated_handler
         self.auth_timeout_seconds = auth_timeout_seconds
+        timeout = float(request_timeout_seconds)
+        if not math.isfinite(timeout) or timeout <= 0 or timeout > 300:
+            raise BridgeServerError("bridge_request_timeout_invalid")
+        self.request_timeout_seconds = timeout
         self._socket: Optional[web.WebSocketResponse] = None
         self._generation = 0
         self._pending: Dict[str, asyncio.Future] = {}
@@ -207,6 +223,13 @@ class CompanionBridgeServer:
         )
         if not valid:
             return await self._reject(socket)
+        if self.authenticated_handler is not None:
+            try:
+                acknowledged = self.authenticated_handler(str(frame.get("credential_id") or ""))
+                if inspect.isawaitable(acknowledged):
+                    await acknowledged
+            except Exception:
+                return await self._reject(socket)
 
         previous = self._socket
         self._generation += 1
@@ -218,6 +241,7 @@ class CompanionBridgeServer:
             await previous.close(code=1008, message=b"bridge replaced")
         await socket.send_json({"type": "auth.accepted", "generation": generation})
         recovery_task = None
+        management_tasks: set[asyncio.Task[None]] = set()
         if self._transport_bound:
             recovery_task = asyncio.create_task(
                 self._request("keyframe.request", {}), name="bridge-reconnect-keyframe"
@@ -250,18 +274,89 @@ class CompanionBridgeServer:
                         try:
                             self._events.put_nowait(item)
                         except asyncio.QueueFull:
-                            # A bounded local gap is recovered by the Relay pump's
-                            # existing Keyframe request path.
-                            pass
+                            # Never hide local loss. Drop the stale retained
+                            # window and publish one marker that makes the Relay
+                            # pump request an authoritative Keyframe.
+                            while not self._events.empty():
+                                try:
+                                    self._events.get_nowait()
+                                except asyncio.QueueEmpty:
+                                    break
+                            self._events.put_nowait(BridgeEventMessage("resync", "{}", ""))
+                elif value.get("type") == "management.request" and value.get("request_id"):
+                    request_id = str(value["request_id"])
+                    if len(management_tasks) >= MAX_INFLIGHT_MANAGEMENT:
+                        await socket.send_json({
+                            "type": "management.response",
+                            "request_id": request_id,
+                            "ok": False,
+                            "error_code": "management_backpressure",
+                        })
+                        continue
+                    task = asyncio.create_task(
+                        self._serve_management(
+                            socket,
+                            request_id,
+                            str(value.get("operation") or ""),
+                            value.get("payload") if isinstance(value.get("payload"), dict) else {},
+                        ),
+                        name=f"bridge-management-{request_id}",
+                    )
+                    management_tasks.add(task)
+                    task.add_done_callback(management_tasks.discard)
         finally:
             if recovery_task and not recovery_task.done():
                 recovery_task.cancel()
             if recovery_task:
                 await asyncio.gather(recovery_task, return_exceptions=True)
+            for task in management_tasks:
+                task.cancel()
+            await asyncio.gather(*management_tasks, return_exceptions=True)
             if self._socket is socket:
                 self._socket = None
                 self._fail_pending("bridge_disconnected")
         return socket
+
+    async def _serve_management(
+        self,
+        socket: web.WebSocketResponse,
+        request_id: str,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> None:
+        try:
+            result = await self._handle_management(operation, payload)
+            response: dict[str, Any] = {
+                "type": "management.response",
+                "request_id": request_id,
+                "ok": True,
+                "result": result,
+            }
+        except Exception as exc:
+            candidate = str(exc)
+            response = {
+                "type": "management.response",
+                "request_id": request_id,
+                "ok": False,
+                "error_code": (
+                    candidate
+                    if SAFE_ERROR_CODE.fullmatch(candidate)
+                    else "management_operation_failed"
+                ),
+            }
+        if not socket.closed:
+            await socket.send_json(response)
+
+    async def _handle_management(
+        self,
+        operation: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        if self.management_handler is None:
+            raise BridgeServerError("management_operation_forbidden")
+        if not str(operation).startswith("pairing."):
+            raise BridgeServerError("management_operation_forbidden")
+        return await self.management_handler(str(operation), dict(payload))
 
     async def _request(self, operation: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         socket = self._socket
@@ -275,7 +370,10 @@ class CompanionBridgeServer:
                 "type": "request", "request_id": request_id,
                 "operation": operation, "payload": payload,
             })
-            return await future
+            try:
+                return await asyncio.wait_for(future, timeout=self.request_timeout_seconds)
+            except asyncio.TimeoutError:
+                raise BridgeServerError("bridge_request_timeout") from None
         finally:
             self._pending.pop(request_id, None)
 

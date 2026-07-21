@@ -22,6 +22,7 @@ import aiohttp
 
 from gateway.mac_companion.relay_ws_client import RelayWSClient, RelayWebSocket
 from gateway.mac_companion.bridge_server import BridgeIdentityStore, CompanionBridgeServer
+from gateway.mac_companion.pairing_admin import PairingAdminProxy
 from gateway.mac_companion.upload_receiver import UploadReceiveError, UploadReceiver
 from gateway.protocol.compatibility import COMPATIBILITY_SET
 
@@ -526,10 +527,38 @@ class AsyncMacCompanion:
         delay = self.config.reconnect_min_seconds
         identities = BridgeIdentityStore()
         identities.issue(self.config.bridge_credential_id, self.config.bridge_credential)
+        management = None
+        if self.config.pairing_admin_credential:
+            management = PairingAdminProxy(
+                relay_base_url=self.config.relay_base_url,
+                credential_provider=lambda: self.config.pairing_admin_credential,
+            )
+        def acknowledge_bridge(credential_id: str) -> None:
+            if credential_id != self.config.bridge_credential_id:
+                raise ValueError("bridge_credential_mismatch")
+            path = Path(self.config.bridge_bootstrap_ack_path)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            temporary = path.with_name(path.name + f".{uuid.uuid4().hex}.tmp")
+            try:
+                temporary.write_text(json.dumps({
+                    "ack_schema": "claudian-remote.bridge-bootstrap-ack/v1",
+                    "installation_id": self.config.installation_id,
+                    "vault_id": self.config.vault_id,
+                    "bridge_credential_id": credential_id,
+                    "bootstrap_generation": self.config.bootstrap_generation,
+                }, sort_keys=True, separators=(",", ":")) + "\n", encoding="utf-8")
+                os.chmod(temporary, 0o600)
+                temporary.replace(path)
+            finally:
+                temporary.unlink(missing_ok=True)
+
         bridge = CompanionBridgeServer(
             host=self.config.bridge_host,
             port=self.config.bridge_port,
             identities=identities,
+            management_handler=management.handle if management else None,
+            authenticated_handler=acknowledge_bridge,
+            request_timeout_seconds=self.config.request_timeout_seconds,
         )
         await bridge.start()
         try:

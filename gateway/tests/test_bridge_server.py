@@ -83,6 +83,143 @@ async def test_authenticated_loopback_websocket_is_command_and_event_adapter(aio
 
 
 @pytest.mark.asyncio
+async def test_authenticated_callback_runs_only_after_valid_bridge_authentication(aiohttp_client):
+    identities = BridgeIdentityStore()
+    identity = identities.issue("bridge-a", "bridge-secret")
+    authenticated = []
+    server = CompanionBridgeServer(
+        host="127.0.0.1",
+        port=27124,
+        identities=identities,
+        authenticated_handler=authenticated.append,
+    )
+    client = await aiohttp_client(server.create_app())
+
+    rejected = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
+    challenge = await rejected.receive_json()
+    await rejected.send_json({
+        "type": "auth.response",
+        "credential_id": identity.credential_id,
+        "nonce": challenge["nonce"],
+        "proof": "invalid-proof",
+    })
+    assert (await rejected.receive_json())["type"] == "auth.rejected"
+    assert authenticated == []
+
+    accepted = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
+    challenge = await accepted.receive_json()
+    await accepted.send_json({
+        "type": "auth.response",
+        "credential_id": identity.credential_id,
+        "nonce": challenge["nonce"],
+        "proof": bridge_auth_proof(identity.secret, challenge["nonce"]),
+    })
+    assert (await accepted.receive_json())["type"] == "auth.accepted"
+    assert authenticated == [identity.credential_id]
+    await accepted.close()
+
+
+@pytest.mark.asyncio
+async def test_unanswered_bridge_request_times_out_and_releases_pending_state(aiohttp_client):
+    identities = BridgeIdentityStore()
+    identity = identities.issue("bridge-a", "bridge-secret")
+    server = CompanionBridgeServer(
+        host="127.0.0.1",
+        port=27124,
+        identities=identities,
+        request_timeout_seconds=0.02,
+    )
+    client = await aiohttp_client(server.create_app())
+    ws = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
+    challenge = await ws.receive_json()
+    await ws.send_json({
+        "type": "auth.response",
+        "credential_id": identity.credential_id,
+        "nonce": challenge["nonce"],
+        "proof": bridge_auth_proof(identity.secret, challenge["nonce"]),
+    })
+    assert (await ws.receive_json())["type"] == "auth.accepted"
+
+    pending = asyncio.create_task(server.command("/command", {"delivery_id": "delivery-timeout"}))
+    assert (await ws.receive_json())["operation"] == "command.execute"
+    with pytest.raises(BridgeServerError, match="bridge_request_timeout"):
+        await pending
+    assert server._pending == {}
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_event_queue_overflow_emits_resync_marker_instead_of_hiding_loss(aiohttp_client):
+    identities = BridgeIdentityStore()
+    identity = identities.issue("bridge-a", "bridge-secret")
+    server = CompanionBridgeServer(host="127.0.0.1", port=27124, identities=identities)
+    server._events = asyncio.Queue(maxsize=1)
+    client = await aiohttp_client(server.create_app())
+    ws = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
+    challenge = await ws.receive_json()
+    await ws.send_json({
+        "type": "auth.response",
+        "credential_id": identity.credential_id,
+        "nonce": challenge["nonce"],
+        "proof": bridge_auth_proof(identity.secret, challenge["nonce"]),
+    })
+    assert (await ws.receive_json())["type"] == "auth.accepted"
+    for sequence in (1, 2):
+        await ws.send_json({
+            "type": "event.publish",
+            "event": {"source": {"sequence": sequence}, "event_type": "text.delta"},
+        })
+
+    marker = await asyncio.wait_for(anext(server.events(0)), timeout=1)
+    assert marker.event == "resync"
+    assert marker.event_id == ""
+    await ws.close()
+
+
+@pytest.mark.asyncio
+async def test_slow_management_does_not_block_event_ingestion(aiohttp_client):
+    identities = BridgeIdentityStore()
+    identity = identities.issue("bridge-a", "bridge-secret")
+    release_management = asyncio.Event()
+
+    async def management(_operation, _payload):
+        await release_management.wait()
+        return {"devices": []}
+
+    server = CompanionBridgeServer(
+        host="127.0.0.1",
+        port=27124,
+        identities=identities,
+        management_handler=management,
+    )
+    client = await aiohttp_client(server.create_app())
+    ws = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
+    challenge = await ws.receive_json()
+    await ws.send_json({
+        "type": "auth.response",
+        "credential_id": identity.credential_id,
+        "nonce": challenge["nonce"],
+        "proof": bridge_auth_proof(identity.secret, challenge["nonce"]),
+    })
+    assert (await ws.receive_json())["type"] == "auth.accepted"
+    await ws.send_json({
+        "type": "management.request",
+        "request_id": "management-a",
+        "operation": "pairing.devices",
+        "payload": {},
+    })
+    await ws.send_json({
+        "type": "event.publish",
+        "event": {"source": {"sequence": 7}, "event_type": "text.delta"},
+    })
+    event = await asyncio.wait_for(anext(server.events(0)), timeout=0.2)
+    assert event.event_id == "7"
+    release_management.set()
+    assert (await ws.receive_json())["request_id"] == "management-a"
+    await ws.close()
+
+
+@pytest.mark.asyncio
 async def test_missing_invalid_and_revoked_credentials_reveal_nothing(aiohttp_client):
     identities = BridgeIdentityStore()
     identity = identities.issue("bridge-a", "bridge-secret")

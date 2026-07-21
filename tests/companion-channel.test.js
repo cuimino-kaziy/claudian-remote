@@ -116,3 +116,172 @@ test("unauthenticated channel neither publishes events nor handles requests", as
   assert.equal(subject.calls.length, 0);
   assert.equal(socket.sent.length, 0);
 });
+
+test("authenticated plugin sends Pairing Admin operations through the Companion proxy", async () => {
+  let socket;
+  const channel = new CompanionChannel({
+    credentialProvider: async () => ({ credential_id: "bridge-a", secret: "secret" }),
+    router: fixture().router,
+    webSocketFactory: (url, protocol) => (socket = new FakeSocket(url, protocol)),
+    proof: async () => "proof"
+  });
+  channel.connect();
+  socket.receive({ type: "auth.accepted", generation: 1 });
+  const pending = channel.management("pairing.devices", {});
+  const request = socket.sent.at(-1);
+  assert.equal(request.type, "management.request");
+  assert.equal(request.operation, "pairing.devices");
+  socket.receive({ type: "management.response", request_id: request.request_id, ok: true, result: { devices: [] } });
+  assert.deepEqual(await pending, { devices: [] });
+});
+
+test("natural bridge close rejects pending management immediately", async () => {
+  let socket;
+  const channel = new CompanionChannel({
+    credentialProvider: async () => ({ credential_id: "bridge-a", secret: "secret" }),
+    router: fixture().router,
+    webSocketFactory: (url, protocol) => (socket = new FakeSocket(url, protocol)),
+    proof: async () => "proof"
+  });
+  channel.connect();
+  socket.receive({ type: "auth.accepted", generation: 1 });
+  const pending = channel.management("pairing.devices", {});
+  socket.onclose?.();
+  await assert.rejects(pending, /bridge_disconnected/);
+  assert.equal(channel.managementPending.size, 0);
+});
+
+test("a delayed challenge from a replaced socket cannot authenticate the new socket", async () => {
+  const sockets = [];
+  let releaseCredential;
+  const credential = new Promise((resolve) => { releaseCredential = resolve; });
+  const channel = new CompanionChannel({
+    credentialProvider: async () => await credential,
+    router: fixture().router,
+    webSocketFactory: (url, protocol) => {
+      const socket = new FakeSocket(url, protocol);
+      sockets.push(socket);
+      return socket;
+    },
+    proof: async () => "proof"
+  });
+  const oldSocket = channel.connect();
+  oldSocket.receive({ type: "auth.challenge", nonce: "old-nonce" });
+  const currentSocket = channel.connect();
+  releaseCredential({ credential_id: "bridge-a", secret: "secret" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(sockets.length, 2);
+  assert.deepEqual(oldSocket.sent, []);
+  assert.deepEqual(currentSocket.sent, []);
+  assert.equal(channel.authenticated, false);
+});
+
+test("a delayed request from a replaced socket cannot reply on the new socket", async () => {
+  const sockets = [];
+  let releaseRequest;
+  const router = {
+    async handle() {
+      return await new Promise((resolve) => { releaseRequest = resolve; });
+    }
+  };
+  const channel = new CompanionChannel({
+    credentialProvider: async () => ({ credential_id: "bridge-a", secret: "secret" }),
+    router,
+    webSocketFactory: (url, protocol) => {
+      const socket = new FakeSocket(url, protocol);
+      sockets.push(socket);
+      return socket;
+    },
+    proof: async () => "proof"
+  });
+  const oldSocket = channel.connect();
+  oldSocket.receive({ type: "auth.accepted", generation: 1 });
+  oldSocket.receive({ type: "request", request_id: "old-request", operation: "command.execute", payload: {} });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const currentSocket = channel.connect();
+  releaseRequest({ status: "executed" });
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.deepEqual(oldSocket.sent, []);
+  assert.deepEqual(currentSocket.sent, []);
+});
+
+test("management requests apply bounded backpressure", async () => {
+  let socket;
+  const channel = new CompanionChannel({
+    credentialProvider: async () => ({ credential_id: "bridge-a", secret: "secret" }),
+    router: fixture().router,
+    webSocketFactory: (url, protocol) => (socket = new FakeSocket(url, protocol)),
+    proof: async () => "proof"
+  });
+  channel.connect();
+  socket.receive({ type: "auth.accepted", generation: 1 });
+  const pending = Array.from({ length: 16 }, () => channel.management("pairing.devices", {}));
+  await assert.rejects(channel.management("pairing.devices", {}), /management_backpressure/);
+  channel.disconnect();
+  await Promise.allSettled(pending);
+});
+
+test("natural close reconnects with bounded exponential backoff", () => {
+  const sockets = [];
+  const timers = [];
+  const channel = new CompanionChannel({
+    credentialProvider: async () => ({ credential_id: "bridge-a", secret: "secret" }),
+    router: fixture().router,
+    webSocketFactory: (url, protocol) => {
+      const socket = new FakeSocket(url, protocol);
+      sockets.push(socket);
+      return socket;
+    },
+    proof: async () => "proof",
+    setTimeoutFn: (callback, delay) => {
+      const timer = { callback, delay, cancelled: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeoutFn: (timer) => { timer.cancelled = true; },
+    reconnectMinMs: 500,
+    reconnectMaxMs: 2000
+  });
+
+  const first = channel.connect();
+  first.onclose();
+  assert.equal(timers[0].delay, 500);
+  timers[0].callback();
+  assert.equal(sockets.length, 2);
+  sockets[1].onclose();
+  assert.equal(timers[1].delay, 1000);
+  timers[1].callback();
+  sockets[2].receive({ type: "auth.accepted", generation: 1 });
+  sockets[2].onclose();
+  assert.equal(timers[2].delay, 500);
+});
+
+test("explicit disconnect cancels reconnect and never opens another socket", () => {
+  const sockets = [];
+  const timers = [];
+  const channel = new CompanionChannel({
+    credentialProvider: async () => ({ credential_id: "bridge-a", secret: "secret" }),
+    router: fixture().router,
+    webSocketFactory: (url, protocol) => {
+      const socket = new FakeSocket(url, protocol);
+      sockets.push(socket);
+      return socket;
+    },
+    proof: async () => "proof",
+    setTimeoutFn: (callback, delay) => {
+      const timer = { callback, delay, cancelled: false };
+      timers.push(timer);
+      return timer;
+    },
+    clearTimeoutFn: (timer) => { timer.cancelled = true; }
+  });
+
+  const socket = channel.connect();
+  socket.onclose();
+  channel.disconnect();
+  assert.equal(timers[0].cancelled, true);
+  timers[0].callback();
+  assert.equal(sockets.length, 1);
+});

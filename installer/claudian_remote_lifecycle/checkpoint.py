@@ -23,7 +23,10 @@ def _assert_secret_free(value: Any, path: str = "root") -> None:
     if isinstance(value, Mapping):
         for key, item in value.items():
             lowered = str(key).lower()
-            if any(part in lowered for part in forbidden_keys) and not lowered.endswith("_ref"):
+            if (
+                any(part in lowered for part in forbidden_keys)
+                and not lowered.endswith(("_ref", "_id"))
+            ):
                 raise ValueError(f"checkpoint_forbidden_field:{path}.{key}")
             _assert_secret_free(item, f"{path}.{key}")
     elif isinstance(value, (list, tuple)):
@@ -40,9 +43,16 @@ class PrivateStateDirectory:
         os.chmod(self.path, 0o700)
         return self.path
 
-    def atomic_write_json(self, path: Path, value: Mapping[str, Any]) -> None:
+    def atomic_write_json(
+        self,
+        path: Path,
+        value: Mapping[str, Any],
+        *,
+        validate_secret_free: bool = True,
+    ) -> None:
         self.ensure()
-        _assert_secret_free(value)
+        if validate_secret_free:
+            _assert_secret_free(value)
         descriptor, temporary = tempfile.mkstemp(prefix=path.name + ".", dir=self.path)
         try:
             with os.fdopen(descriptor, "w", encoding="utf-8") as handle:

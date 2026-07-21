@@ -114,6 +114,8 @@ def test_companion_consumes_authoritative_connection_profile_and_matching_creden
         "relay_token_ref": "installation-a:local_tailscale:companion",
         "pairing_id": "installation-a",
         "bridge_credential_ref": "installation-a:bridge",
+        "bridge_bootstrap_ack_path": str(tmp_path / "bridge-bootstrap-ack.json"),
+        "bootstrap_generation": "bootstrap-abcdefghijklmnop",
     }), encoding="utf-8")
     config = CompanionRuntimeConfig.from_file(path, InMemoryKeychain({
         "installation-a:local_tailscale:companion": "relay-secret",

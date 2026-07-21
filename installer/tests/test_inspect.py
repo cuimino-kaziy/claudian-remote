@@ -104,3 +104,51 @@ def test_local_probe_discovers_vault_and_claudian_without_exposing_local_path(tm
     assert snapshot["installation"]["secure_provisioning_available"] is False
     assert str(tmp_path) not in encoded
     assert "Private Person" not in encoded
+
+
+def test_missing_secure_provisioning_is_bootstrappable_and_does_not_block_inspection(tmp_path):
+    probe = FakeProbe()
+    original = probe.installation
+    probe.installation = lambda: {
+        **original(),
+        "secure_provisioning_available": False,
+        "secure_provisioning_probe": "companion_route_unavailable",
+    }
+    output = io.StringIO()
+    assert main(
+        ["--state-dir", str(tmp_path), "inspect"],
+        stdout=output,
+        services=LifecycleServices(probe, {}),
+    ) == 0
+    result = json.loads(output.getvalue())
+    assert result["state"] == "ready"
+    assert result["code"] == "inspection_ready"
+    assert "secure_provisioning_missing" in result["data"]["snapshot"]["support"]["reason_codes"]
+
+
+def test_local_probe_hashes_profile_generation_without_exposing_endpoint(tmp_path):
+    home = tmp_path / "home"
+    root = home / "Library" / "Application Support" / "Claudian Remote"
+    release = root / "releases" / "claudian-remote-0.2.0-beta.1"
+    release.mkdir(parents=True)
+    root.mkdir(parents=True, exist_ok=True)
+    (root / "current").symlink_to(release)
+    (root / "config").mkdir()
+    endpoint = "https://private-relay.user.example"
+    (root / "config" / "connection-profile.json").write_text(json.dumps({
+        "mode": "remote_vps",
+        "installation_id": "installation-a",
+        "vault_id": "vault-a",
+        "endpoint": endpoint,
+        "endpoint_audience": "claudian-remote:remote_vps:installation-a",
+        "epoch": "epoch-a",
+        "cursor": 999,
+    }), encoding="utf-8")
+
+    installation = LocalInspectionProbe(home=home).installation()
+    encoded = json.dumps(installation)
+    assert installation["compatibility_set_id"] == "claudian-remote-0.2.0-beta.1"
+    assert installation["profile_mode"] == "remote_vps"
+    assert str(installation["profile_generation_id"]).startswith("profile-generation-")
+    assert endpoint not in encoded
+    assert str(tmp_path) not in encoded

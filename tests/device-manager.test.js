@@ -85,3 +85,28 @@ test("manager resolves the current profile per request and supports inspect revo
   assert.match(calls[2].url, /^https:\/\/relay-two/);
   assert.equal(calls[0].headers.Authorization, "Bearer admin-secret");
 });
+
+test("production-style manager uses authenticated Companion management without an admin credential", async () => {
+  const calls = [];
+  const manager = new DesktopDeviceManager({
+    managementRequest: async (operation, payload) => {
+      calls.push([operation, payload]);
+      if (operation === "pairing.claim.create") return {
+        claim_id: "claim-secure",
+        short_code: "ABCD2345",
+        deep_link: "obsidian://claudian-remote?claim_id=claim-secure",
+        expires_at: "2030-01-01T00:00:00Z"
+      };
+      if (operation === "pairing.devices") return { devices: [] };
+      return { ok: true };
+    }
+  });
+  await manager.createClaim();
+  await manager.approve("claim-secure", "iphone-a");
+  await manager.revoke("iphone-a");
+  assert.deepEqual(calls, [
+    ["pairing.claim.create", {}],
+    ["pairing.claim.approve", { claim_id: "claim-secure", device_id: "iphone-a" }],
+    ["pairing.device.revoke", { device_id: "iphone-a", reason: "revoked" }]
+  ]);
+});

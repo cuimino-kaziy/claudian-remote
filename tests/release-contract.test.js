@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -15,6 +15,7 @@ import {
   validateReleaseContract
 } from "../release/packaging/release-contract.mjs";
 import { scanSourceBoundary } from "../release/packaging/check-source-boundary.mjs";
+import { prepareInstallKit } from "../release/packaging/prepare-install-kit.mjs";
 
 const root = resolve(import.meta.dirname, "..");
 const pluginManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
@@ -302,6 +303,42 @@ test("packaged lifecycle asset contains the guide, Python package, entrypoint, a
     const bytes = execFileSync("tar", ["-xOzf", asset, `./${path}`]);
     assert.equal(sha256Bytes(bytes), digest, `lifecycle content lock drift: ${path}`);
   }
+});
+
+test("tester-facing beta kit is self-contained and its launcher binds the extracted release directory", () => {
+  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
+  const directory = mkdtempSync(join(tmpdir(), "claudian-beta-kit-test-"));
+  const components = ["plugin", "companion", "relay", "lifecycle"];
+  const assets = components.map((name) => {
+    const sourceName = `claudian-remote-${name}-${pluginManifest.version}.tar.gz`;
+    copyFileSync(join(root, "dist", sourceName), join(directory, sourceName));
+    return {
+      name: sourceName,
+      component: name === "lifecycle" ? "installer" : name,
+      sha256: sha256File(join(directory, sourceName)),
+      size: statSync(join(directory, sourceName)).size
+    };
+  });
+  writeFileSync(join(directory, "release-manifest.json"), JSON.stringify({
+    release_version: pluginManifest.version,
+    assets,
+    signature: {
+      algorithm: "ed25519",
+      key_fingerprint: "fixture-fingerprint",
+      value: "fixture-signature"
+    }
+  }));
+
+  const kit = prepareInstallKit(directory);
+  const listing = execFileSync("tar", ["-tzf", kit], { encoding: "utf8" });
+  assert.equal(listing.includes("./CLAUDIAN_REMOTE_INSTALL.md"), true);
+  assert.equal(listing.includes("./release-manifest.json"), true);
+  for (const asset of assets) {
+    assert.equal(listing.includes(`./assets/${asset.name}`), true, `missing kit asset: ${asset.name}`);
+  }
+  const launcher = execFileSync("tar", ["-xOzf", kit, "./bin/claudian-remote-lifecycle"], { encoding: "utf8" });
+  assert.match(launcher, /--release-dir "\$\{release_root\}"/);
+  assert.match(launcher, /CLAUDIAN_REMOTE_RELEASE_DIR:-\$\{bundle_root\}/);
 });
 
 test("all workflow Actions are immutable and permissions remain least-privilege", () => {

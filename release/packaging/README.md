@@ -11,6 +11,13 @@ launcher, the release trust files, and `lifecycle-runtime.lock.json`. The lock
 hashes every shipped lifecycle source file and pins the required Python/uv
 versions and macOS targets.
 
+After signing and contract verification, `npm run release:kit` creates the
+tester-facing `claudian-remote-beta-kit-<version>.tar.gz`. It contains the
+lifecycle bundle at its root, the signed manifest, and every manifest-bound
+component archive under `assets/`. Its launcher supplies that same extracted
+directory as `--release-dir`, so an Agent never has to reconstruct the release
+handoff or fall back to a source checkout.
+
 `sh release/packaging/build-assets.sh --assets-only` builds artifacts for CI
 content inspection without claiming they are releasable. The normal
 `npm run release:package` path additionally requires all eight URL/SHA-256

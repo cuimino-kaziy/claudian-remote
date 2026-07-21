@@ -19,6 +19,7 @@ import { DeviceStore, migrateLegacySynchronizedState } from "./storage/device-st
 import { sanitizeSyncPreferences } from "./storage/sync-preferences.js";
 import { MobilePairingController } from "./mobile/pairing-controller.js";
 import { DesktopDeviceManager } from "./desktop/device-manager.js";
+import { consumeBridgeBootstrap } from "./desktop/bridge-bootstrap.js";
 
 function id(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
@@ -128,6 +129,7 @@ class RemoteSettingsTab extends PluginSettingTab {
 export default class ClaudianRemotePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    if (!Platform.isMobileApp) await this.consumeLifecycleBridgeBootstrap();
     this.initializePairing();
     this.registerObsidianProtocolHandler("claudian-remote", (params) => {
       if (!Platform.isMobileApp) return;
@@ -172,9 +174,11 @@ export default class ClaudianRemotePlugin extends Plugin {
       migration = await migrateLegacySynchronizedState({
         synchronized: data,
         deviceStore: this.deviceStore,
-        // U6 supplies the Relay-side revocation operation. U3 deliberately
-        // invalidates the local copy and records the one-time migration gate.
-        revokeLegacyCredential: async () => {}
+        // The signed lifecycle must revoke a legacy shared credential at its
+        // authoritative Relay before this device-local migration can commit.
+        // A plugin-only upgrade cannot prove that, so it fails closed and
+        // requires the guided lifecycle/re-pairing path.
+        revokeLegacyCredential: async () => false
       });
     } catch {
       migration = { synchronized: sanitizeSyncPreferences(data), rePairRequired: true };
@@ -262,13 +266,51 @@ export default class ClaudianRemotePlugin extends Plugin {
     });
     if (!Platform.isMobileApp) {
       this.deviceManager = new DesktopDeviceManager({
-        profileProvider: () => this.pairingProfile(),
-        credentialProvider: () => this.deviceStore.read("pairing-admin-identity"),
-        requestImpl: requestUrl
+        managementRequest: (operation, payload) => {
+          if (!this.companionChannel) throw new Error("bridge_not_ready");
+          return this.companionChannel.management(operation, payload);
+        }
       });
       this.pendingPairingClaims = [];
       this.pairedDevices = [];
     }
+  }
+
+  async consumeLifecycleBridgeBootstrap() {
+    let bootstrap;
+    try {
+      bootstrap = consumeBridgeBootstrap({ expectedVaultId: this.syncedSettings.vault_id });
+    }
+    catch (error) {
+      console.warn("Claudian Remote secure bootstrap failed", error?.message || "bridge_bootstrap_invalid");
+      return false;
+    }
+    if (!bootstrap) return false;
+    this.syncedSettings = { ...this.syncedSettings, vault_id: bootstrap.vault_id };
+    this.deviceStore = new DeviceStore({
+      namespace: `claudian-remote:${this.manifest.id}:${bootstrap.vault_id}`
+    });
+    const profileSaved = this.deviceStore.installBridgeProfile({
+      bridgeIdentity: {
+        credential_id: bootstrap.credential_id,
+        secret: bootstrap.secret
+      },
+      connectionProfile: {
+        schema_version: 1,
+        mode: "local_tailscale",
+        installation_id: bootstrap.installation_id,
+        vault_id: bootstrap.vault_id,
+        endpoint: bootstrap.endpoint,
+        endpoint_audience: bootstrap.endpoint_audience
+      },
+      retireNames: ["pairing-admin-identity"]
+    });
+    if (!profileSaved) throw new Error("device_local_persistence_unavailable");
+    this.settings.relay_base_url = bootstrap.endpoint;
+    const preferences = this.deviceStore.read("local-preferences") || {};
+    this.settings.upload_directory = String(preferences.upload_directory || this.settings.upload_directory || "Claudian Remote/Uploads");
+    await this.saveSettings();
+    return true;
   }
 
   startMobilePairingPolling() {
@@ -315,7 +357,7 @@ export default class ClaudianRemotePlugin extends Plugin {
   }
 
   async revokePairedDevice(deviceId) {
-    const result = await this.deviceManager.revoke(deviceId, "revoked_by_owner");
+    const result = await this.deviceManager.revoke(deviceId, "revoked");
     await this.refreshPairingManagementState();
     return result;
   }

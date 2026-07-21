@@ -2,5 +2,7 @@
 set -eu
 
 bundle_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-export PYTHONPATH="${bundle_root}${PYTHONPATH:+:${PYTHONPATH}}"
-exec "${CLAUDIAN_REMOTE_MANAGED_PYTHON:-python3}" -m installer.claudian_remote_lifecycle.cli "$@"
+export PYTHONPATH="${bundle_root}"
+release_root=${CLAUDIAN_REMOTE_RELEASE_DIR:-${bundle_root}}
+exec "${CLAUDIAN_REMOTE_MANAGED_PYTHON:-python3}" -m installer.claudian_remote_lifecycle.cli \
+  --release-dir "${release_root}" "$@"

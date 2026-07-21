@@ -27,7 +27,10 @@ def test_repeated_plan_and_fail_closed_mutation_are_idempotent(tmp_path):
     assert install_one == install_two
     assert install_one[1]["code"] == "operation_not_implemented"
     assert install_one[1]["data"]["mutation_performed"] is False
-    assert not (tmp_path / "state").exists()
+    saved_state = tmp_path / "state"
+    assert saved_state.is_dir()
+    assert list((saved_state / "plans").glob("plan-*.json"))
+    assert not list(saved_state.glob("op-*.json"))
 
 
 def test_selected_vault_must_itself_have_supported_enabled_claudian():

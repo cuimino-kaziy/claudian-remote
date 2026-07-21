@@ -3,7 +3,14 @@ import copy
 import pytest
 
 from installer.claudian_remote_lifecycle.inspect import Inspector
-from installer.claudian_remote_lifecycle.plan import EnvironmentDrift, PlanBuilder, PlanError, validate_plan_environment
+from installer.claudian_remote_lifecycle.plan import (
+    EnvironmentDrift,
+    PlanBuilder,
+    PlanError,
+    PlanStore,
+    validate_mutation_environment,
+    validate_plan_environment,
+)
 from installer.tests.test_inspect import FakeProbe
 
 
@@ -74,3 +81,99 @@ def test_missing_secure_provisioning_is_an_explicit_fail_closed_bootstrap_gate()
         "probe": "companion_secure_provisioning_available",
     } in plan["gates"]
     assert plan["mutation_performed"] is False
+
+
+def test_trusted_lan_remains_release_blocked_until_real_network_evidence_exists():
+    snapshot = Inspector(FakeProbe()).snapshot()
+    plan = PlanBuilder().build(snapshot, mode="local_lan")
+    assert "trusted_lan_not_release_eligible" in plan["blockers"]
+    assert plan["topology"]["silent_fallback"] is False
+
+
+@pytest.mark.parametrize("field", ["compatibility_set_id", "profile_mode", "profile_generation_id"])
+def test_installed_release_or_profile_generation_drift_invalidates_plan(field):
+    probe = FakeProbe()
+    original_installation = probe.installation
+    probe.installation = lambda: {
+        **original_installation(),
+        "compatibility_set_id": "claudian-remote-0.2.0-beta.1",
+        "profile_mode": "local_tailscale",
+        "profile_generation_id": "profile-generation-" + "a" * 64,
+    }
+    planned = Inspector(probe).snapshot()
+    plan = PlanBuilder().build(planned, mode="local_tailscale")
+    changed = copy.deepcopy(planned)
+    changed["installation"][field] = "changed"
+    from installer.claudian_remote_lifecycle.inspect import content_id
+    changed["snapshot_id"] = content_id(
+        "inspection", {key: value for key, value in changed.items() if key != "snapshot_id"}
+    )
+    with pytest.raises(EnvironmentDrift, match="environment_drift"):
+        validate_mutation_environment(plan, planned, changed)
+
+
+def test_plan_store_is_private_immutable_and_allows_only_declared_gate_drift(tmp_path):
+    probe = FakeProbe()
+    planned = Inspector(probe).snapshot()
+    plan = PlanBuilder().build(planned, mode="local_tailscale")
+    store = PlanStore(tmp_path / "state")
+    store.write(plan, planned)
+    restored_plan, restored_snapshot = store.read(plan["plan_id"])
+    assert restored_plan == plan
+    assert restored_snapshot == planned
+    assert (tmp_path / "state" / "plans").stat().st_mode & 0o777 == 0o700
+    assert store._path(plan["plan_id"]).stat().st_mode & 0o777 == 0o600
+
+    after_login = copy.deepcopy(planned)
+    after_login["network"]["tailscale_logged_in"] = not bool(
+        after_login["network"].get("tailscale_logged_in")
+    )
+    after_login["snapshot_id"] = Inspector(FakeProbe()).snapshot()["snapshot_id"]
+    # Re-sign the synthetic snapshot after the allowed external transition.
+    from installer.claudian_remote_lifecycle.inspect import content_id
+    after_login["snapshot_id"] = content_id(
+        "inspection", {key: value for key, value in after_login.items() if key != "snapshot_id"}
+    )
+    validate_mutation_environment(plan, planned, after_login)
+
+    changed = copy.deepcopy(after_login)
+    changed["vaults"][0]["claudian_version"] = "2.0.5"
+    changed["snapshot_id"] = content_id(
+        "inspection", {key: value for key, value in changed.items() if key != "snapshot_id"}
+    )
+    with pytest.raises(EnvironmentDrift):
+        validate_mutation_environment(plan, planned, changed)
+
+
+def test_resume_accepts_only_the_plan_owned_activation_transition():
+    probe = FakeProbe()
+    original_installation = probe.installation
+    probe.installation = lambda: {
+        **original_installation(),
+        "compatibility_set_id": "claudian-remote-0.1.0",
+        "profile_mode": "local_tailscale",
+        "profile_generation_id": "profile-generation-" + "a" * 64,
+    }
+    planned = Inspector(probe).snapshot()
+    plan = PlanBuilder().build(planned, mode="local_tailscale")
+    current = copy.deepcopy(planned)
+    current["installation"].update({
+        "compatibility_set_id": plan["compatibility_set_id"],
+        "profile_mode": "local_tailscale",
+        "profile_generation_id": "profile-generation-" + "b" * 64,
+    })
+    from installer.claudian_remote_lifecycle.inspect import content_id
+    current["snapshot_id"] = content_id(
+        "inspection", {key: value for key, value in current.items() if key != "snapshot_id"}
+    )
+
+    with pytest.raises(EnvironmentDrift):
+        validate_mutation_environment(plan, planned, current)
+    validate_mutation_environment(plan, planned, current, allow_plan_target=True)
+
+    current["installation"]["profile_mode"] = "remote_vps"
+    current["snapshot_id"] = content_id(
+        "inspection", {key: value for key, value in current.items() if key != "snapshot_id"}
+    )
+    with pytest.raises(EnvironmentDrift):
+        validate_mutation_environment(plan, planned, current, allow_plan_target=True)

@@ -27,6 +27,7 @@ npm run build
 cp main.js manifest.json styles.css LICENSE "${release_tmp}/plugin/"
 cp gateway/mac_companion/__init__.py gateway/mac_companion/bridge_server.py \
   gateway/mac_companion/config.py gateway/mac_companion/relay_ws_client.py \
+  gateway/mac_companion/pairing_admin.py \
   gateway/mac_companion/runner.py gateway/mac_companion/stream_pump.py \
   gateway/mac_companion/upload_receiver.py gateway/mac_companion/config.example.json \
   "${release_tmp}/companion/gateway/mac_companion/"

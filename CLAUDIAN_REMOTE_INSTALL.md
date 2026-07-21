@@ -63,10 +63,16 @@ claudian-remote-lifecycle update --plan-id <plan-id>
 claudian-remote-lifecycle rollback --operation-id <operation-id>
 claudian-remote-lifecycle revoke-device --device-id <device-id>
 claudian-remote-lifecycle diagnose
-claudian-remote-lifecycle export-diagnostics
+claudian-remote-lifecycle export-diagnostics --destination <absolute-local-json-path>
 claudian-remote-lifecycle uninstall --plan-id <plan-id>
 claudian-remote-lifecycle purge --plan-id <plan-id>
 ```
+
+正式内测的 `claudian-remote-beta-kit-<version>.tar.gz` 解压后包含本手册、入口、已签名
+`release-manifest.json` 和精确 `assets/`；执行其中 `bin/claudian-remote-lifecycle` 时会自动把
+该目录交给 lifecycle。开发者直接调用 Python 模块时，必须把同样结构的目录作为全局
+`--release-dir <verified-release-directory>` 参数传入；缺失验签交接凭据时
+安装必须返回 `verified_release_unavailable`，不得从工作树、分支或网络“最新版”回退。
 
 不要使用 shell 拼接远端输入，不要使用 `curl | shell`，不要把秘密放进参数、环境变量、
 URL、聊天或诊断。GitHub、Tailscale、App Store、VPS 与系统权限的敏感输入必须留在
@@ -94,7 +100,10 @@ claudian-remote-lifecycle resume --operation-id <operation-id>
 | `trusted_lan_consent_required` | 用户明确同意受限 LAN 暴露 | recorded consent + network probe |
 | `pairing_approval_required` | 用户在 Mac 核对短码并批准设备 | active scoped credential probe |
 | `pairing_admin_bootstrap_required` | 等待已签名 lifecycle 建立 OS 安全存储和 Companion 配置路由 | Companion secure-provisioning route probe |
+| `desktop_plugin_bootstrap_required` | 在 Obsidian 打开或重新加载已选 Vault，等待 Remote 插件加载 | 选定 Vault 的插件向 Companion Bridge 完成认证 |
+| `obsidian_close_for_migration_required` | 旧插件仍需迁移时，完全退出 Obsidian | Obsidian process closed probe |
 | `purge_confirmation_required` | 用户在安全界面确认清除 Remote 数据 | one-time confirmation probe |
+| `diagnostic_export_confirmation_required` | 用户核对字段预览后在 macOS 对话框确认本地导出 | one-time confirmation probe |
 
 Agent 会话丢失后先运行：
 
@@ -122,13 +131,31 @@ claudian-remote-lifecycle status --operation-id <operation-id>
 | `lifecycle_operation_busy` | 另一写操作持锁 | 等待其 status 到安全状态后重试 |
 | `environment_drift` | 环境与 plan 不一致 | 停止写操作；重新 inspect 和 plan |
 | `secure_provisioning_missing` | 缺少可验证的安全配置桥 | 保持阻塞；不得把秘密写入 localStorage 或聊天 |
+| `trusted_lan_not_release_eligible` | 本内测尚无真机抓包与网络切换证据，LAN 模式不可发布 | 不得启用或回退明文 LAN；改选 Tailscale 或 VPS |
+| `obsidian_close_for_migration_required` | 旧插件仍在且 Obsidian 正运行 | 完全退出 Obsidian，再用同一 operation_id resume |
+| `verified_release_unavailable` | 缺少已验签发行目录或 bootstrap 回执 | 停止；重新获取同一私有发行资产 |
+| `manifest_signature_unverified` | bootstrap 验签回执无效 | 停止；不得安装或改用源码 |
+| `installation_ready` | 本地 Relay、Companion、插件与 Tailscale Serve 均通过验证 | 执行 verify，再进行真机配对验收 |
+| `verification_ready` | 已安装集合仍满足本地健康检查 | 进入真机验收或正常使用 |
+| `pairing_approval_required` | 本地运行时就绪，尚无已批准手机 | 完成短码核对并用同一 operation_id resume |
+| `desktop_plugin_bootstrap_required` | 运行时已启动，但已选 Vault 的插件尚未向 Companion 认证 | 打开或重载该 Vault，再用同一 operation_id resume |
+| `post_activation_verification_failed` | 激活后健康检查失败并已回滚 | 保持 rolled_back；检查 status 后重新 plan |
+| `operation_interrupted` | Agent/进程在事务边界中断，checkpoint 可恢复 | 用返回的 operation_id 执行 resume |
+| `diagnostic_summary_ready` | 已生成字段白名单内的简短诊断摘要 | 可口头报告；没有上传任何内容 |
+| `diagnostic_export_confirmation_required` | 已显示导出字段预览，等待系统确认 | 用同一 operation_id 执行 resume 并在 macOS 对话框确认 |
+| `diagnostic_export_ready` | 本地 0600 JSON 已写入用户指定位置 | 由用户自行查看、发送或删除；系统不会上传 |
+| `device_revoked` | 指定手机凭据已吊销 | 需要继续使用时重新配对 |
+| `uninstall_completed` | 已移除不冲突的受管代码、进程和暴露配置 | Vault 与 Claudian 对话仍保留 |
+| `uninstall_precondition_incomplete` | 凭据撤销或受管服务停止只完成了一部分 | 保留 operation_id；排除系统阻塞后执行 resume，不能另开卸载操作 |
+| `purge_completed` | 系统确认后已清除全部 Remote 本地状态 | Vault 与 Claudian 对话仍保留 |
 | `operation_not_implemented` | 当前构建尚未提供该操作 | 不得宣称成功；安装更新的已验证发行版 |
 | `invalid_lifecycle_input` | 输入或结构未通过验证 | 停止；检查命令表并 diagnose |
 
-当前开发切片只交付 inspect/plan/status/resume 契约底座；如果安装、更新、卸载等命令返回
-`operation_not_implemented`，这是真实阻塞状态，**没有发生任何写入**，Agent 不得绕过。
-同样，若返回 `secure_provisioning_missing` 或 plan 含 `pairing_admin_bootstrap_required`，说明
-后续 D–G 的 OS 安全存储/Companion 配置桥尚未验证；在该桥完成前不能报告 ready。
+当前内测切片已交付 `local_tailscale` 的事务 install/update、验签资产、按兼容集隔离且依赖锁定的
+managed runtime、动态 LaunchAgent、Keychain 安全配置、Pairing Admin Companion 代理、
+verify/resume/rollback/revoke-device/diagnose/export-diagnostics/uninstall/purge。
+`remote_vps` 与 `local_lan` 写操作仍必须返回 `operation_not_implemented` 或模式专用阻塞码，
+Agent 不得绕过或声称 ready。
 
 ## 6. 终态
 

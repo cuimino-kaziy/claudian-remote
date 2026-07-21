@@ -41,6 +41,40 @@ export class DeviceStore {
     }
   }
 
+  installBridgeProfile({ bridgeIdentity, connectionProfile, retireNames = [] } = {}) {
+    const retired = [...new Set(retireNames.map(String))]
+      .filter((name) => name && !["bridge-identity", "connection-profile"].includes(name));
+    const names = ["bridge-identity", "connection-profile", ...retired];
+    if (!this.storage?.getItem || !this.storage?.setItem || !this.storage?.removeItem) return false;
+    const previous = new Map(names.map((name) => [name, this.storage.getItem(this.key(name))]));
+    const values = new Map([
+      ["bridge-identity", JSON.stringify(bridgeIdentity)],
+      ["connection-profile", JSON.stringify(connectionProfile)]
+    ]);
+    const rollback = () => {
+      for (const name of names) {
+        const value = previous.get(name);
+        if (value === null || value === undefined) this.storage.removeItem(this.key(name));
+        else this.storage.setItem(this.key(name), value);
+      }
+    };
+    try {
+      for (const [name, value] of values) this.storage.setItem(this.key(name), value);
+      for (const name of retired) this.storage.removeItem(this.key(name));
+      const recordsMatch = [...values]
+        .every(([name, value]) => this.storage.getItem(this.key(name)) === value);
+      const retiredAbsent = retired.every((name) => this.storage.getItem(this.key(name)) === null);
+      if (!recordsMatch || !retiredAbsent) {
+        rollback();
+        return false;
+      }
+      return true;
+    } catch {
+      try { rollback(); } catch {}
+      return false;
+    }
+  }
+
   clearRemoteState({ includeMigration = false } = {}) {
     const names = ["identity", "bridge-identity", "pairing-admin-identity", "connection-profile", "local-preferences", "recovery", "offline-cache"];
     if (includeMigration) names.push("migration");
@@ -59,7 +93,7 @@ function legacyCredential(value) {
 export async function migrateLegacySynchronizedState({
   synchronized = {},
   deviceStore,
-  revokeLegacyCredential = async () => {}
+  revokeLegacyCredential = async () => false
 } = {}) {
   if (!(deviceStore instanceof DeviceStore)) throw new TypeError("device store required");
   const migrations = deviceStore.read("migration") || {};
@@ -72,7 +106,11 @@ export async function migrateLegacySynchronizedState({
   }
 
   const credential = legacyCredential(synchronized);
-  if (credential) await revokeLegacyCredential(credential);
+  if (credential) {
+    const outcome = await revokeLegacyCredential(credential);
+    const verified = outcome === true || outcome?.verified === true;
+    if (!verified) throw new Error("legacy_credential_revocation_unverified");
+  }
   const marker = {
     completed: true,
     re_pair_required: Boolean(credential),

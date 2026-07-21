@@ -34,6 +34,10 @@ def test_every_actionable_result_and_gate_has_guide_copy():
         "lifecycle_operation_busy",
         "environment_drift",
         "secure_provisioning_missing",
+        "trusted_lan_not_release_eligible",
+        "obsidian_close_for_migration_required",
+        "desktop_plugin_bootstrap_required",
+        "uninstall_precondition_incomplete",
         "operation_not_implemented",
         "invalid_lifecycle_input",
     }
@@ -47,7 +51,10 @@ def test_every_actionable_result_and_gate_has_guide_copy():
         "trusted_lan_consent_required",
         "pairing_approval_required",
         "pairing_admin_bootstrap_required",
+        "desktop_plugin_bootstrap_required",
+        "obsidian_close_for_migration_required",
         "purge_confirmation_required",
+        "diagnostic_export_confirmation_required",
     }
     assert all(code in text for code in result_codes)
     assert all(gate in text for gate in gate_types)

@@ -24,13 +24,19 @@ function assertCredentialBinding(credential, profile) {
 }
 
 export class DesktopDeviceManager {
-  constructor({ relayBaseUrl, profileProvider = null, credentialProvider, requestImpl = null, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
+  constructor({ relayBaseUrl, profileProvider = null, credentialProvider, managementRequest = null, requestImpl = null, fetchImpl = globalThis.fetch, now = Date.now } = {}) {
     this.staticRelayBaseUrl = String(relayBaseUrl || "").replace(/\/+$/, "");
     this.profileProvider = profileProvider;
     this.credentialProvider = credentialProvider;
+    this.managementRequest = managementRequest;
     this.requestImpl = requestImpl || (async (options) => fetchImpl(options.url, options));
     this.now = now;
     this.activeClaim = null;
+  }
+
+  management(operation, payload = {}) {
+    if (typeof this.managementRequest !== "function") return null;
+    return this.managementRequest(operation, payload);
   }
 
   profile() {
@@ -59,7 +65,8 @@ export class DesktopDeviceManager {
 
   async createClaim() {
     this.clearExpired();
-    const body = await this.request("/api/v2/pairing/claims", { method: "POST" });
+    const body = await (this.management("pairing.claim.create")
+      || this.request("/api/v2/pairing/claims", { method: "POST" }));
     this.activeClaim = {
       claim_id: String(body.claim_id),
       short_code: String(body.short_code),
@@ -71,12 +78,14 @@ export class DesktopDeviceManager {
 
   async pending() {
     this.clearExpired();
-    const body = await this.request("/api/v2/pairing/claims", { method: "GET" });
+    const body = await (this.management("pairing.claims")
+      || this.request("/api/v2/pairing/claims", { method: "GET" }));
     return Array.isArray(body.claims) ? body.claims : [];
   }
 
   async devices() {
-    const body = await this.request("/api/v2/pairing/devices", { method: "GET" });
+    const body = await (this.management("pairing.devices")
+      || this.request("/api/v2/pairing/devices", { method: "GET" }));
     return Array.isArray(body.devices) ? body.devices : [];
   }
 
@@ -86,28 +95,31 @@ export class DesktopDeviceManager {
   }
 
   async approve(claimId, deviceId) {
-    const body = await this.request(`/api/v2/pairing/claims/${encodeURIComponent(claimId)}/approve`, {
-      method: "POST",
-      body: JSON.stringify({ device_id: deviceId })
-    });
+    const body = await (this.management("pairing.claim.approve", { claim_id: claimId, device_id: deviceId })
+      || this.request(`/api/v2/pairing/claims/${encodeURIComponent(claimId)}/approve`, {
+        method: "POST",
+        body: JSON.stringify({ device_id: deviceId })
+      }));
     this.activeClaim = null;
     return body;
   }
 
   async reject(claimId) {
-    const body = await this.request(`/api/v2/pairing/claims/${encodeURIComponent(claimId)}/reject`, {
-      method: "POST",
-      body: "{}"
-    });
+    const body = await (this.management("pairing.claim.reject", { claim_id: claimId })
+      || this.request(`/api/v2/pairing/claims/${encodeURIComponent(claimId)}/reject`, {
+        method: "POST",
+        body: "{}"
+      }));
     this.activeClaim = null;
     return body;
   }
 
   revoke(deviceId, reason = "revoked") {
-    return this.request(`/api/v2/pairing/devices/${encodeURIComponent(deviceId)}/revoke`, {
-      method: "POST",
-      body: JSON.stringify({ reason })
-    });
+    return this.management("pairing.device.revoke", { device_id: deviceId, reason })
+      || this.request(`/api/v2/pairing/devices/${encodeURIComponent(deviceId)}/revoke`, {
+        method: "POST",
+        body: JSON.stringify({ reason })
+      });
   }
 
   diagnosticSummary() {

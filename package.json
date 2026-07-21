@@ -14,6 +14,7 @@
     "check:source": "node release/packaging/check-source-boundary.mjs .",
     "release:package": "sh release/packaging/build-assets.sh",
     "release:sign": "node release/packaging/sign-release.mjs",
+    "release:kit": "node release/packaging/prepare-install-kit.mjs",
     "verify": "npm run check:source && npm test && npm run build && node --check main.js"
   },
   "devDependencies": {

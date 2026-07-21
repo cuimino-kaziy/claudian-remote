@@ -84,7 +84,10 @@ test("legacy shared token migration revokes and requires re-pair exactly once", 
   const first = await migrateLegacySynchronizedState({
     synchronized: legacy,
     deviceStore,
-    revokeLegacyCredential: async (credential) => revokeCalls.push(credential)
+    revokeLegacyCredential: async (credential) => {
+      revokeCalls.push(credential);
+      return { verified: true };
+    }
   });
   const second = await migrateLegacySynchronizedState({
     synchronized: legacy,
@@ -101,6 +104,20 @@ test("legacy shared token migration revokes and requires re-pair exactly once", 
   assert.equal(deviceStore.read("migration").legacy_shared_token_v1.completed, true);
   assert.equal(deviceStore.read("identity"), null);
   assert.doesNotMatch(JSON.stringify(first.synchronized), /legacy|secret|private\/path/);
+});
+
+test("legacy shared token migration does not mark completion without verified revocation", async () => {
+  const storage = memoryStorage();
+  const deviceStore = new DeviceStore({ storage, namespace: "test" });
+  await assert.rejects(
+    migrateLegacySynchronizedState({
+      synchronized: { mobile_token: "legacy-shared-secret" },
+      deviceStore,
+      revokeLegacyCredential: async () => false
+    }),
+    /legacy_credential_revocation_unverified/
+  );
+  assert.equal(deviceStore.read("migration"), null);
 });
 
 test("a synchronized Mac payload cannot overwrite device-local iPhone identity", () => {
@@ -138,4 +155,61 @@ test("full device-local purge removes the Companion bridge identity", () => {
 
   assert.equal(deviceStore.clearRemoteState({ includeMigration: true }), true);
   assert.equal(deviceStore.read("bridge-identity"), null);
+});
+
+test("bridge profile installation rolls back both records if either write fails", () => {
+  const storage = memoryStorage();
+  const store = new DeviceStore({ storage, namespace: "test" });
+  store.write("bridge-identity", { credential_id: "old", secret: "old-secret" });
+  store.write("connection-profile", { endpoint: "https://old.example" });
+  const originalSet = storage.setItem.bind(storage);
+  let writes = 0;
+  storage.setItem = (key, value) => {
+    writes += 1;
+    if (writes === 2) throw new Error("quota");
+    originalSet(key, value);
+  };
+
+  assert.equal(store.installBridgeProfile({
+    bridgeIdentity: { credential_id: "new", secret: "new-secret" },
+    connectionProfile: { endpoint: "https://new.example" }
+  }), false);
+  assert.deepEqual(store.read("bridge-identity"), { credential_id: "old", secret: "old-secret" });
+  assert.deepEqual(store.read("connection-profile"), { endpoint: "https://old.example" });
+});
+
+test("bridge profile installation atomically retires the pairing admin identity", () => {
+  const storage = memoryStorage();
+  const store = new DeviceStore({ storage, namespace: "test" });
+  store.write("pairing-admin-identity", { credential_id: "admin-old", secret: "admin-secret" });
+
+  assert.equal(store.installBridgeProfile({
+    bridgeIdentity: { credential_id: "bridge-new", secret: "bridge-secret" },
+    connectionProfile: { endpoint: "https://mac.tailnet.ts.net" },
+    retireNames: ["pairing-admin-identity"]
+  }), true);
+  assert.equal(store.read("pairing-admin-identity"), null);
+  assert.equal(store.read("bridge-identity").credential_id, "bridge-new");
+});
+
+test("failed pairing admin retirement restores every prior device-local record", () => {
+  const storage = memoryStorage();
+  const store = new DeviceStore({ storage, namespace: "test" });
+  store.write("bridge-identity", { credential_id: "bridge-old", secret: "old-secret" });
+  store.write("connection-profile", { endpoint: "https://old.example" });
+  store.write("pairing-admin-identity", { credential_id: "admin-old", secret: "admin-secret" });
+  const originalRemove = storage.removeItem.bind(storage);
+  storage.removeItem = (key) => {
+    if (key.endsWith(":pairing-admin-identity")) throw new Error("storage unavailable");
+    originalRemove(key);
+  };
+
+  assert.equal(store.installBridgeProfile({
+    bridgeIdentity: { credential_id: "bridge-new", secret: "new-secret" },
+    connectionProfile: { endpoint: "https://new.example" },
+    retireNames: ["pairing-admin-identity"]
+  }), false);
+  assert.deepEqual(store.read("bridge-identity"), { credential_id: "bridge-old", secret: "old-secret" });
+  assert.deepEqual(store.read("connection-profile"), { endpoint: "https://old.example" });
+  assert.deepEqual(store.read("pairing-admin-identity"), { credential_id: "admin-old", secret: "admin-secret" });
 });

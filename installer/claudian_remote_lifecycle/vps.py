@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Mapping, Protocol
+
+from .private_io import write_private_json
 
 
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
@@ -61,7 +66,8 @@ class VpsDeploymentPlanner:
             raise ValueError("relay_artifact_digest_mismatch")
         stage = f"/opt/claudian-remote/releases/{artifact.version}-{artifact.digest[7:19]}"
         rollback = ["stop_staged_service", "remove_owned_staged_release", "restore_previous_service"]
-        return {
+        deployment = {
+            "deployment_plan_schema": "claudian-remote.vps-deployment/v1",
             "state": "prepared",
             "ready": False,
             "mode": "remote_vps",
@@ -78,16 +84,279 @@ class VpsDeploymentPlanner:
             "rollback": rollback,
             "trust_disclosure": "The user-owned VPS terminates TLS and can read conversation and attachment content; end-to-end encryption is not claimed.",
         }
+        encoded = json.dumps(deployment, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        deployment["plan_id"] = "plan-" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+        return deployment
 
     def verify_or_rollback(self, plan: dict, checks: dict[str, bool]) -> dict:
+        """Assess probes without pretending that compensation was executed.
+
+        Mutation and compensation belong to :class:`VpsSagaExecutor`.  The
+        former implementation returned every planned rollback label as
+        completed even though no remote operation had run.
+        """
         required = ("tls", "wss", "storage", "protocol")
         failed = [name for name in required if checks.get(name) is not True]
         if failed:
             return {
-                "state": "rolled_back",
+                "state": "blocked",
+                "code": "vps_verification_failed",
                 "ready": False,
                 "paired": False,
                 "failed_checks": failed,
-                "completed_compensations": list(plan.get("rollback", [])),
+                "completed_compensations": [],
             }
         return {"state": "ready", "ready": True, "paired": False, "endpoint": f"https://{plan['host']}"}
+
+
+class VpsSagaAdapter(Protocol):
+    """Narrow mutation boundary for an exact, already-authorized VPS host."""
+
+    def perform(self, step: str, plan: Mapping[str, Any]) -> None: ...
+
+    def compensate(self, action: str, plan: Mapping[str, Any]) -> None: ...
+
+    def verify(self, plan: Mapping[str, Any]) -> Mapping[str, bool]: ...
+
+
+class VpsSagaInterrupted(RuntimeError):
+    pass
+
+
+class VpsSagaExecutor:
+    """Resume and compensate the remote compatibility-window transaction.
+
+    The executor persists only operation identity and fixed step names. Host
+    authorization and credentials stay in the injected, OS-owned adapter.
+    """
+
+    REQUIRED_CHECKS = ("tls", "wss", "storage", "protocol")
+    FORWARD_STEPS = (
+        "deploy_compatible_relay",
+        "activate_staged_relay",
+        "switch_mac_profile",
+        "retire_previous_release",
+    )
+    COMPENSATIONS = {
+        "switch_mac_profile": ("restore_mac_profile",),
+        "activate_staged_relay": ("stop_staged_service", "restore_previous_service"),
+        "deploy_compatible_relay": ("remove_owned_staged_release",),
+    }
+
+    def __init__(
+        self,
+        state_dir: Path,
+        adapter: VpsSagaAdapter,
+        *,
+        interruption_probe: Callable[[str], bool] = lambda _phase: False,
+    ) -> None:
+        self.state_dir = Path(state_dir)
+        self.adapter = adapter
+        self.interruption_probe = interruption_probe
+
+    def _path(self, operation_id: str) -> Path:
+        if not re.fullmatch(r"op-[0-9a-f]{32}", operation_id):
+            raise ValueError("invalid_operation_id")
+        return self.state_dir / f"{operation_id}.vps-saga.json"
+
+    def _load(self, operation_id: str, plan_id: str) -> dict[str, Any]:
+        path = self._path(operation_id)
+        if not path.is_file():
+            return {
+                "saga_schema": "claudian-remote.vps-saga/v1",
+                "operation_id": operation_id,
+                "plan_id": plan_id,
+                "phase": "prepared",
+                "completed_steps": [],
+                "completed_compensations": [],
+            }
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("vps_saga_journal_invalid") from exc
+        if (
+            not isinstance(value, Mapping)
+            or value.get("saga_schema") != "claudian-remote.vps-saga/v1"
+            or value.get("operation_id") != operation_id
+            or value.get("plan_id") != plan_id
+        ):
+            raise ValueError("vps_saga_journal_invalid")
+        journal = dict(value)
+        completed_steps = journal.get("completed_steps")
+        completed_compensations = journal.get("completed_compensations")
+        allowed_phases = {
+            "prepared",
+            "awaiting_mobile_convergence",
+            "ready",
+            "rolled_back",
+            "recovery_required",
+            *("before_" + step for step in self.FORWARD_STEPS),
+            *("after_" + step for step in self.FORWARD_STEPS),
+        }
+        allowed_compensations = {
+            action for actions in self.COMPENSATIONS.values() for action in actions
+        }
+        if (
+            journal.get("phase") not in allowed_phases
+            or not isinstance(completed_steps, list)
+            or not all(isinstance(step, str) for step in completed_steps)
+            or len(completed_steps) != len(set(completed_steps))
+            or completed_steps != list(self.FORWARD_STEPS[:len(completed_steps)])
+            or not isinstance(completed_compensations, list)
+            or not all(
+                isinstance(action, str) and action in allowed_compensations
+                for action in completed_compensations
+            )
+            or len(completed_compensations) != len(set(completed_compensations))
+        ):
+            raise ValueError("vps_saga_journal_invalid")
+        return journal
+
+    def _save(self, journal: Mapping[str, Any]) -> None:
+        write_private_json(self._path(str(journal["operation_id"])), journal)
+
+    def _checkpoint(self, journal: dict[str, Any], phase: str) -> None:
+        journal["phase"] = phase
+        self._save(journal)
+        if self.interruption_probe(phase):
+            raise VpsSagaInterrupted(phase)
+
+    def _compensate(
+        self,
+        plan: Mapping[str, Any],
+        journal: dict[str, Any],
+        *,
+        failed_checks: list[str] | None = None,
+        attempted_step: str | None = None,
+    ) -> dict[str, Any]:
+        completed_actions = list(journal.get("completed_compensations") or [])
+        failed_actions: list[str] = []
+        applied_steps = list(journal.get("completed_steps") or [])
+        if attempted_step and attempted_step not in applied_steps:
+            # A remote command can fail after making a partial change. Its
+            # compensation must therefore run even though the forward step
+            # never reached the completed checkpoint.
+            applied_steps.append(attempted_step)
+        for step in reversed(applied_steps):
+            for action in self.COMPENSATIONS.get(str(step), ()):
+                if action in completed_actions:
+                    continue
+                try:
+                    self.adapter.compensate(action, plan)
+                except Exception:
+                    failed_actions.append(action)
+                else:
+                    completed_actions.append(action)
+                    journal["completed_compensations"] = completed_actions
+                    self._save(journal)
+        journal["phase"] = "recovery_required" if failed_actions else "rolled_back"
+        journal["completed_compensations"] = completed_actions
+        self._save(journal)
+        if failed_actions:
+            return {
+                "state": "recovery_required",
+                "code": "vps_compensation_incomplete",
+                "mutation_performed": True,
+                "failed_checks": list(failed_checks or []),
+                "completed_compensations": completed_actions,
+                "failed_compensations": failed_actions,
+            }
+        return {
+            "state": "rolled_back",
+            "code": "vps_saga_rolled_back",
+            "mutation_performed": True,
+            "failed_checks": list(failed_checks or []),
+            "completed_compensations": completed_actions,
+        }
+
+    def execute(
+        self,
+        plan: Mapping[str, Any],
+        *,
+        operation_id: str,
+    ) -> dict[str, Any]:
+        if (
+            plan.get("deployment_plan_schema") != "claudian-remote.vps-deployment/v1"
+            or plan.get("mode") != "remote_vps"
+            or plan.get("state") != "prepared"
+        ):
+            raise ValueError("invalid_vps_deployment_plan")
+        plan_id = str(plan.get("plan_id") or "")
+        if not plan_id:
+            raise ValueError("invalid_vps_deployment_plan")
+        journal = self._load(operation_id, plan_id)
+        phase = str(journal.get("phase") or "")
+        if phase == "ready":
+            return {"state": "ready", "code": "vps_saga_ready", "mutation_performed": False}
+        if phase == "rolled_back":
+            return {
+                "state": "rolled_back",
+                "code": "vps_saga_rolled_back",
+                "mutation_performed": False,
+                "completed_compensations": list(journal.get("completed_compensations") or []),
+            }
+        if phase == "recovery_required":
+            return {
+                "state": "recovery_required",
+                "code": "vps_compensation_incomplete",
+                "mutation_performed": False,
+                "completed_compensations": list(journal.get("completed_compensations") or []),
+            }
+
+        completed_steps = list(journal.get("completed_steps") or [])
+        attempted_step: str | None = None
+        try:
+            for step in self.FORWARD_STEPS[:-1]:
+                if step in completed_steps:
+                    continue
+                self._checkpoint(journal, "before_" + step)
+                attempted_step = step
+                self.adapter.perform(step, plan)
+                completed_steps.append(step)
+                journal["completed_steps"] = completed_steps
+                attempted_step = None
+                self._checkpoint(journal, "after_" + step)
+        except VpsSagaInterrupted:
+            raise
+        except Exception:
+            return self._compensate(plan, journal, attempted_step=attempted_step)
+
+        checks = dict(self.adapter.verify(plan))
+        failed_checks = [name for name in self.REQUIRED_CHECKS if checks.get(name) is not True]
+        if failed_checks:
+            return self._compensate(plan, journal, failed_checks=failed_checks)
+
+        if checks.get("mobile_converged") is not True:
+            self._checkpoint(journal, "awaiting_mobile_convergence")
+            return {
+                "state": "blocked",
+                "code": "mobile_protocol_convergence_required",
+                "mutation_performed": True,
+                "compatibility_window_active": True,
+            }
+
+        retirement = self.FORWARD_STEPS[-1]
+        if retirement not in completed_steps:
+            try:
+                self._checkpoint(journal, "before_" + retirement)
+                self.adapter.perform(retirement, plan)
+            except Exception:
+                journal["phase"] = "recovery_required"
+                self._save(journal)
+                return {
+                    "state": "recovery_required",
+                    "code": "vps_retirement_incomplete",
+                    "mutation_performed": True,
+                    "compatibility_window_active": True,
+                }
+            completed_steps.append(retirement)
+            journal["completed_steps"] = completed_steps
+            self._checkpoint(journal, "after_" + retirement)
+        journal["phase"] = "ready"
+        self._save(journal)
+        return {
+            "state": "ready",
+            "code": "vps_saga_ready",
+            "mutation_performed": True,
+            "compatibility_window_active": False,
+        }

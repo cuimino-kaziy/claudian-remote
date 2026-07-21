@@ -7,12 +7,16 @@ import json
 import platform
 import plistlib
 import shutil
+import socket
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
+from .keychain import MacOSKeychain
 from .model import SNAPSHOT_SCHEMA
+from .provisioning import verify_secure_provisioning
+from .runtime import RuntimeLayout
 
 
 SUPPORTED_CLAUDIAN_VERSION = "2.0.4"
@@ -99,17 +103,77 @@ class LocalInspectionProbe:
             if isinstance(value, Mapping):
                 manifests.append(value)
         versions = sorted({str(value.get("version")) for value in manifests if value.get("version")})
+        provisioning = self._secure_provisioning_status()
+        managed = self._managed_installation_status()
         return {
             "installed": bool(manifests),
             "plugin_versions": versions,
-            "compatibility_set_id": None,
+            **managed,
             "operation_id": None,
             # A lifecycle process cannot safely provision an Obsidian WebView's
             # localStorage. This becomes true only when the signed Companion
             # secure-provisioning route and its OS-backed store are probed.
-            "secure_provisioning_available": False,
-            "secure_provisioning_probe": "companion_route_unavailable",
+            **provisioning,
         }
+
+    def _managed_installation_status(self) -> Mapping[str, Any]:
+        root = self.home / "Library" / "Application Support" / "Claudian Remote"
+        current = root / "current"
+        compatibility_set_id = None
+        if current.is_symlink():
+            try:
+                target = current.resolve(strict=True)
+                releases = (root / "releases").resolve()
+                if target.parent == releases and target.name.startswith("claudian-remote-"):
+                    compatibility_set_id = target.name
+            except OSError:
+                compatibility_set_id = None
+
+        profile_mode = None
+        profile_generation_id = None
+        profile = self._read_json(root / "config" / "connection-profile.json")
+        if isinstance(profile, Mapping):
+            mode = str(profile.get("mode") or "")
+            if mode in {"local_tailscale", "remote_vps", "local_lan"}:
+                profile_mode = mode
+                generation = {
+                    "mode": mode,
+                    "installation_id": str(profile.get("installation_id") or ""),
+                    "vault_id": str(profile.get("vault_id") or ""),
+                    "endpoint": str(profile.get("endpoint") or ""),
+                    "endpoint_audience": str(profile.get("endpoint_audience") or ""),
+                    "epoch": str(profile.get("epoch") or ""),
+                }
+                profile_generation_id = content_id("profile-generation", generation)
+        return {
+            "compatibility_set_id": compatibility_set_id,
+            "profile_mode": profile_mode,
+            "profile_generation_id": profile_generation_id,
+        }
+
+    def _secure_provisioning_status(self) -> Mapping[str, Any]:
+        root = self.home / "Library" / "Application Support" / "Claudian Remote"
+        try:
+            layout = RuntimeLayout(root, self.home / "Library" / "LaunchAgents")
+            if not verify_secure_provisioning(layout, MacOSKeychain()):
+                raise ValueError("secure_provisioning_missing")
+            with socket.create_connection(("127.0.0.1", 27124), timeout=0.25):
+                pass
+            return {
+                "secure_provisioning_available": True,
+                "secure_provisioning_probe": "companion_route_and_keychain_verified",
+            }
+        except Exception:
+            return {
+                "secure_provisioning_available": False,
+                "secure_provisioning_probe": "companion_route_unavailable",
+            }
+
+    def resolve_vault(self, vault_id: str) -> Path:
+        for item in self._discover_vaults():
+            if str(item.get("vault_id")) == str(vault_id):
+                return Path(item["_path"])
+        raise FileNotFoundError("vault_not_found")
 
     def network(self) -> Mapping[str, Any]:
         executable = shutil.which("tailscale")
