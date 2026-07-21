@@ -32,6 +32,24 @@ U5 uses explicit test credentials to verify an endpoint. U6 owns formal mobile
 claim creation, Mac approval, durable credential issue, rotation, and
 revocation.
 
+Pairing uses a five-minute single-use claim and an eight-character fallback
+code. The QR opens the system Obsidian deep-link handler; the plugin does not
+request camera access. Its Relay URL and installation/Vault/audience values are
+non-secret bootstrap metadata for a new phone. The phone's synchronized Vault
+identity must match, and the Relay revalidates the claim binding before it
+creates authority. Mac approval creates a distinct device credential; only its
+verifier digest persists server-side, while the raw credential is delivered
+once to device-local mobile storage. Approved-but-unclaimed credentials are
+revoked after expiry or process restart. Revocation closes active sockets and
+blocks all future HTTP, upload, command, ticket, and WebSocket use.
+
+Pairing request/response bodies must be excluded from reverse-proxy access-body
+logging. Active claim UI state is cleared on expiry. Terminal claim digests are
+scrubbed immediately and the remaining device labels/identifiers are deleted
+after the configured short retention window. Device credential rows remain
+only for active-device inspection and explicit revocation history; they never
+contain the raw credential.
+
 ## Recovery data and resource limits
 
 Relay is a recovery buffer, not conversation history. The compatibility set's
@@ -48,6 +66,7 @@ support matrix is the only limit source:
 | Concurrent uploads per installation | 2 |
 | Protocol frame | 1 MiB |
 | Managed upload-volume refusal | before 80% usage |
+| Terminal pairing-claim metadata | 1 hour |
 
 SQLite runs in WAL mode under a single owner. Cleanup advances the replay floor,
 checkpoints WAL, removes startup upload orphans, and retries after a failed

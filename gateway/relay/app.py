@@ -8,12 +8,14 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
+from urllib.parse import urlencode
 
 from aiohttp import WSMsgType, web
 
 from gateway.protocol.stream_protocol import ProtocolError, validate_command, validate_event
 from gateway.protocol.compatibility import COMPATIBILITY_SET, combine_compatibility
 from gateway.relay.auth import AuthError, TicketStore, TokenAuthenticator, origin_allowed
+from gateway.relay.pairing import PairingError, PairingStore
 from gateway.relay.event_store import EventStore
 from gateway.relay.relay_server import RelayConfig, RelayService, VERSION
 from gateway.relay.retention import RetentionCoordinator
@@ -31,6 +33,7 @@ PRUNE_TASK = web.AppKey("prune_task", asyncio.Task)
 REJECT_COMMANDS = web.AppKey("reject_commands", dict)
 UPLOADS = web.AppKey("uploads", UploadStore)
 RETENTION = web.AppKey("retention", RetentionCoordinator)
+PAIRING = web.AppKey("pairing", PairingStore)
 
 
 def _error(code: str, status: int = 400) -> web.Response:
@@ -49,6 +52,252 @@ def _authenticate(request: web.Request, role: Optional[str]):
         installation_id=config.installation_id,
         vault_id=config.vault_id,
         endpoint_audience=config.endpoint_audience,
+    )
+
+
+def _pairing_error(exc: PairingError) -> web.Response:
+    if exc.code in {"claim_not_found", "claim_invalid"}:
+        return _error(exc.code, 404)
+    if exc.code in {"wrong_installation", "wrong_vault", "wrong_audience", "wrong_device"}:
+        return _error(exc.code, 403)
+    if exc.code in {"claim_replayed", "claim_expired", "attempt_limit_exceeded", "credential_delivery_expired"}:
+        return _error(exc.code, 409)
+    return _error(exc.code, 400)
+
+
+async def create_pairing_claim(request: web.Request) -> web.Response:
+    try:
+        principal = _authenticate(request, "pairing_admin")
+        claim = await request.app[PAIRING].create_claim(
+            installation_id=principal.installation_id,
+            vault_id=principal.vault_id,
+            endpoint_audience=principal.endpoint_audience,
+            pairing_id=principal.pairing_id,
+        )
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+    config = request.app[CONFIG]
+    deep_link = "obsidian://claudian-remote?" + urlencode(
+        {
+            "claim_id": claim.claim_id,
+            "claim_token": claim.claim_token,
+            # These values bootstrap a fresh phone which intentionally has no
+            # device-local ConnectionProfile yet.  They are profile identity,
+            # not credentials; the Relay still validates the claim and Vault.
+            "relay_base_url": config.public_base_url.rstrip("/"),
+            "installation_id": principal.installation_id,
+            "vault_id": principal.vault_id,
+            "endpoint_audience": principal.endpoint_audience,
+        }
+    )
+    return web.json_response(
+        {
+            "ok": True,
+            "claim_id": claim.claim_id,
+            "claim_token": claim.claim_token,
+            "short_code": claim.short_code,
+            "expires_at": datetime.fromtimestamp(claim.expires_at, timezone.utc).isoformat().replace("+00:00", "Z"),
+            "deep_link": deep_link,
+        },
+        status=201,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def pending_pairing_claims(request: web.Request) -> web.Response:
+    try:
+        principal = _authenticate(request, "pairing_admin")
+        claims = await request.app[PAIRING].pending_claims(
+            installation_id=principal.installation_id,
+            vault_id=principal.vault_id,
+            endpoint_audience=principal.endpoint_audience,
+        )
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+    return web.json_response(
+        {
+            "ok": True,
+            "claims": [
+                {
+                    "claim_id": item.claim_id,
+                    "status": item.status,
+                    "expires_at": item.expires_at,
+                    "device_id": item.device_id,
+                    "device_name": item.device_name,
+                }
+                for item in claims
+            ],
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def redeem_pairing_claim(request: web.Request) -> web.Response:
+    _reject_url_credentials(request)
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise TypeError("object required")
+        pending = await request.app[PAIRING].redeem(
+            claim_id=body.get("claim_id"),
+            claim_token=body.get("claim_token"),
+            short_code=body.get("short_code"),
+            device_id=body.get("device_id"),
+            device_name=body.get("device_name"),
+            requester=request.remote or "unknown",
+            installation_id=body.get("installation_id"),
+            vault_id=body.get("vault_id"),
+            endpoint_audience=body.get("endpoint_audience"),
+        )
+    except PairingError as exc:
+        return _pairing_error(exc)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _error("invalid_json", 400)
+    return web.json_response(
+        {
+            "ok": True,
+            "claim_id": pending.claim_id,
+            "status": pending.status,
+            "redemption_handle": pending.redemption_handle,
+            "expires_at": pending.expires_at,
+            "profile": {
+                "installation_id": request.app[CONFIG].installation_id,
+                "vault_id": request.app[CONFIG].vault_id,
+                "endpoint_audience": request.app[CONFIG].endpoint_audience,
+            },
+        },
+        status=202,
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def approve_pairing_claim(request: web.Request) -> web.Response:
+    try:
+        principal = _authenticate(request, "pairing_admin")
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise TypeError("object required")
+        approved = await request.app[PAIRING].approve(
+            request.match_info["claim_id"],
+            expected_device_id=str(body.get("device_id") or ""),
+            installation_id=principal.installation_id,
+            vault_id=principal.vault_id,
+            endpoint_audience=principal.endpoint_audience,
+        )
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+    except PairingError as exc:
+        return _pairing_error(exc)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _error("invalid_json", 400)
+    return web.json_response(
+        {
+            "ok": True,
+            "claim_id": approved.claim_id,
+            "status": approved.status,
+            "credential_id": approved.credential_id,
+            "device_id": approved.device_id,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def reject_pairing_claim(request: web.Request) -> web.Response:
+    try:
+        principal = _authenticate(request, "pairing_admin")
+        rejected = await request.app[PAIRING].reject(
+            request.match_info["claim_id"],
+            installation_id=principal.installation_id,
+            vault_id=principal.vault_id,
+            endpoint_audience=principal.endpoint_audience,
+        )
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+    except PairingError as exc:
+        return _pairing_error(exc)
+    return web.json_response({"ok": True, "claim_id": rejected.claim_id, "status": rejected.status})
+
+
+async def complete_pairing_claim(request: web.Request) -> web.Response:
+    _reject_url_credentials(request)
+    try:
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise TypeError("object required")
+        issued = await request.app[PAIRING].complete(
+            request.match_info["claim_id"],
+            str(body.get("redemption_handle") or ""),
+            device_id=str(body.get("device_id") or ""),
+        )
+    except PairingError as exc:
+        if exc.code == "claim_pending_approval":
+            return web.json_response(
+                {"ok": True, "status": "pending_approval"},
+                status=202,
+                headers={"Cache-Control": "no-store"},
+            )
+        return _pairing_error(exc)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _error("invalid_json", 400)
+    return web.json_response(
+        {
+            "ok": True,
+            "credential_id": issued.credential_id,
+            "credential": issued.credential,
+            "device_id": issued.device_id,
+            "generation": issued.generation,
+        },
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def revoke_pairing_device(request: web.Request) -> web.Response:
+    try:
+        principal = _authenticate(request, "pairing_admin")
+        body = await request.json()
+        if not isinstance(body, dict):
+            raise TypeError("object required")
+        device_id = str(request.match_info["device_id"])
+        ids = await request.app[PAIRING].revoke_device(
+            device_id=device_id,
+            installation_id=principal.installation_id,
+            vault_id=principal.vault_id,
+            endpoint_audience=principal.endpoint_audience,
+            reason=str(body.get("reason") or "revoked"),
+        )
+        closed = await request.app[HUB].close_mobile_device(device_id)
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return _error("invalid_json", 400)
+    return web.json_response({"ok": True, "credential_ids": ids, "closed_connections": closed})
+
+
+async def list_pairing_devices(request: web.Request) -> web.Response:
+    try:
+        principal = _authenticate(request, "pairing_admin")
+        devices = await request.app[PAIRING].devices(
+            installation_id=principal.installation_id,
+            vault_id=principal.vault_id,
+            endpoint_audience=principal.endpoint_audience,
+        )
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+    return web.json_response(
+        {
+            "ok": True,
+            "devices": [
+                {
+                    "credential_id": item.credential_id,
+                    "device_id": item.device_id,
+                    "device_name": item.device_name,
+                    "status": item.status,
+                    "generation": item.generation,
+                }
+                for item in devices
+            ],
+        },
+        headers={"Cache-Control": "no-store"},
     )
 
 
@@ -405,6 +654,15 @@ async def mobile_websocket(request: web.Request) -> web.StreamResponse:
             raise AuthError("wrong_vault")
         if grant.endpoint_audience != config.endpoint_audience:
             raise AuthError("wrong_audience")
+        request.app[AUTH].assert_active(
+            grant.credential_id,
+            generation=grant.generation,
+            role="mobile",
+            installation_id=config.installation_id,
+            vault_id=config.vault_id,
+            device_id=grant.device_id,
+            endpoint_audience=config.endpoint_audience,
+        )
         mobile_compatibility = combine_compatibility(
             frame.get("compatibility"),
             {"writable": True, "reason": "ready"},
@@ -422,6 +680,8 @@ async def mobile_websocket(request: web.Request) -> web.StreamResponse:
         max_bytes=config.client_queue_max_bytes,
     )
     client.compatibility = mobile_compatibility
+    client.device_id = grant.device_id
+    client.credential_id = grant.credential_id
     writer = asyncio.create_task(client.writer(), name=f"mobile-writer-{client.connection_id}")
     try:
         client.enqueue_nowait({
@@ -434,6 +694,22 @@ async def mobile_websocket(request: web.Request) -> web.StreamResponse:
             str(frame.get("epoch") or "") or None,
             max(0, int(frame.get("cursor") or 0)),
         )
+        # Close the issue-ticket/register race: after this point the client is
+        # visible to revoke_device, while a revoke that won before registration
+        # is observed by this second active-generation check.
+        try:
+            request.app[AUTH].assert_active(
+                grant.credential_id,
+                generation=grant.generation,
+                role="mobile",
+                installation_id=config.installation_id,
+                vault_id=config.vault_id,
+                device_id=grant.device_id,
+                endpoint_audience=config.endpoint_audience,
+            )
+        except AuthError:
+            await client.close(code=4003, reason="device_revoked")
+            return ws
         if registration.get("mode") == "reset":
             await request.app[HUB].presence.route_control(
                 client.pairing_id,
@@ -812,6 +1088,7 @@ async def _prune_loop(app: web.Application) -> None:
     while True:
         await asyncio.sleep(60)
         await app[RETENTION].run_once()
+        await app[PAIRING].prune_claims()
 
 
 async def _startup(app: web.Application) -> None:
@@ -843,6 +1120,15 @@ async def _startup(app: web.Application) -> None:
     app[UPLOADS] = uploads
     app[RETENTION] = RetentionCoordinator(store, uploads)
     app[AUTH] = TokenAuthenticator(config.tokens)
+    pairing = PairingStore(
+        config.pairing_database_path,
+        authenticator=app[AUTH],
+        ttl_seconds=config.pairing_claim_ttl_seconds,
+        terminal_retention_seconds=config.pairing_terminal_retention_seconds,
+        max_attempts=config.pairing_max_attempts,
+    )
+    await pairing.start()
+    app[PAIRING] = pairing
     app[TICKETS] = TicketStore(config.ticket_ttl_seconds)
     app[HUB] = WebSocketHub(store)
     app[LEGACY] = RelayService(config)
@@ -861,6 +1147,7 @@ async def _cleanup(app: web.Application) -> None:
     await asyncio.gather(task, return_exceptions=True)
     await app[UPLOADS].close()
     await app[STORE].close()
+    await app[PAIRING].close()
 
 
 def create_app(config: RelayConfig) -> web.Application:
@@ -869,6 +1156,14 @@ def create_app(config: RelayConfig) -> web.Application:
     app.add_routes(
         [
             web.get("/health", health),
+            web.post("/api/v2/pairing/claims", create_pairing_claim),
+            web.get("/api/v2/pairing/claims", pending_pairing_claims),
+            web.post("/api/v2/pairing/redeem", redeem_pairing_claim),
+            web.post("/api/v2/pairing/claims/{claim_id}/approve", approve_pairing_claim),
+            web.post("/api/v2/pairing/claims/{claim_id}/reject", reject_pairing_claim),
+            web.post("/api/v2/pairing/claims/{claim_id}/complete", complete_pairing_claim),
+            web.get("/api/v2/pairing/devices", list_pairing_devices),
+            web.post("/api/v2/pairing/devices/{device_id}/revoke", revoke_pairing_device),
             web.post("/api/v2/ws-ticket", issue_ticket),
             web.post("/api/v2/commands", submit_command),
             web.post("/api/v2/uploads", begin_upload),

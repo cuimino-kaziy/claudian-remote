@@ -120,6 +120,8 @@ class WebSocketClient:
         self.live_buffer: List[CommittedEvent] = []
         self.closed_reason: Optional[str] = None
         self.compatibility: Dict[str, Any] = {}
+        self.device_id: str = ""
+        self.credential_id: str = ""
 
     def enqueue_nowait(self, frame: Dict[str, Any]) -> None:
         self.queue.put_nowait(frame)
@@ -133,8 +135,8 @@ class WebSocketClient:
 
     async def close(self, code: int = 1001, reason: str = "going_away", discard: bool = True) -> None:
         self.closed_reason = reason
-        await self.queue.close(discard=discard)
         await self.websocket.close(code=code, message=reason.encode("utf-8")[:120])
+        await self.queue.close(discard=discard)
 
 
 class WebSocketHub:
@@ -187,6 +189,17 @@ class WebSocketHub:
     async def unregister_mobile(self, client: WebSocketClient) -> None:
         async with self._lock:
             self._mobiles.discard(client)
+
+    async def close_mobile_device(self, device_id: str, *, reason: str = "device_revoked") -> int:
+        async with self._lock:
+            clients = [client for client in self._mobiles if client.device_id == str(device_id)]
+            for client in clients:
+                self._mobiles.discard(client)
+        await asyncio.gather(
+            *(client.close(code=4003, reason=reason, discard=True) for client in clients),
+            return_exceptions=True,
+        )
+        return len(clients)
 
     async def register_mac(
         self,

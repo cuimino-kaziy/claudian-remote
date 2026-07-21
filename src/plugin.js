@@ -1,4 +1,4 @@
-import { Platform, Plugin, PluginSettingTab, Setting } from "obsidian";
+import { Platform, Plugin, PluginSettingTab, Setting, requestUrl } from "obsidian";
 import { DesktopAdapter } from "./desktop/adapter.js";
 import {
   CompanionChannel,
@@ -17,6 +17,8 @@ import { importFileIntoVault } from "./desktop/vault-import.js";
 import { COMPATIBILITY_SET, evaluateCompatibilitySet } from "./protocol/compatibility.js";
 import { DeviceStore, migrateLegacySynchronizedState } from "./storage/device-store.js";
 import { sanitizeSyncPreferences } from "./storage/sync-preferences.js";
+import { MobilePairingController } from "./mobile/pairing-controller.js";
+import { DesktopDeviceManager } from "./desktop/device-manager.js";
 
 function id(prefix) {
   return `${prefix}-${globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(36).slice(2)}`}`;
@@ -36,14 +38,80 @@ class RemoteSettingsTab extends PluginSettingTab {
         .setPlaceholder("https://relay.example.com")
         .setValue(this.plugin.settings.relay_base_url)
         .onChange(async (value) => { this.plugin.settings.relay_base_url = value.trim().replace(/\/+$/, ""); await this.plugin.saveSettings(); }));
-    new Setting(this.containerEl)
-      .setName("手机端访问凭据")
-      .setDesc("只用于向 Relay 领取一次性连接票据。")
-      .addText((text) => {
-        text.inputEl.type = "password";
-        text.setValue(this.plugin.settings.mobile_token)
-          .onChange(async (value) => { this.plugin.settings.mobile_token = value.trim(); await this.plugin.saveSettings(); });
-      });
+    const pairing = new Setting(this.containerEl)
+      .setName("移动设备配对")
+      .setDesc(this.plugin.settings.mobile_token ? "已配对；凭据仅保存在本设备。" : "未配对；不再手工填写共享 token。");
+    if (Platform.isMobileApp) {
+      let shortCode = "";
+      pairing.addText((text) => text
+        .setPlaceholder("8 位配对码")
+        .onChange((value) => { shortCode = value; }));
+      pairing.addButton((button) => button
+        .setButtonText("配对")
+        .onClick(async () => {
+          await this.plugin.mobilePairing?.acceptShortCode(shortCode);
+          this.plugin.startMobilePairingPolling();
+          this.display();
+        }));
+    } else {
+      pairing.addButton((button) => button
+        .setButtonText("添加移动设备")
+        .onClick(async () => {
+          await this.plugin.createPairingClaim();
+          this.display();
+        }));
+    }
+    if (Platform.isMobileApp && this.plugin.mobilePairing?.pending) {
+      new Setting(this.containerEl)
+        .setName("等待 Mac 批准")
+        .setDesc("批准后点“完成/刷新”；页面保持打开时也会有界自动检查。")
+        .addButton((button) => button.setButtonText("完成/刷新").setCta().onClick(async () => {
+          await this.plugin.mobilePairing.complete();
+          this.display();
+        }))
+        .addButton((button) => button.setButtonText("取消").onClick(() => {
+          this.plugin.mobilePairing.cancel();
+          this.display();
+        }));
+    }
+    const claim = this.plugin.currentPairingClaim();
+    if (claim) {
+      this.containerEl.createEl("p", { text: `配对码：${claim.short_code}（过期后自动清除）` });
+      const link = this.containerEl.createEl("a", { text: "在移动端 Obsidian 打开", href: claim.deep_link });
+      link.setAttr("rel", "noreferrer");
+    }
+    for (const pending of this.plugin.pendingPairingClaims || []) {
+      new Setting(this.containerEl)
+        .setName(pending.device_name || "待审批移动设备")
+        .setDesc(`设备 ID：${pending.device_id}`)
+        .addButton((button) => button.setButtonText("批准").setCta().onClick(async () => {
+          await this.plugin.approvePairingClaim(pending.claim_id, pending.device_id);
+          this.display();
+        }))
+        .addButton((button) => button.setButtonText("拒绝").onClick(async () => {
+          await this.plugin.rejectPairingClaim(pending.claim_id);
+          this.display();
+        }));
+    }
+    for (const device of this.plugin.pairedDevices || []) {
+      new Setting(this.containerEl)
+        .setName(device.device_name || "移动设备")
+        .setDesc(`${device.device_id} · ${device.status === "active" ? "已配对" : "已撤销"}`)
+        .addButton((button) => button
+          .setButtonText(device.status === "active" ? "撤销" : "已撤销")
+          .setDisabled(device.status !== "active")
+          .onClick(async () => {
+            await this.plugin.revokePairedDevice(device.device_id);
+            this.display();
+          }));
+    }
+    if (!Platform.isMobileApp) pairing.addExtraButton((button) => button
+      .setIcon("refresh-cw")
+      .setTooltip("刷新待审批设备")
+      .onClick(async () => {
+        await this.plugin.refreshPairingManagementState();
+        this.display();
+      }));
     new Setting(this.containerEl)
       .setName("附件导入目录")
       .setDesc("相对于当前 Vault，只由 Mac 端导入器写入。")
@@ -60,6 +128,14 @@ class RemoteSettingsTab extends PluginSettingTab {
 export default class ClaudianRemotePlugin extends Plugin {
   async onload() {
     await this.loadSettings();
+    this.initializePairing();
+    this.registerObsidianProtocolHandler("claudian-remote", (params) => {
+      if (!Platform.isMobileApp) return;
+      void this.mobilePairing.acceptProtocolParams(params).then(() => {
+        this.startMobilePairingPolling();
+        return this.openMobileView();
+      });
+    });
     this.registerView(MOBILE_VIEW_TYPE, (leaf) => new ClaudianRemoteMobileView(leaf, this));
     this.addCommand({ id: "open-claudian-remote", name: "打开 Claudian Remote", callback: () => void this.openMobileView() });
     this.addSettingTab(new RemoteSettingsTab(this.app, this));
@@ -81,6 +157,7 @@ export default class ClaudianRemotePlugin extends Plugin {
     this.adapter?.unload?.();
     this.companionChannel?.disconnect();
     this.normalizer?.dispose();
+    this.mobilePairing?.dispose();
   }
 
   async loadSettings() {
@@ -126,6 +203,7 @@ export default class ClaudianRemotePlugin extends Plugin {
       haptics_enabled: this.settings.haptics_enabled
     });
     const identitySaved = this.deviceStore.write("identity", {
+      ...(this.deviceStore.read("identity") || {}),
       mobile_token: this.settings.mobile_token,
       device_id: this.settings.device_id,
       client_instance_id: this.settings.client_instance_id
@@ -144,7 +222,102 @@ export default class ClaudianRemotePlugin extends Plugin {
 
   sourceFirewallSecrets() {
     const bridge = this.deviceStore?.read("bridge-identity") || {};
-    return new Set([this.settings?.mobile_token, bridge.secret].filter(Boolean));
+    const pairingAdmin = this.deviceStore?.read("pairing-admin-identity") || {};
+    return new Set([
+      this.settings?.mobile_token,
+      bridge.secret,
+      pairingAdmin.secret,
+      this.mobilePairing?.pending?.redemption_handle
+    ].filter(Boolean));
+  }
+
+  pairingProfile() {
+    const profile = this.deviceStore.read("connection-profile") || {};
+    return {
+      ...profile,
+      relay_base_url: profile.endpoint || this.settings.relay_base_url,
+      vault_id: profile.vault_id || this.syncedSettings.vault_id
+    };
+  }
+
+  initializePairing() {
+    this.mobilePairing = new MobilePairingController({
+      requestImpl: requestUrl,
+      profileProvider: () => this.pairingProfile(),
+      deviceStore: this.deviceStore,
+      deviceContext: () => ({
+        device_id: this.settings.device_id,
+        device_name: Platform.isIosApp ? "iPhone / iPad" : "Mobile Obsidian"
+      }),
+      onPaired: () => {
+        const identity = this.deviceStore.read("identity") || {};
+        const profile = this.deviceStore.read("connection-profile") || {};
+        this.settings.mobile_token = String(identity.mobile_token || "");
+        this.settings.device_id = String(identity.device_id || this.settings.device_id);
+        this.settings.client_instance_id = String(identity.client_instance_id || this.settings.client_instance_id);
+        this.settings.re_pair_required = false;
+        this.settings.relay_base_url = String(profile.endpoint || this.settings.relay_base_url).replace(/\/+$/, "");
+        void this.saveSettings();
+      }
+    });
+    if (!Platform.isMobileApp) {
+      this.deviceManager = new DesktopDeviceManager({
+        profileProvider: () => this.pairingProfile(),
+        credentialProvider: () => this.deviceStore.read("pairing-admin-identity"),
+        requestImpl: requestUrl
+      });
+      this.pendingPairingClaims = [];
+      this.pairedDevices = [];
+    }
+  }
+
+  startMobilePairingPolling() {
+    if (!this.mobilePairing?.pending) return;
+    void this.mobilePairing.pollUntilComplete({ intervalMs: 1000, maxAttempts: 60 }).catch(() => {});
+  }
+
+  currentPairingClaim() {
+    this.deviceManager?.clearExpired();
+    return this.deviceManager?.activeClaim ? { ...this.deviceManager.activeClaim } : null;
+  }
+
+  async createPairingClaim() {
+    if (!this.deviceManager) throw new Error("pairing_admin_unavailable");
+    return this.deviceManager.createClaim();
+  }
+
+  async refreshPendingPairingClaims() {
+    this.pendingPairingClaims = this.deviceManager ? await this.deviceManager.pending() : [];
+    return this.pendingPairingClaims;
+  }
+
+  async refreshPairingManagementState() {
+    if (!this.deviceManager) return { claims: [], devices: [] };
+    const [claims, devices] = await Promise.all([
+      this.deviceManager.pending(),
+      this.deviceManager.devices()
+    ]);
+    this.pendingPairingClaims = claims;
+    this.pairedDevices = devices;
+    return { claims, devices };
+  }
+
+  async approvePairingClaim(claimId, deviceId) {
+    const result = await this.deviceManager.approve(claimId, deviceId);
+    await this.refreshPairingManagementState();
+    return result;
+  }
+
+  async rejectPairingClaim(claimId) {
+    const result = await this.deviceManager.reject(claimId);
+    await this.refreshPendingPairingClaims();
+    return result;
+  }
+
+  async revokePairedDevice(deviceId) {
+    const result = await this.deviceManager.revoke(deviceId, "revoked_by_owner");
+    await this.refreshPairingManagementState();
+    return result;
   }
 
   recoverySeed() {

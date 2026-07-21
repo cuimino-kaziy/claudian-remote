@@ -25,7 +25,7 @@ All `/api/*` calls require `Authorization: Bearer <role-token>`.
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/health` | Public health metadata without room names or secrets. |
+| `GET` | `/health` | Pairing-Admin-authenticated private health metadata. |
 | `POST` | `/api/session/join` | Mark the authenticated role online and emit a presence event to its counterpart. |
 | `POST` | `/api/session/heartbeat` | Refresh the authenticated role's presence timestamp. |
 | `POST` | `/api/envelopes` | Submit an envelope to the counterpart role. |
@@ -107,4 +107,5 @@ permission callback, and the Local REST token remains Mac-only.
 - Pairing secrets are shared only by the mobile plugin and Mac companion.
 - The relay stores queued message bodies only as encrypted payload envelopes.
 - Logs redact bearer tokens, token-like JSON fields, and local Mac paths.
-- `/health` must not reveal room names, pairing ids, message bodies, or token names.
+- `/health` requires the profile-bound Pairing Admin credential and must not
+  reveal room names, pairing ids, message bodies, or token names.

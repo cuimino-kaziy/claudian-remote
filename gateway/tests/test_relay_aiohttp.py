@@ -39,14 +39,16 @@ def test_credentials_are_bound_to_installation_vault_device_role_and_profile_aud
         endpoint_audience="claudian-remote:local_tailscale:installation-a",
     )
     auth = TokenAuthenticator([token])
-    assert auth.authenticate(
+    principal = auth.authenticate(
         "Bearer bound-secret",
         "mobile",
         installation_id="installation-a",
         vault_id="vault-a",
         device_id="iphone-a",
         endpoint_audience="claudian-remote:local_tailscale:installation-a",
-    ) is token
+    )
+    assert principal.device_id == token.device_id
+    assert not hasattr(principal, "token")
     for field, value, code in (
         ("installation_id", "other", "wrong_installation"),
         ("vault_id", "other", "wrong_vault"),

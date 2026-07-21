@@ -57,6 +57,10 @@ class RelayConfig:
     max_stored_events: int = 5000
     tokens: List[RelayToken] = field(default_factory=list)
     database_path: str = "/var/lib/claudian-remote-relay/relay-v2.db"
+    pairing_database_path: str = ""
+    pairing_claim_ttl_seconds: float = 300.0
+    pairing_terminal_retention_seconds: float = 3600.0
+    pairing_max_attempts: int = 5
     enable_v1_compatibility: bool = False
     allowed_origins: List[str] = field(default_factory=lambda: ["app://obsidian.md", "capacitor://localhost"])
     ticket_ttl_seconds: float = 30.0
@@ -86,6 +90,19 @@ class RelayConfig:
             raise ValueError("relay_must_bind_loopback")
         if self.fallback_base_url:
             raise ValueError("relay_fallback_forbidden")
+        public = urlparse(self.public_base_url)
+        if (
+            public.scheme != "https"
+            or not public.hostname
+            or public.username
+            or public.password
+            or public.query
+            or public.fragment
+        ):
+            raise ValueError("relay_public_base_url_invalid")
+        self.public_base_url = self.public_base_url.rstrip("/")
+        if not self.pairing_database_path:
+            self.pairing_database_path = f"{self.database_path}.pairing"
         exact_limits = {
             "retention_seconds": DEFAULT_LIMITS.stale_in_flight_seconds,
             "completed_grace_seconds": DEFAULT_LIMITS.terminal_recovery_seconds,
@@ -148,6 +165,13 @@ class RelayConfig:
             max_stored_events=int(data.get("max_stored_events", 5000)),
             tokens=tokens,
             database_path=str(data.get("database_path", "/var/lib/claudian-remote-relay/relay-v2.db")),
+            pairing_database_path=str(data.get("pairing_database_path") or ""),
+            pairing_claim_ttl_seconds=max(30.0, min(900.0, float(data.get("pairing_claim_ttl_seconds", 300)))),
+            pairing_terminal_retention_seconds=max(
+                60.0,
+                min(86400.0, float(data.get("pairing_terminal_retention_seconds", 3600))),
+            ),
+            pairing_max_attempts=max(3, min(10, int(data.get("pairing_max_attempts", 5)))),
             enable_v1_compatibility=bool(data.get("enable_v1_compatibility", False)),
             allowed_origins=[str(item) for item in data.get("allowed_origins", ["app://obsidian.md", "capacitor://localhost"])],
             ticket_ttl_seconds=float(data.get("ticket_ttl_seconds", 30)),

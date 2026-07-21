@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import secrets
+import threading
 import time
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Protocol
@@ -21,6 +22,7 @@ class Principal(Protocol):
     endpoint_audience: str
     revoked: bool
     generation: int
+    credential_id: str
 
 
 class AuthError(ValueError):
@@ -29,9 +31,108 @@ class AuthError(ValueError):
         self.code = code
 
 
+@dataclass
+class CredentialRecord:
+    credential_id: str
+    name: str
+    role: str
+    pairing_id: str
+    verifier_digest: str
+    installation_id: str
+    vault_id: str
+    device_id: str
+    endpoint_audience: str
+    revoked: bool = False
+    generation: int = 1
+
+
 class TokenAuthenticator:
     def __init__(self, tokens: Iterable[Principal]) -> None:
-        self._tokens = tuple(tokens)
+        self._records: Dict[str, CredentialRecord] = {}
+        self._lock = threading.RLock()
+        for item in tokens:
+            token = str(getattr(item, "token", ""))
+            if not token:
+                continue
+            self.register_digest(
+                CredentialRecord(
+                    credential_id=str(
+                        getattr(item, "credential_id", "")
+                        or f"bootstrap:{item.role}:{item.name}:{item.device_id}"
+                    ),
+                    name=item.name,
+                    role=item.role,
+                    pairing_id=item.pairing_id,
+                    verifier_digest=self.digest(token),
+                    installation_id=item.installation_id,
+                    vault_id=item.vault_id,
+                    device_id=item.device_id,
+                    endpoint_audience=item.endpoint_audience,
+                    revoked=bool(getattr(item, "revoked", False)),
+                    generation=int(getattr(item, "generation", 1)),
+                )
+            )
+
+    @staticmethod
+    def digest(token: str) -> str:
+        return hashlib.sha256(str(token).encode("utf-8")).hexdigest()
+
+    def register_digest(self, record: CredentialRecord) -> None:
+        if not record.credential_id or len(record.verifier_digest) != 64:
+            raise AuthError("invalid_credential_record")
+        with self._lock:
+            if record.verifier_digest in self._records:
+                raise AuthError("credential_digest_collision")
+            self._records[record.verifier_digest] = record
+
+    def revoke_credential(self, credential_id: str) -> bool:
+        changed = False
+        with self._lock:
+            for record in self._records.values():
+                if secrets.compare_digest(record.credential_id, str(credential_id)):
+                    record.revoked = True
+                    record.generation += 1
+                    changed = True
+        return changed
+
+    def credential_count(self, *, role: Optional[str] = None, active_only: bool = False) -> int:
+        with self._lock:
+            return sum(
+                1
+                for item in self._records.values()
+                if (role is None or item.role == role) and (not active_only or not item.revoked)
+            )
+
+    def assert_active(
+        self,
+        credential_id: str,
+        *,
+        generation: int,
+        role: str,
+        installation_id: str,
+        vault_id: str,
+        device_id: str,
+        endpoint_audience: str,
+    ) -> CredentialRecord:
+        with self._lock:
+            for item in self._records.values():
+                if not secrets.compare_digest(item.credential_id, str(credential_id)):
+                    continue
+                if item.revoked:
+                    raise AuthError("revoked")
+                for actual, expected, code in (
+                    (item.role, role, "wrong_role"),
+                    (item.installation_id, installation_id, "wrong_installation"),
+                    (item.vault_id, vault_id, "wrong_vault"),
+                    (item.device_id, device_id, "wrong_device"),
+                    (item.endpoint_audience, endpoint_audience, "wrong_audience"),
+                ):
+                    if not secrets.compare_digest(str(actual), str(expected)):
+                        raise AuthError(code)
+                if item.generation != int(generation):
+                    raise AuthError("stale_credential_generation")
+                return item
+        raise AuthError("unauthorized")
 
     def authenticate(
         self,
@@ -47,9 +148,11 @@ class TokenAuthenticator:
         if not authorization.startswith("Bearer "):
             raise AuthError("unauthorized")
         presented = authorization[7:].strip()
-        for token in self._tokens:
-            if secrets.compare_digest(token.token, presented):
-                if getattr(token, "revoked", False):
+        digest = self.digest(presented)
+        with self._lock:
+            token = self._records.get(digest)
+            if token is not None:
+                if token.revoked:
                     raise AuthError("revoked")
                 if required_role and token.role != required_role:
                     raise AuthError("wrong_role")
@@ -69,6 +172,8 @@ class TokenAuthenticator:
 
 @dataclass(frozen=True)
 class TicketGrant:
+    credential_id: str
+    generation: int
     role: str
     pairing_id: str
     device_id: str
@@ -98,7 +203,13 @@ class TicketStore:
         if not secrets.compare_digest(str(principal.device_id), str(device_id)):
             raise AuthError("wrong_device")
         ticket = secrets.token_urlsafe(32)
+        credential_id = str(
+            getattr(principal, "credential_id", "")
+            or f"bootstrap:{principal.role}:{principal.name}:{principal.device_id}"
+        )
         grant = TicketGrant(
+            credential_id=credential_id,
+            generation=principal.generation,
             role="mobile",
             pairing_id=principal.pairing_id,
             device_id=str(device_id)[:128],

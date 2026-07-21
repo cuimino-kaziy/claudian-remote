@@ -10,6 +10,10 @@
   "max_events_per_poll": 100,
   "max_stored_events": 5000,
   "database_path": "/var/lib/claudian-remote-relay/relay-v2.db",
+  "pairing_database_path": "/var/lib/claudian-remote-relay/pairing.db",
+  "pairing_claim_ttl_seconds": 300,
+  "pairing_terminal_retention_seconds": 3600,
+  "pairing_max_attempts": 5,
   "enable_v1_compatibility": false,
   "allowed_origins": [
     "app://obsidian.md",
@@ -56,16 +60,6 @@
       "device_id": "replace-with-mac-device-id",
       "endpoint_audience": "claudian-remote:local_tailscale:replace-with-installation-id",
       "token": "replace-with-mac-relay-token"
-    },
-    {
-      "name": "mobile-primary",
-      "role": "mobile",
-      "pairing_id": "replace-with-pairing-id",
-      "installation_id": "replace-with-installation-id",
-      "vault_id": "replace-with-vault-id",
-      "device_id": "replace-with-mobile-device-id",
-      "endpoint_audience": "claudian-remote:local_tailscale:replace-with-installation-id",
-      "token": "replace-with-mobile-relay-token"
     }
   ]
 }
