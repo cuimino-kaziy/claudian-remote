@@ -1,4 +1,5 @@
 import asyncio
+import json
 from urllib.parse import parse_qs, urlparse
 
 import pytest
@@ -163,7 +164,15 @@ async def test_revocation_closes_current_socket_and_blocks_every_mobile_route(ai
     revoked_body = await revoked.json()
     assert completed["credential_id"] in revoked_body["credential_ids"]
     assert revoked_body["closed_connections"] == 1
-    close = await asyncio.wait_for(socket.receive(), timeout=1)
+    deadline = asyncio.get_running_loop().time() + 1
+    while True:
+        close = await asyncio.wait_for(
+            socket.receive(), timeout=max(0.01, deadline - asyncio.get_running_loop().time())
+        )
+        if close.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.CLOSING}:
+            break
+        assert close.type is WSMsgType.TEXT
+        assert json.loads(close.data)["type"] == "presence.changed"
     assert close.type in {WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.CLOSING}
     assert close.data == 4003
     assert close.extra == "device_revoked"
