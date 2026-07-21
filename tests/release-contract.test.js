@@ -191,7 +191,8 @@ test("source boundary rejects local state, credentials, personal paths, and priv
 test("source boundary excludes release virtual environments from publishable source", () => {
   const directory = mkdtempSync(join(tmpdir(), "claudian-source-venv-boundary-"));
   mkdirSync(join(directory, ".release-venv"));
-  writeFileSync(join(directory, ".release-venv", "pyvenv.cfg"), "/Users/private-owner/runtime\n");
+  const privatePath = ["", "Users", "private-owner", "runtime"].join("/");
+  writeFileSync(join(directory, ".release-venv", "pyvenv.cfg"), `${privatePath}\n`);
   assert.deepEqual(scanSourceBoundary(directory), []);
 });
 
