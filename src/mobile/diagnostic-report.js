@@ -1,3 +1,5 @@
+import { deriveReadiness } from "./readiness.js";
+
 function digest(value) {
   const text = String(value || "");
   let hash = 0x811c9dc5;
@@ -15,11 +17,14 @@ export function buildDiagnosticReport(state, attachment = null, now = new Date()
   const capabilityMode = state.capabilities?.semantic_stream === true
     ? "streaming"
     : state.capabilities?.mode || "unknown";
+  const readiness = deriveReadiness(state);
   const lines = [
     "Claudian Remote v2 mobile report",
     `time=${now.toISOString()}`,
     "protocol=claudian.remote.v2",
     `transport_status=${state.transport?.status || "disconnected"}`,
+    `readiness_status=${readiness.status}`,
+    `readiness_reason=${readiness.reason_code}`,
     `mac_online=${state.presence?.mac?.status === "online"}`,
     `recovery_required=${Boolean(state.recovery?.required)}`,
     `cursor=${Number(state.relay?.appliedCursor || 0)}`,

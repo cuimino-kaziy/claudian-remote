@@ -97,3 +97,12 @@ def test_completed_event_without_matching_final_keyframe_is_rejected():
     events = load("semantic-stream.json")["events"]
     with pytest.raises(ProtocolError, match="completion_without_final_keyframe"):
         assert_final_keyframe_before_completion([events[-1]])
+
+
+def test_history_mutation_commands_are_explicit_and_permanent_delete_is_absent():
+    from gateway.protocol.stream_protocol import COMMAND_FIELDS
+
+    assert COMMAND_FIELDS["history.new"] == set()
+    assert COMMAND_FIELDS["history.rename"] == {"conversation_id", "title"}
+    assert COMMAND_FIELDS["history.archive"] == {"conversation_id"}
+    assert "history.delete" not in COMMAND_FIELDS

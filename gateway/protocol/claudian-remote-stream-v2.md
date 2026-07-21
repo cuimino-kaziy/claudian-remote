@@ -28,7 +28,24 @@ Role boundaries are executable in `stream_protocol.ROUTE_AUTH_MATRIX`:
 | `POST /api/v2/commands` | Mobile role token |
 | `POST /api/v2/uploads` | Mobile role token |
 | `GET /api/v2/uploads` | Mac role token |
-| `GET /health` | public, body-free health only |
+| `POST /api/v2/pairing/claims` | Pairing Admin credential |
+| `GET /api/v2/pairing/claims` | Pairing Admin credential |
+| `POST /api/v2/pairing/redeem` | one-time Pairing Claim plus current Vault identity |
+| `POST /api/v2/pairing/claims/{id}/approve` | Pairing Admin credential |
+| `POST /api/v2/pairing/claims/{id}/reject` | Pairing Admin credential |
+| `POST /api/v2/pairing/claims/{id}/complete` | one-time redemption handle bound to the displayed device |
+| `GET /api/v2/pairing/devices` | Pairing Admin credential |
+| `POST /api/v2/pairing/devices/{id}/revoke` | Pairing Admin credential |
+| `GET /health` | Pairing Admin credential; private deployment surface |
+
+Pairing claims expire after five minutes by default, are single use and
+attempt-limited, and contain no durable device credential. The QR deep link may
+carry the non-secret Relay URL and installation/Vault/audience binding so a
+fresh phone can establish device-local profile state. The service persists only
+claim/handle digests and durable credential verifier digests. Approved but
+unclaimed credentials fail closed on expiry or Relay restart. Terminal claim
+rows are scrubbed immediately and deleted after the bounded terminal-retention
+window; they are not history or diagnostics.
 
 ## Event identity and ordering
 
@@ -170,7 +187,12 @@ states, and timings only.
 ## Event families
 
 - capability and presence: `capability.state`, `presence.changed`
-- desktop navigation: `conversation.activated`, `history.list`
+- desktop navigation: `conversation.activated`, `history.list`; commands
+  `history.new`, `history.rename`, `history.archive`, and `history.select` are
+  capability-checked and update mobile state only from an authoritative desktop
+  receipt. Permanent deletion is intentionally absent. Claudian 2.0.4 exposes
+  no durable archive API, so `history.archive` reports `capability_missing`
+  rather than mapping to deletion or a local-only flag.
 - turn lifecycle: `turn.started`, `turn.completed`, `turn.interrupted`, `turn.failed`
 - observable work: `activity.updated`, `tool.started`, `tool.completed`
 - answer content: `text.delta`, `text.replace`

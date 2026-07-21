@@ -435,11 +435,20 @@ async def test_https_command_receipt_generation_and_commands_never_enter_sqlite(
             "type": "command.receipt",
             "mac_session_id": "mac-session",
             "mac_connection_generation": 1,
-            "receipt": {"delivery_id": "delivery-1", "status": "executed"},
+            "receipt": {
+                "delivery_id": "delivery-1",
+                "status": "executed",
+                "active_conversation_id": "conv-2",
+                "items": [{"conversation_id": "conv-2", "title": "Authoritative"}],
+                "capabilities": {"history_rename": True, "history_archive": False},
+            },
         }
     )
     receipt = await receive_type(mobile, "command.receipt")
     assert receipt["receipt"]["status"] == "executed"
+    assert receipt["receipt"]["active_conversation_id"] == "conv-2"
+    assert receipt["receipt"]["items"] == [{"conversation_id": "conv-2", "title": "Authoritative"}]
+    assert receipt["receipt"]["capabilities"]["history_archive"] is False
     assert (await client.server.app[STORE].stats())["rows"] == 0
 
     new_mac = await connect_mac(client, generation=2)

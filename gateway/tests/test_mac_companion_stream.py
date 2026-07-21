@@ -147,6 +147,32 @@ async def test_same_session_old_generation_command_never_crosses_reconnect():
 
 
 @pytest.mark.asyncio
+async def test_history_authority_fields_survive_companion_dispatch_unchanged():
+    bridge = FakeBridge()
+
+    async def rich_command(path, incoming):
+        bridge.commands.append((path, incoming))
+        return {"result": {
+            "delivery_id": incoming["delivery_id"],
+            "status": "executed",
+            "active_conversation_id": "conv-2",
+            "items": [{"conversation_id": "conv-2", "title": "Renamed"}],
+            "capabilities": {"history_rename": True, "history_archive": False},
+        }}
+
+    bridge.command = rich_command
+    dispatcher = CommandDispatcher(bridge, "/command", "mac-session")
+    dispatcher.activate(1)
+    incoming = command("mac-session", 1)
+    incoming["command_type"] = "history.rename"
+    result = await dispatcher.dispatch(incoming, 1)
+
+    assert result["active_conversation_id"] == "conv-2"
+    assert result["items"][0]["title"] == "Renamed"
+    assert result["capabilities"] == {"history_rename": True, "history_archive": False}
+
+
+@pytest.mark.asyncio
 async def test_companion_bridge_and_relay_hello_bind_exact_compatibility_metadata():
     config = SimpleNamespace(
         state_path="",

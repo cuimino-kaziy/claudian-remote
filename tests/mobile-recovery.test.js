@@ -143,3 +143,18 @@ test("an oversized active conversation keeps its newest readable text instead of
   assert.equal(cache.active_conversation_id, "active");
   assert.match(encoded, /NEWEST-TAIL/);
 });
+
+test("legacy cache history ids migrate to canonical conversation_id without losing readable content", () => {
+  const legacy = {
+    version: 1,
+    stored_at: 1,
+    active_conversation_id: "legacy",
+    conversations: {
+      legacy: { id: "legacy", title: "Cached", revision: 1, activeTurnId: null, turnOrder: [], turns: {} }
+    },
+    history: { items: [{ id: "legacy", title: "Cached", updated_at: 1 }], loaded: true }
+  };
+  const restored = restoreOfflineReplicaCache(legacy);
+  assert.equal(restored.activeConversationId, "legacy");
+  assert.deepEqual(restored.history.items, [{ conversation_id: "legacy", title: "Cached", updated_at: 1 }]);
+});

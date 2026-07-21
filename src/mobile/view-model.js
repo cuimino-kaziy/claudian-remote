@@ -1,4 +1,5 @@
 import { controlAvailability } from "./capabilities.js";
+import { deriveReadiness } from "./readiness.js";
 
 export const MOBILE_HEADER_MAX_PX = 56;
 export const AUTO_SCROLL_THRESHOLD_PX = 96;
@@ -16,7 +17,14 @@ function messageText(message) {
 }
 
 export function activeConversationModel(state) {
-  const conversation = state.activeConversationId ? state.conversations[state.activeConversationId] : null;
+  const viewedId = state.viewingConversationId && state.conversations?.[state.viewingConversationId]
+    ? state.viewingConversationId
+    : state.activeConversationId;
+  const conversation = viewedId ? state.conversations[viewedId] : null;
+  const executionConversation = state.activeConversationId ? state.conversations[state.activeConversationId] : null;
+  const executionTurn = executionConversation?.activeTurnId
+    ? executionConversation.turns?.[executionConversation.activeTurnId]
+    : null;
   const turns = conversation ? conversation.turnOrder.map((id) => conversation.turns[id]).filter(Boolean) : [];
   const messages = [];
   for (const turn of turns) {
@@ -63,11 +71,15 @@ export function activeConversationModel(state) {
     turns,
     messages,
     currentTurn: conversation?.activeTurnId ? conversation.turns[conversation.activeTurnId] : null,
+    executionConversationId: executionConversation?.id || null,
+    executionTurn,
+    browsingHistory: Boolean(conversation?.id && executionConversation?.id && conversation.id !== executionConversation.id),
     controls: controlAvailability(state),
     macOnline: state.transport?.status === "connected" && state.presence?.mac?.status === "online",
     transportStatus: state.transport?.status || "disconnected",
     compatibilityMode: state.compatibilityMode === true,
-    recovering: state.recovery?.required === true
+    recovering: state.recovery?.required === true,
+    readiness: deriveReadiness(state)
   };
 }
 

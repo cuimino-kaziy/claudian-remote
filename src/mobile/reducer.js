@@ -112,7 +112,10 @@ export function createReplicaState(seed = {}) {
     capabilities: normalizeCapabilities(seed.capabilities),
     compatibility: seed.compatibility || null,
     compatibilityMode: seed.compatibilityMode === true || seed.compatibility?.writable === false,
+    pairing: { status: "paired", ...(seed.pairing || {}) },
     activeConversationId: seed.activeConversationId || null,
+    viewingConversationId: seed.viewingConversationId || seed.activeConversationId || null,
+    viewingPinned: seed.viewingPinned === true,
     conversations: seed.conversations || {},
     history: { items: [], nextPage: null, loaded: false, ...(seed.history || {}) },
     commands: seed.commands || {},
@@ -243,6 +246,23 @@ export class MobileReplica {
     this.state.visible = Boolean(visible);
   }
 
+  setPairingStatus(status) {
+    const normalized = status === "required" ? "required" : "paired";
+    if (this.state.pairing?.status === normalized) return false;
+    this.state.pairing = { status: normalized };
+    this.notify("pairing");
+    return true;
+  }
+
+  selectConversationForViewing(conversationId, { pinned = true } = {}) {
+    const id = cleanId(conversationId, "");
+    if (!id || !this.state.conversations[id]) return false;
+    this.state.viewingConversationId = id;
+    this.state.viewingPinned = Boolean(pinned && id !== this.state.activeConversationId);
+    this.notify("history_view");
+    return true;
+  }
+
   drainCompletionSignals() {
     return this.state.completionSignals.splice(0, this.state.completionSignals.length);
   }
@@ -328,7 +348,8 @@ export class MobileReplica {
         this.state.presence.mac = {
           status: frame.status === "online" ? "online" : "offline",
           sessionId: frame.mac_session_id || null,
-          connectionGeneration: Number(frame.mac_connection_generation) || null
+          connectionGeneration: Number(frame.mac_connection_generation) || null,
+          reason: frame.reason === "vault_closed" ? "vault_closed" : null
         };
         if (frame.compatibility) {
           this.state.compatibility = normalizeCompatibilityResult(frame.compatibility);
@@ -384,9 +405,30 @@ export class MobileReplica {
       errorCode: receipt.error_code || frame.error || (nextStatus === "rejected" ? status || "rejected" : null),
       desktopStatus: nextStatus === "desktop_accepted" ? status : null
     });
+    if (receipt.capability) command.capability = cleanId(receipt.capability, "unknown");
     this.state.commands[deliveryId] = command;
-    if (command.commandType === "history.list" && Array.isArray(receipt.items)) {
-      this.state.history = { items: receipt.items, nextPage: receipt.next_page ?? null, loaded: true };
+    if (String(command.commandType || "").startsWith("history.") && Array.isArray(receipt.items)) {
+      const items = receipt.items.map((item) => ({
+        ...item,
+        conversation_id: cleanId(item?.conversation_id || item?.id, "")
+      })).filter((item) => item.conversation_id);
+      this.state.history = { items, nextPage: receipt.next_page ?? null, loaded: true };
+      for (const item of items) {
+        const conversation = this.state.conversations[item.conversation_id];
+        if (conversation) conversation.title = String(item.title || conversation.title || "");
+      }
+      const activeId = cleanId(receipt.active_conversation_id, "");
+      if (activeId) {
+        this.ensureConversation(activeId);
+        this.state.activeConversationId = activeId;
+        if (["history.new", "history.select"].includes(command.commandType)) {
+          this.state.viewingConversationId = activeId;
+          this.state.viewingPinned = false;
+        }
+      }
+      if (receipt.capabilities && typeof receipt.capabilities === "object") {
+        this.state.capabilities = normalizeCapabilities({ ...this.state.capabilities, ...receipt.capabilities });
+      }
     }
     this.notify("command");
     return { applied: true, command };
@@ -486,6 +528,9 @@ export class MobileReplica {
         steer: payload.supports_turn_steer,
         history_list: payload.supports_history,
         history_select: payload.supports_history,
+        history_new: payload.supports_history_new,
+        history_rename: payload.supports_history_rename,
+        history_archive: payload.supports_history_archive,
         stop: payload.supports_stop,
         approval: payload.supports_approval
       });
@@ -504,15 +549,25 @@ export class MobileReplica {
     } else if (type === "conversation.activated") {
       conversation.title = String(payload.title || conversation.title || "");
       this.state.activeConversationId = conversation.id;
+      this.state.viewingConversationId = conversation.id;
+      this.state.viewingPinned = false;
     } else if (type === "history.list") {
-      this.state.history = { items: Array.isArray(payload.items) ? payload.items : [], nextPage: payload.next_page ?? null, loaded: true };
+      this.state.history = {
+        items: (Array.isArray(payload.items) ? payload.items : []).map((item) => ({
+          ...item,
+          conversation_id: cleanId(item?.conversation_id || item?.id, "")
+        })).filter((item) => item.conversation_id),
+        nextPage: payload.next_page ?? null,
+        loaded: true
+      };
     } else if (type === "turn.started" && turn) {
       turn.status = "running";
       turn.activityOrder = [];
       turn.activities = {};
       turn.toolOrder = [];
       turn.tools = {};
-      this.state.activeConversationId = conversation.id;
+      if (!this.state.activeConversationId) this.state.activeConversationId = conversation.id;
+      if (!this.state.viewingConversationId) this.state.viewingConversationId = this.state.activeConversationId;
     } else if (type === "activity.updated" && turn) {
       const id = cleanId(entity.block_id || `${payload.stage || "activity"}-${turn.activityOrder.length}`);
       if (!turn.activities[id]) turn.activityOrder.push(id);
@@ -552,8 +607,9 @@ export class MobileReplica {
       turn.artifacts[id] = { id, ...payload };
     } else if (["turn.completed", "turn.interrupted", "turn.failed"].includes(type) && turn) {
       turn.status = type === "turn.completed" ? "completed" : type === "turn.interrupted" ? "interrupted" : "failed";
-      if (type === "turn.completed" && !replayed && this.state.visible && !this.completionSeen.has(turn.id)) {
-        this.completionSeen.add(turn.id);
+      const completionIdentity = `${conversation.id}\u0000${turn.id}`;
+      if (type === "turn.completed" && !replayed && this.state.visible && !this.completionSeen.has(completionIdentity)) {
+        this.completionSeen.add(completionIdentity);
         this.state.completionSignals.push({ turnId: turn.id, conversationId: conversation.id });
       }
     } else if (type === "command.receipt") {
@@ -577,6 +633,10 @@ export class MobileReplica {
     const conversation = projectionToConversation(projection);
     this.state.conversations = { ...this.state.conversations, [conversation.id]: conversation };
     this.state.activeConversationId = conversation.id;
+    if (!this.state.viewingPinned || !this.state.conversations[this.state.viewingConversationId]) {
+      this.state.viewingConversationId = conversation.id;
+      this.state.viewingPinned = false;
+    }
     this.state.recovery = { required: false, reason: null, requestedAtCursor: null };
     this.keyframes.delete(id);
 

@@ -1,5 +1,5 @@
 const STORAGE_VERSION = 1;
-const OFFLINE_CACHE_VERSION = 1;
+const OFFLINE_CACHE_VERSION = 2;
 export const DEFAULT_OFFLINE_CACHE_BYTES = 2 * 1024 * 1024;
 
 function encodedBytes(value) {
@@ -112,7 +112,7 @@ function fitCachedConversation(cache, conversation, { activeId, updatedAt, limit
       conversations: { ...cache.conversations, [conversation.id]: conversation },
       history: {
         ...cache.history,
-        items: [...cache.history.items, { id: conversation.id, title: conversation.title, updated_at: updatedAt }]
+        items: [...cache.history.items, { conversation_id: conversation.id, title: conversation.title, updated_at: updatedAt }]
       }
     };
     if (encodedBytes(tentative) <= limit) return conversation;
@@ -152,7 +152,7 @@ export function createOfflineReplicaCache(state, { maxBytes = DEFAULT_OFFLINE_CA
     if (conversation) {
       cache.active_conversation_id = activeId;
       cache.conversations[conversation.id] = conversation;
-      cache.history.items.push({ id: conversation.id, title: conversation.title, updated_at: updatedAt.get(id) || 0 });
+      cache.history.items.push({ conversation_id: conversation.id, title: conversation.title, updated_at: updatedAt.get(id) || 0 });
     }
   }
   if (!cache.conversations[activeId]) cache.active_conversation_id = Object.keys(cache.conversations)[0] || null;
@@ -160,7 +160,7 @@ export function createOfflineReplicaCache(state, { maxBytes = DEFAULT_OFFLINE_CA
 }
 
 export function restoreOfflineReplicaCache(value) {
-  if (!value || value.version !== OFFLINE_CACHE_VERSION || typeof value.conversations !== "object") {
+  if (!value || ![1, OFFLINE_CACHE_VERSION].includes(value.version) || typeof value.conversations !== "object") {
     return {
       transport: { status: "disconnected" },
       presence: { mac: { status: "offline", sessionId: null, connectionGeneration: null } },
@@ -176,8 +176,19 @@ export function restoreOfflineReplicaCache(value) {
     activeConversationId: value.active_conversation_id && value.conversations[value.active_conversation_id]
       ? String(value.active_conversation_id)
       : Object.keys(value.conversations)[0] || null,
+    viewingConversationId: value.active_conversation_id && value.conversations[value.active_conversation_id]
+      ? String(value.active_conversation_id)
+      : Object.keys(value.conversations)[0] || null,
     conversations: value.conversations,
-    history: { items: Array.isArray(value.history?.items) ? value.history.items : [], nextPage: null, loaded: true },
+    history: {
+      items: (Array.isArray(value.history?.items) ? value.history.items : []).map((item) => ({
+        conversation_id: String(item?.conversation_id || item?.id || ""),
+        title: cleanText(item?.title, 512),
+        updated_at: Number(item?.updated_at || item?.updatedAt || 0)
+      })).filter((item) => item.conversation_id),
+      nextPage: null,
+      loaded: true
+    },
     commands: {}
   };
 }

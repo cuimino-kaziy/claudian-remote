@@ -93,7 +93,8 @@ test("mixed compatibility preserves cached history but disables every state-chan
   assert.equal(replica.state.history.items[0].title, "Cached");
   assert.equal(replica.state.compatibility.writable, false);
   assert.deepEqual(controlAvailability(replica.state), {
-    send: false, stop: false, steer: false, approval: false, history: false, historySelect: false
+    send: false, stop: false, steer: false, approval: false,
+    history: true, historySelect: false, historyNew: false, historyRename: false, historyArchive: false
   });
   assert.throws(() => buildCommand(replica.state, "message.submit", { text: "blocked" }), /compatibility_mismatch/);
 });

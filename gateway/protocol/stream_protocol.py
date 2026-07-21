@@ -35,6 +35,7 @@ EVENT_FIELDS: Dict[str, Set[str]] = {
         "mode", "supports_turn_steer", "supports_history", "supports_stop",
         "supports_approval", "reason", "writable", "current_version",
         "required_version", "missing_capabilities", "remediation",
+        "supports_history_new", "supports_history_rename", "supports_history_archive",
     },
     "conversation.activated": {"conversation_id", "title"},
     "history.list": {"items", "next_page"},
@@ -67,6 +68,9 @@ COMMAND_FIELDS: Dict[str, Set[str]] = {
     "approval.respond": {"approval_id", "value"},
     "history.list": {"page"},
     "history.select": {"conversation_id"},
+    "history.new": set(),
+    "history.rename": {"conversation_id", "title"},
+    "history.archive": {"conversation_id"},
     "keyframe.request": {"reason"},
     "upload.cancel": {"upload_id"},
 }
@@ -286,6 +290,12 @@ def validate_command(command: Mapping[str, Any], now: Optional[datetime] = None)
         _require_nonempty_string(target.get("turn_id"), "missing_turn_id")
     if command_type == "approval.respond":
         _require_nonempty_string(target.get("approval_id") or payload.get("approval_id"), "missing_approval_id")
+    if command_type in {"history.select", "history.rename", "history.archive"}:
+        _require_nonempty_string(payload.get("conversation_id"), "missing_history_conversation_id")
+    if command_type == "history.rename":
+        title = _require_nonempty_string(payload.get("title"), "missing_history_title")
+        if len(title) > 200:
+            raise ProtocolError("history_title_too_long")
     if command_type == "message.submit":
         text = payload.get("text")
         if not isinstance(text, str):

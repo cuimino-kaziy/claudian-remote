@@ -14,8 +14,9 @@ export class MobileHeader {
   render(model) {
     this.title.textContent = model.title || "Claudian";
     this.title.title = model.title || "Claudian";
-    const state = model.recovering ? "校准中" : model.macOnline ? (model.compatibilityMode ? "只读" : "在线") : "离线";
-    this.status.textContent = `● ${state}`;
-    this.status.dataset.state = model.recovering ? "recovering" : model.macOnline ? "online" : "offline";
+    const readiness = model.readiness || { label: model.macOnline ? "在线" : "离线", status: model.macOnline ? "ready" : "blocked", reason_code: "unknown" };
+    this.status.textContent = `● ${readiness.label}`;
+    this.status.dataset.state = readiness.status;
+    this.status.dataset.reason = readiness.reason_code;
   }
 }

@@ -6,6 +6,8 @@ import { MobileRecoveryController } from "../src/mobile/recovery.js";
 import { RemoteClient } from "../src/mobile/remote-client.js";
 import { createObsidianFetch } from "../src/mobile/obsidian-http.js";
 import { COMPATIBILITY_SET } from "../src/protocol/compatibility.js";
+import { deriveReadiness, pairingStatusFromSettings } from "../src/mobile/readiness.js";
+import { buildDiagnosticReport } from "../src/mobile/diagnostic-report.js";
 
 class FakeTimers {
   constructor() { this.jobs = new Map(); this.next = 1; }
@@ -131,4 +133,34 @@ test("Obsidian native HTTP adapter keeps bounded binary chunks and disables CORS
   assert.equal(seen[0].throw, false);
   assert.ok(seen[0].body instanceof ArrayBuffer);
   assert.deepEqual(Array.from(new Uint8Array(seen[0].body)), [1, 2, 3]);
+});
+
+test("UI and Agent diagnostics share one structured readiness reason vocabulary", () => {
+  const base = {
+    transport: { status: "connected" },
+    presence: { mac: { status: "online", sessionId: "mac", connectionGeneration: 1 } },
+    compatibility: { writable: true, reason: "ready" },
+    capabilities: { semantic_stream: true },
+    recovery: { required: false },
+    activeConversationId: "conv",
+    conversations: { conv: { id: "conv", activeTurnId: null, turns: {} } }
+  };
+  const cases = [
+    [{ ...base, pairing: { status: "required" } }, "pairing_required"],
+    [{ ...base, transport: { status: "disconnected" } }, "relay_offline"],
+    [{ ...base, compatibility: { writable: false, reason: "compatibility_set_mismatch" } }, "compatibility_set_mismatch"],
+    [{ ...base, presence: { mac: { status: "offline", reason: "vault_closed" } } }, "vault_closed"],
+    [{ ...base, presence: { mac: { status: "offline" } } }, "mac_offline"],
+    [base, "ready"]
+  ];
+  for (const [state, expected] of cases) {
+    assert.equal(deriveReadiness(state).reason_code, expected);
+    assert.match(buildDiagnosticReport(state), new RegExp(`readiness_reason=${expected}`));
+  }
+});
+
+test("device settings derive pairing-required readiness without a test-only seed", () => {
+  assert.equal(pairingStatusFromSettings({ mobile_token: "", re_pair_required: false }), "required");
+  assert.equal(pairingStatusFromSettings({ mobile_token: "token", re_pair_required: true }), "required");
+  assert.equal(pairingStatusFromSettings({ mobile_token: "token", re_pair_required: false }), "paired");
 });

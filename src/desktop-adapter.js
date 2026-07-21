@@ -8,6 +8,39 @@ function currentConversationId(tab) {
   return tab?.conversationId || tab?.state?.currentConversationId || null;
 }
 
+function historyItems(claudian) {
+  return (claudian?.getConversationList?.() || []).map((item) => ({
+    conversation_id: String(item?.id || ""),
+    title: safeText(item?.title || ""),
+    updated_at: item?.updatedAt || item?.lastResponseAt || null,
+    message_count: Math.max(0, Number(item?.messageCount) || 0),
+    archived: item?.archived === true
+  })).filter((item) => item.conversation_id);
+}
+
+export function historyCapabilities(claudian, tab) {
+  const conversation = tab?.controllers?.conversationController;
+  return {
+    history_list: typeof claudian?.getConversationList === "function",
+    history_select: typeof conversation?.switchTo === "function",
+    history_new: typeof claudian?.createConversation === "function" && typeof conversation?.switchTo === "function",
+    history_rename: typeof claudian?.renameConversation === "function",
+    // Claudian 2.0.4 has permanent delete but no archive API. Never map
+    // archive to delete or to updateConversation: its persisted metadata
+    // allowlist does not retain an archived marker.
+    history_archive: typeof claudian?.archiveConversation === "function"
+  };
+}
+
+function historyReceipt(command, claudian, tab, extra = {}) {
+  return outcome("executed", command, {
+    items: historyItems(claudian),
+    active_conversation_id: currentConversationId(tab),
+    capabilities: historyCapabilities(claudian, tab),
+    ...extra
+  });
+}
+
 export class DesktopAdapter {
   constructor({ claudian, capture, getActiveTab, macSessionId, connectionGeneration, clock = () => Date.now(), maxReceipts = 1024 }) {
     this.claudian = claudian;
@@ -183,15 +216,70 @@ export class DesktopAdapter {
         break;
       }
       case "history.list":
-        result = outcome("executed", command, { items: (this.claudian.getConversationList?.() || []).map((item) => ({
-          conversation_id: item.id, title: safeText(item.title || ""), updated_at: item.updatedAt || null, message_count: item.messageCount || 0
-        })) });
+        if (typeof this.claudian?.getConversationList !== "function") {
+          result = outcome("capability_missing", command, { capability: "history_list" });
+        } else result = historyReceipt(command, this.claudian, tab);
         break;
       case "history.select":
         if (tab.state?.isStreaming) result = outcome("rejected", command, { error_code: "streaming_history_switch_forbidden" });
         else if (typeof conversation?.switchTo !== "function") result = outcome("capability_missing", command, { capability: "history_select" });
-        else { await conversation.switchTo(command.payload.conversation_id); result = outcome("executed", command); }
+        else {
+          const selectedId = String(command.payload.conversation_id || "");
+          await conversation.switchTo(selectedId);
+          result = currentConversationId(tab) === selectedId
+            ? historyReceipt(command, this.claudian, tab)
+            : outcome("rejected", command, { error_code: "history_select_not_confirmed" });
+        }
         break;
+      case "history.new": {
+        const capabilities = historyCapabilities(this.claudian, tab);
+        if (tab.state?.isStreaming) result = outcome("rejected", command, { error_code: "streaming_history_switch_forbidden" });
+        else if (!capabilities.history_new) result = outcome("capability_missing", command, { capability: "history_new" });
+        else {
+          const current = this.claudian.getConversationSync?.(currentConversationId(tab));
+          const created = await this.claudian.createConversation(current?.providerId ? { providerId: current.providerId } : undefined);
+          const createdId = String(created?.id || "");
+          if (!createdId) result = outcome("rejected", command, { error_code: "history_new_not_confirmed" });
+          else {
+            await conversation.switchTo(createdId);
+            result = currentConversationId(tab) === createdId
+              ? historyReceipt(command, this.claudian, tab, { created_conversation_id: createdId })
+              : outcome("rejected", command, { error_code: "history_new_not_confirmed" });
+          }
+        }
+        break;
+      }
+      case "history.rename": {
+        if (typeof this.claudian?.renameConversation !== "function") {
+          result = outcome("capability_missing", command, { capability: "history_rename" });
+          break;
+        }
+        const conversationId = String(command.payload.conversation_id || "");
+        const title = String(command.payload.title || "").trim().slice(0, 200);
+        if (!conversationId || !title) {
+          result = outcome("rejected", command, { error_code: "invalid_history_rename" });
+          break;
+        }
+        await this.claudian.renameConversation(conversationId, title);
+        const authoritative = historyItems(this.claudian).find((item) => item.conversation_id === conversationId);
+        result = authoritative?.title === safeText(title)
+          ? historyReceipt(command, this.claudian, tab, { renamed_conversation_id: conversationId })
+          : outcome("rejected", command, { error_code: "history_rename_not_confirmed" });
+        break;
+      }
+      case "history.archive": {
+        if (typeof this.claudian?.archiveConversation !== "function") {
+          result = outcome("capability_missing", command, { capability: "history_archive" });
+          break;
+        }
+        const conversationId = String(command.payload.conversation_id || "");
+        await this.claudian.archiveConversation(conversationId);
+        const authoritative = historyItems(this.claudian).find((item) => item.conversation_id === conversationId);
+        result = !authoritative || authoritative.archived
+          ? historyReceipt(command, this.claudian, tab, { archived_conversation_id: conversationId })
+          : outcome("rejected", command, { error_code: "history_archive_not_confirmed" });
+        break;
+      }
       case "keyframe.request":
         result = outcome("executed", command, await this.capture.emitKeyframe(tab));
         break;

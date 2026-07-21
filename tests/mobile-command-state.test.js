@@ -331,3 +331,78 @@ test("replay and interrupted terminal events never trigger completion signal", a
   await replica.applyFrame({ type: "event.committed", epoch: "epoch", cursor: 3, replayed: false, event: events[2] });
   assert.deepEqual(replica.state.completionSignals, []);
 });
+
+test("browsing another cached conversation does not move a running delivery or its stream", async () => {
+  const replica = new MobileReplica({
+    activeConversationId: "origin",
+    viewingConversationId: "origin",
+    conversations: {
+      origin: { id: "origin", title: "Running", revision: 0, activeTurnId: null, turnOrder: [], turns: {} },
+      other: { id: "other", title: "History", revision: 1, activeTurnId: null, turnOrder: [], turns: {} }
+    }
+  });
+  replica.beginCommand({ deliveryId: "delivery", commandType: "message.submit", text: "run here" });
+  replica.selectConversationForViewing("other");
+
+  await replica.applyFrame({
+    type: "event.committed", epoch: "epoch", cursor: 1,
+    event: {
+      protocol: "claudian.remote.v2", kind: "event", event_type: "turn.started",
+      source: { instance_id: "bridge", sequence: 1 }, entity: { conversation_id: "origin", turn_id: "turn" },
+      revision: 1, payload: { status: "running", started_at: "now" }
+    }
+  });
+  await replica.applyFrame({
+    type: "event.committed", epoch: "epoch", cursor: 2,
+    event: {
+      protocol: "claudian.remote.v2", kind: "event", event_type: "text.replace",
+      source: { instance_id: "bridge", sequence: 2 },
+      entity: { conversation_id: "origin", turn_id: "turn", message_id: "answer", block_id: "text" },
+      revision: 2, payload: { text: "still in origin" }
+    }
+  });
+
+  assert.equal(replica.state.activeConversationId, "origin");
+  assert.equal(replica.state.viewingConversationId, "other");
+  assert.equal(replica.state.commands.delivery.conversationId, "origin");
+  assert.equal(activeConversationModel(replica.state).id, "other");
+  assert.equal(replica.state.conversations.origin.turns.turn.messages.answer.blocks.text.text, "still in origin");
+});
+
+test("history receipts update replica only after authoritative desktop confirmation", async () => {
+  const replica = new MobileReplica({
+    activeConversationId: "one",
+    viewingConversationId: "one",
+    conversations: { one: { id: "one", title: "Old", revision: 1, activeTurnId: null, turnOrder: [], turns: {} } }
+  });
+  replica.beginCommand({ deliveryId: "rename", commandType: "history.rename" });
+  assert.equal(replica.state.history.loaded, false);
+  await replica.applyFrame({
+    type: "command.receipt",
+    receipt: {
+      delivery_id: "rename", status: "executed", active_conversation_id: "one",
+      items: [{ conversation_id: "one", title: "Renamed", message_count: 0 }]
+    }
+  });
+  assert.equal(replica.state.history.items[0].title, "Renamed");
+  assert.equal(replica.state.conversations.one.title, "Renamed");
+});
+
+test("completion dedupe uses conversation and turn identity and ignores replay", async () => {
+  const replica = new MobileReplica({ visible: true });
+  const completion = (conversationId, sequence, replayed = false) => replica.applyFrame({
+    type: "event.committed", epoch: "epoch", cursor: sequence, replayed,
+    event: {
+      protocol: "claudian.remote.v2", kind: "event", event_type: "turn.completed",
+      source: { instance_id: "bridge", sequence }, entity: { conversation_id: conversationId, turn_id: "same-turn" },
+      revision: 1, payload: { status: "completed", checksum: `sha256:${"0".repeat(64)}` }
+    }
+  });
+  await completion("one", 1);
+  await completion("two", 2);
+  await completion("three", 3, true);
+  assert.deepEqual(replica.state.completionSignals, [
+    { turnId: "same-turn", conversationId: "one" },
+    { turnId: "same-turn", conversationId: "two" }
+  ]);
+});

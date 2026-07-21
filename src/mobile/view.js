@@ -14,6 +14,7 @@ import { HistoryDrawer } from "./components/history-drawer.js";
 import { MessageList } from "./components/message-list.js";
 import { MobileComposer } from "./components/composer.js";
 import { FrameRenderScheduler } from "./render-scheduler.js";
+import { pairingStatusFromSettings } from "./readiness.js";
 
 export const MOBILE_VIEW_TYPE = "claudian-remote-mobile";
 
@@ -37,7 +38,9 @@ export class ClaudianRemoteMobileView extends ItemView {
     this.root = element("div", "claudian-remote-shell");
     this.contentEl.append(this.root);
     this.renderScheduler = new FrameRenderScheduler({ render: () => this.renderNow() });
-    this.replica = new MobileReplica(this.plugin.recoverySeed());
+    const seed = this.plugin.recoverySeed();
+    seed.pairing = { status: pairingStatusFromSettings(this.plugin.settings) };
+    this.replica = new MobileReplica(seed);
     const http = createObsidianFetch(requestUrl);
     this.client = new RemoteClient({
       baseUrl: this.plugin.settings.relay_base_url,
@@ -88,11 +91,15 @@ export class ClaudianRemoteMobileView extends ItemView {
     this.history = new HistoryDrawer(this.root, {
       onClose: () => this.setHistoryOpen(false),
       onRefresh: () => void this.loadHistory(),
-      onSelect: (conversationId) => void this.selectHistory(conversationId)
+      onSelect: (conversationId) => void this.selectHistory(conversationId),
+      onNew: () => void this.createHistory(),
+      onRename: (conversationId, title) => void this.renameHistory(conversationId, title),
+      onArchive: (conversationId) => void this.archiveHistory(conversationId)
     });
     this.createDetailsSheet();
     this.root.addEventListener("click", (event) => this.handleLinkClick(event));
     this.registerDomEvent(document, "visibilitychange", () => void this.lifecycle.setVisible(document.visibilityState !== "hidden"));
+    this.pairingWatcher = globalThis.setInterval(() => this.refreshPairingState(), 1000);
     this.renderScheduler.flush();
 
     if (!this.plugin.settings.relay_base_url || !this.plugin.settings.mobile_token) {
@@ -102,6 +109,22 @@ export class ClaudianRemoteMobileView extends ItemView {
         if (!this.closing) this.replica.requireReset("mobile_connect_failed");
       });
     }
+  }
+
+  refreshPairingState() {
+    if (this.closing || !this.replica) return false;
+    const status = pairingStatusFromSettings(this.plugin.settings);
+    if (!this.replica.setPairingStatus(status)) return false;
+    if (status === "required") {
+      void this.lifecycle?.setVisible(false);
+      return true;
+    }
+    this.client.baseUrl = String(this.plugin.settings.relay_base_url || "").replace(/\/+$/, "");
+    this.client.deviceId = this.plugin.settings.device_id;
+    this.client.clientInstanceId = this.plugin.settings.client_instance_id;
+    this.attachments.baseUrl = this.client.baseUrl;
+    if (document.visibilityState !== "hidden") void this.lifecycle?.setVisible(true);
+    return true;
   }
 
   enqueueFrame(frame) {
@@ -181,9 +204,32 @@ export class ClaudianRemoteMobileView extends ItemView {
 
   async selectHistory(conversationId) {
     const model = activeConversationModel(this.replica.state);
-    if (!model.controls.historySelect) return new Notice("生成中暂不能切换对话");
-    await this.send("history.select", { conversation_id: conversationId });
+    const browsing = this.replica.selectConversationForViewing(conversationId);
+    if (!browsing) return new Notice("该对话尚未同步到本机缓存");
+    if (!model.controls.historySelect) {
+      new Notice(model.executionTurn?.status === "running"
+        ? "正在查看历史；当前任务仍在原对话中运行"
+        : "当前为只读历史，未切换电脑端对话");
+      this.setHistoryOpen(false);
+      return;
+    }
+    const selected = await this.send("history.select", { conversation_id: conversationId });
+    if (!selected) this.replica.selectConversationForViewing(model.executionConversationId, { pinned: false });
     this.setHistoryOpen(false);
+  }
+
+  async createHistory() {
+    const created = await this.send("history.new", {});
+    if (created) this.setHistoryOpen(false);
+  }
+
+  async renameHistory(conversationId, title) {
+    await this.send("history.rename", { conversation_id: conversationId, title });
+  }
+
+  async archiveHistory(conversationId) {
+    const archived = await this.send("history.archive", { conversation_id: conversationId });
+    if (!archived) new Notice("Claudian 2.0.4 暂不支持归档；没有删除任何对话");
   }
 
   async sendMessage(text, steer) {
@@ -248,6 +294,9 @@ export class ClaudianRemoteMobileView extends ItemView {
       const response = await this.client.submit(command);
       await this.replica.applyFrame(response);
       const state = this.replica.state.commands[command.delivery_id];
+      if (state?.status === "rejected" && state?.errorCode === "capability_missing") {
+        new Notice(`当前 Claudian 不支持 ${state.capability || "此操作"}`);
+      }
       return !state || state.status === "rejected" ? null : command;
     } catch {
       await this.replica.applyFrame({
@@ -317,12 +366,17 @@ export class ClaudianRemoteMobileView extends ItemView {
     this.messages.render(model);
     this.composer.render({
       controls: model.controls,
-      isStreaming: model.currentTurn?.status === "running",
+      isStreaming: model.executionTurn?.status === "running",
       offline: !model.macOnline,
       uploadEnabled: model.controls.send,
       attachments: this.attachments.snapshot()
     });
-    this.history.render(this.replica.state.history, model.id, model.controls.historySelect);
+    this.history.render(
+      this.replica.state.history,
+      model.executionConversationId,
+      model.controls,
+      model.id
+    );
     const transportLabel = {
       connected: "已连接",
       connecting: "正在连接",
@@ -331,6 +385,7 @@ export class ClaudianRemoteMobileView extends ItemView {
     const detailValues = [
       ["Remote", transportLabel],
       ["Mac", model.macOnline ? "在线" : "离线"],
+      ["状态", `${model.readiness.label} (${model.readiness.reason_code})`],
       ["同步", model.recovering ? "正在校准" : `游标 ${this.replica.state.relay.appliedCursor}`],
       ["权限", "沿用电脑端 Claudian 默认设置"]
     ];
@@ -353,6 +408,7 @@ export class ClaudianRemoteMobileView extends ItemView {
 
   async onClose() {
     this.closing = true;
+    globalThis.clearInterval(this.pairingWatcher);
     this.unsubscribe?.();
     this.renderScheduler?.dispose();
     this.composer?.dispose();

@@ -4,7 +4,7 @@ import { DesktopAdapter } from "../src/desktop-adapter.js";
 
 const expiry = "2099-01-01T00:00:00Z";
 
-function setup({ streaming = false, steer = true } = {}) {
+function setup({ streaming = false, steer = true, archive = false } = {}) {
   const calls = [];
   const events = [];
   const tab = {
@@ -18,11 +18,40 @@ function setup({ streaming = false, steer = true } = {}) {
         async handleApprovalRequest() { return new Promise(() => {}); },
         getActiveCapabilities: () => ({ supportsTurnSteer: steer })
       },
-      conversationController: { async switchTo(id) { calls.push(["select", id]); tab.conversationId = id; } }
+      conversationController: {
+        async switchTo(id) {
+          calls.push(["select", id]);
+          tab.conversationId = id;
+          tab.state.currentConversationId = id;
+        }
+      }
     }
   };
   const normalizer = { revisionFor: () => 4, emit: async (type, context, payload) => events.push({ type, context, payload }) };
-  const claudian = { getConversationList: () => [{ id: "conv-1", title: "One", updatedAt: 1, messageCount: 2 }], getConversationSync: () => null };
+  const conversations = [{ id: "conv-1", providerId: "claude", title: "One", updatedAt: 1, messageCount: 2 }];
+  const claudian = {
+    getConversationList: () => conversations.map((item) => ({ ...item })),
+    getConversationSync: (id) => conversations.find((item) => item.id === id) || null,
+    async createConversation() {
+      calls.push(["new"]);
+      const created = { id: "conv-2", providerId: "claude", title: "New Chat", updatedAt: 2, messageCount: 0 };
+      conversations.unshift(created);
+      return created;
+    },
+    async renameConversation(id, title) {
+      calls.push(["rename", id, title]);
+      const item = conversations.find((candidate) => candidate.id === id);
+      if (item) item.title = title;
+    },
+    async deleteConversation(id) { calls.push(["delete", id]); }
+  };
+  if (archive) {
+    claudian.archiveConversation = async (id) => {
+      calls.push(["archive", id]);
+      const item = conversations.find((candidate) => candidate.id === id);
+      if (item) item.archived = true;
+    };
+  }
   const adapter = new DesktopAdapter({ claudian, capture: { normalizer }, getActiveTab: () => tab, macSessionId: "session-a", connectionGeneration: 7, clock: () => 0 });
   return { adapter, calls, tab, events };
 }
@@ -63,6 +92,36 @@ test("stop, history list/select, approval and keyframe use existing desktop cont
   const second = command("history.select", { conversation_id: "conv-2" }); second.delivery_id += "-2";
   assert.equal((await adapter.execute(second)).status, "executed");
   assert.deepEqual(calls.at(-1), ["select", "conv-2"]);
+});
+
+test("history new and rename use Claudian 2.0.4 public APIs and return authoritative history", async () => {
+  const { adapter, calls, tab } = setup();
+  const created = await adapter.execute(command("history.new"));
+  assert.equal(created.status, "executed");
+  assert.equal(created.active_conversation_id, "conv-2");
+  assert.deepEqual(calls.slice(0, 2), [["new"], ["select", "conv-2"]]);
+  assert.equal(created.items[0].conversation_id, "conv-2");
+
+  const rename = command("history.rename", { conversation_id: "conv-2", title: "Renamed" });
+  rename.delivery_id = "delivery-history.rename";
+  rename.target.conversation_id = tab.state.currentConversationId;
+  const renamed = await adapter.execute(rename);
+  assert.equal(renamed.status, "executed");
+  assert.deepEqual(calls.at(-1), ["rename", "conv-2", "Renamed"]);
+  assert.equal(renamed.items.find((item) => item.conversation_id === "conv-2").title, "Renamed");
+});
+
+test("history archive fails closed when Claudian has no archive capability and never deletes", async () => {
+  const { adapter, calls } = setup();
+  const archive = command("history.archive", { conversation_id: "conv-1" });
+  archive.delivery_id = "delivery-history.archive";
+  const result = await adapter.execute(archive);
+  assert.deepEqual(result, {
+    delivery_id: "delivery-history.archive",
+    status: "capability_missing",
+    capability: "history_archive"
+  });
+  assert.equal(calls.some(([name]) => name === "delete"), false);
 });
 
 test("session, connection generation, revision, turn, expiry, and capabilities are checked again locally", async () => {

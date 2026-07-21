@@ -40,7 +40,10 @@ test("offline state remains readable but disables every desktop mutation", () =>
   offline.transport.status = "disconnected";
   const model = activeConversationModel(offline);
   assert.equal(model.messages[0].text, "streaming");
-  assert.deepEqual(model.controls, { send: false, stop: false, steer: false, approval: false, history: false, historySelect: false });
+  assert.deepEqual(model.controls, {
+    send: false, stop: false, steer: false, approval: false,
+    history: false, historySelect: false, historyNew: false, historyRename: false, historyArchive: false
+  });
 });
 
 test("scroll policy follows only when user stays near bottom", () => {
@@ -92,6 +95,17 @@ test("mobile stylesheet reserves compact header and 44px touch targets", async (
   assert.match(css, /--cr-touch:\s*44px/);
   assert.match(css, /env\(safe-area-inset-bottom\)/);
   assert.match(css, /border-radius:\s*22px/);
+  assert.match(css, /claudian-remote-history-search[\s\S]*?min-height:\s*var\(--cr-touch\)/);
+  assert.match(css, /claudian-remote-history-action[\s\S]*?min-height:\s*var\(--cr-touch\)/);
+});
+
+test("mobile view seeds and refreshes readiness from device pairing settings", async () => {
+  const view = await readFile(new URL("../src/mobile/view.js", import.meta.url), "utf8");
+  const reducer = await readFile(new URL("../src/mobile/reducer.js", import.meta.url), "utf8");
+  assert.match(view, /seed\.pairing\s*=\s*\{\s*status:\s*pairingStatusFromSettings\(this\.plugin\.settings\)/);
+  assert.match(view, /setInterval\(\(\)\s*=>\s*this\.refreshPairingState\(\),\s*1000\)/);
+  assert.match(view, /clearInterval\(this\.pairingWatcher\)/);
+  assert.match(reducer, /setPairingStatus\(status\)/);
 });
 
 test("mobile composer retains safe-area footer padding", async () => {

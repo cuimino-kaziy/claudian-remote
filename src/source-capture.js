@@ -116,7 +116,10 @@ export class SourceCapture {
       steer: Boolean(provider.supportsTurnSteer && typeof input?.steerQueuedMessage === "function"),
       approval: typeof input?.handleApprovalRequest === "function",
       history_list: typeof this.claudian?.getConversationList === "function",
-      history_select: typeof conversation?.switchTo === "function"
+      history_select: typeof conversation?.switchTo === "function",
+      history_new: typeof this.claudian?.createConversation === "function" && typeof conversation?.switchTo === "function",
+      history_rename: typeof this.claudian?.renameConversation === "function",
+      history_archive: typeof this.claudian?.archiveConversation === "function"
     };
   }
 
@@ -173,6 +176,9 @@ export class SourceCapture {
       mode: compatibility.writable ? "streaming" : "compatibility",
       supports_turn_steer: capabilities.steer,
       supports_history: capabilities.history_list && capabilities.history_select,
+      supports_history_new: capabilities.history_new,
+      supports_history_rename: capabilities.history_rename,
+      supports_history_archive: capabilities.history_archive,
       supports_stop: capabilities.stop,
       supports_approval: capabilities.approval,
       reason: compatibility.reason,
