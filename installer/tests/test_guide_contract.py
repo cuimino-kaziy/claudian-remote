@@ -42,7 +42,6 @@ def test_every_actionable_result_and_gate_has_guide_copy():
         "invalid_lifecycle_input",
     }
     gate_types = {
-        "github_auth_required",
         "tailscale_install_required",
         "tailscale_login_required",
         "tailscale_https_consent_required",

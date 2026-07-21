@@ -29,6 +29,11 @@ class ReleaseValidationError(ValueError):
     pass
 
 
+REQUIRED_RUNTIME_VERSIONS = {"python": "3.12.11", "uv": "0.10.12"}
+REQUIRED_RUNTIME_TARGETS = {("darwin", "arm64"), ("darwin", "x86_64")}
+SHA256_PATTERN = re.compile(r"[a-f0-9]{64}")
+
+
 def _canonical_json(value: Any) -> str:
     if isinstance(value, Mapping):
         return "{" + ",".join(
@@ -270,7 +275,51 @@ def _safe_extract(archive: Path, destination: Path) -> None:
                 raise ReleaseValidationError("release_archive_path_escape")
             if member.issym() or member.islnk() or member.isdev():
                 raise ReleaseValidationError("release_archive_unsafe_member")
-        bundle.extractall(destination, filter="data")
+        # The lifecycle initially runs on the macOS bootstrap Python (3.9 on
+        # supported older systems) before it installs the pinned 3.12 runtime.
+        # The checks above provide the subset enforced by tarfile's newer data
+        # filter without relying on the Python 3.12-only ``filter`` argument.
+        bundle.extractall(destination)
+
+
+def _validate_runtime_distribution(manifest: Mapping[str, Any]) -> None:
+    compatibility = manifest.get("compatibility_set")
+    runtime = compatibility.get("runtime") if isinstance(compatibility, Mapping) else None
+    if not isinstance(runtime, Mapping):
+        raise ReleaseValidationError("runtime_distribution_invalid")
+    if (
+        runtime.get("delivery") != "immutable_upstream_asset"
+        or any(runtime.get(component) != version for component, version in REQUIRED_RUNTIME_VERSIONS.items())
+    ):
+        raise ReleaseValidationError("runtime_distribution_invalid")
+    assets = runtime.get("assets")
+    if not isinstance(assets, list) or len(assets) != len(REQUIRED_RUNTIME_TARGETS):
+        raise ReleaseValidationError("runtime_distribution_invalid")
+    targets: set[tuple[str, str]] = set()
+    for descriptor in assets:
+        if not isinstance(descriptor, Mapping):
+            raise ReleaseValidationError("runtime_distribution_invalid")
+        target = (str(descriptor.get("platform") or ""), str(descriptor.get("arch") or ""))
+        if target not in REQUIRED_RUNTIME_TARGETS or target in targets:
+            raise ReleaseValidationError("runtime_distribution_invalid")
+        targets.add(target)
+        for component, version in REQUIRED_RUNTIME_VERSIONS.items():
+            item = descriptor.get(component)
+            if not isinstance(item, Mapping) or item.get("version") != version:
+                raise ReleaseValidationError("runtime_distribution_invalid")
+            parsed = urlsplit(str(item.get("url") or ""))
+            if (
+                parsed.scheme != "https"
+                or not parsed.netloc
+                or parsed.username
+                or parsed.password
+                or parsed.query
+                or parsed.fragment
+                or not SHA256_PATTERN.fullmatch(str(item.get("sha256") or ""))
+            ):
+                raise ReleaseValidationError("runtime_distribution_invalid")
+    if targets != REQUIRED_RUNTIME_TARGETS:
+        raise ReleaseValidationError("runtime_distribution_invalid")
 
 
 class BootstrapVerifiedReleaseSource:
@@ -357,12 +406,16 @@ class BootstrapVerifiedReleaseSource:
         payload = _canonical_json(unsigned).encode("utf-8")
         if not encoded_signature or not self.signature_verifier(public_key, payload, encoded_signature):
             raise ReleaseValidationError("manifest_signature_unverified")
+        compatibility = manifest.get("compatibility_set")
+        plugin = compatibility.get("plugin") if isinstance(compatibility, Mapping) else None
         if (
             manifest.get("distribution_channel") != "private_beta"
             or manifest.get("plugin_update_owner") != "lifecycle_manager"
-            or manifest.get("compatibility_set", {}).get("plugin", {}).get("id") != "claudian-remote"
+            or not isinstance(plugin, Mapping)
+            or plugin.get("id") != "claudian-remote"
         ):
             raise ReleaseValidationError("release_contract_mismatch")
+        _validate_runtime_distribution(manifest)
         expected = str(plan.get("compatibility_set_id") or "")
         actual_version = str(manifest.get("release_version") or "")
         if expected != f"claudian-remote-{actual_version}":

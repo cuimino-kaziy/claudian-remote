@@ -13,7 +13,33 @@ from installer.claudian_remote_lifecycle.runtime import (
     ReleaseValidationError,
     _default_key_fingerprint,
     _default_signature_verifier,
+    _safe_extract,
 )
+
+
+def runtime_distribution(*, delivery="immutable_upstream_asset"):
+    targets = []
+    for arch in ("arm64", "x86_64"):
+        targets.append({
+            "platform": "darwin",
+            "arch": arch,
+            "python": {
+                "version": "3.12.11",
+                "url": f"https://downloads.example/python-{arch}.tar.gz",
+                "sha256": "a" * 64,
+            },
+            "uv": {
+                "version": "0.10.12",
+                "url": f"https://downloads.example/uv-{arch}.tar.gz",
+                "sha256": "b" * 64,
+            },
+        })
+    return {
+        "python": "3.12.11",
+        "uv": "0.10.12",
+        "delivery": delivery,
+        "assets": targets,
+    }
 
 
 def write_release(tmp_path: Path, *, name="plugin.tar.gz", component="plugin", version="0.2.0-beta.1"):
@@ -29,7 +55,10 @@ def write_release(tmp_path: Path, *, name="plugin.tar.gz", component="plugin", v
         "release_version": version,
         "distribution_channel": "private_beta",
         "plugin_update_owner": "lifecycle_manager",
-        "compatibility_set": {"plugin": {"id": "claudian-remote"}},
+        "compatibility_set": {
+            "plugin": {"id": "claudian-remote"},
+            "runtime": runtime_distribution(),
+        },
         "assets": [{
             "name": name,
             "component": component,
@@ -62,6 +91,21 @@ def source(release, trust, *, signature_valid=True):
         key_fingerprint=lambda _public_key: "f" * 64,
         signature_verifier=lambda _public_key, _payload, _signature: signature_valid,
     )
+
+
+def test_safe_extract_supports_the_macos_bootstrap_python(tmp_path):
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    (source_root / "payload.txt").write_text("verified payload", encoding="utf-8")
+    archive = tmp_path / "payload.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(source_root / "payload.txt", arcname="payload.txt")
+
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    _safe_extract(archive, destination)
+
+    assert (destination / "payload.txt").read_text(encoding="utf-8") == "verified payload"
 
 
 def test_manifest_signature_is_verified_by_lifecycle_not_a_forgeable_receipt(tmp_path):
@@ -100,6 +144,37 @@ def test_release_plan_binding_is_exact_not_a_version_substring(tmp_path):
         source(release, trust).verify({
             "compatibility_set_id": "claudian-remote-prefix-0.2.0-beta.1-suffix",
         })
+
+
+def test_installer_rejects_legacy_runtime_delivery_even_when_manifest_signature_is_valid(tmp_path):
+    release, trust, plan = write_release(tmp_path)
+    manifest_path = release / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["compatibility_set"]["runtime"] = runtime_distribution(delivery="private_release_asset")
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReleaseValidationError, match="runtime_distribution_invalid"):
+        source(release, trust).verify(plan)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda runtime: runtime["assets"].pop(),
+        lambda runtime: runtime["assets"][0]["python"].update({"version": "3.13.0"}),
+        lambda runtime: runtime["assets"][0]["uv"].update({"url": "https://downloads.example/uv.tar.gz?token=secret"}),
+        lambda runtime: runtime["assets"][0]["uv"].update({"sha256": "A" * 64}),
+    ],
+)
+def test_installer_rejects_incomplete_or_unsafe_runtime_contract(tmp_path, mutate):
+    release, trust, plan = write_release(tmp_path)
+    manifest_path = release / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    mutate(manifest["compatibility_set"]["runtime"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReleaseValidationError, match="runtime_distribution_invalid"):
+        source(release, trust).verify(plan)
 
 
 def test_unknown_or_revoked_trust_root_key_fails_closed(tmp_path):

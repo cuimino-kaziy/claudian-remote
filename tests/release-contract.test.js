@@ -331,10 +331,17 @@ test("tester-facing beta kit is self-contained and its launcher binds the extrac
 
   const kit = prepareInstallKit(directory);
   const firstDigest = sha256File(kit);
+  const bootstrapPath = join(directory, `CLAUDIAN_REMOTE_TRUSTED_BOOTSTRAP-${pluginManifest.version}.md`);
+  const bootstrap = readFileSync(bootstrapPath, "utf8");
+  assert.match(bootstrap, new RegExp(firstDigest));
+  assert.match(bootstrap, /fixture-fingerprint/);
+  assert.match(bootstrap, /可信通道单独发送/);
+  assert.match(bootstrap, /校验成功前，不得解压/);
   const rebuiltKit = prepareInstallKit(directory);
   assert.equal(sha256File(rebuiltKit), firstDigest);
   const listing = execFileSync("tar", ["-tzf", kit], { encoding: "utf8" });
   assert.equal(listing.includes("./CLAUDIAN_REMOTE_INSTALL.md"), true);
+  assert.equal(listing.includes("TRUSTED_BOOTSTRAP"), false);
   assert.equal(listing.includes("./release-manifest.json"), true);
   for (const asset of assets) {
     assert.equal(listing.includes(`./assets/${asset.name}`), true, `missing kit asset: ${asset.name}`);

@@ -1,10 +1,8 @@
 import { generateKeyPairSync } from "node:crypto";
-import { spawnSync } from "node:child_process";
 import { publicKeyFingerprint } from "./release-contract.mjs";
 import {
   readSigningKeyFromKeychain,
-  SIGNING_KEYCHAIN_ACCOUNT,
-  SIGNING_KEYCHAIN_SERVICE
+  storeSigningKeyInKeychain
 } from "./signing-key-source.mjs";
 
 if (process.platform !== "darwin") {
@@ -17,25 +15,7 @@ const privateKeyPem = privateKey.export({ type: "pkcs8", format: "pem" });
 const fingerprint = publicKeyFingerprint(publicKeyPem);
 const encodedPrivateKey = Buffer.from(privateKeyPem).toString("base64");
 
-const stored = spawnSync(
-  "security",
-  [
-    "add-generic-password",
-    "-U",
-    "-a", SIGNING_KEYCHAIN_ACCOUNT,
-    "-s", SIGNING_KEYCHAIN_SERVICE,
-    "-D", "Claudian Remote release signing key",
-    "-j", fingerprint,
-    "-w", encodedPrivateKey
-  ],
-  {
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"]
-  }
-);
-if (stored.status !== 0) {
-  throw new Error("failed to store the release signing key in macOS Keychain");
-}
+storeSigningKeyInKeychain(encodedPrivateKey, fingerprint);
 
 if (readSigningKeyFromKeychain() !== encodedPrivateKey) {
   throw new Error("release signing key could not be read back from macOS Keychain");

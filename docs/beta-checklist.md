@@ -26,6 +26,10 @@ released while any item in **Human release blockers** remains open.
   the private key only in macOS Keychain and the release secret store, and
   commit the matching trusted public key plus fingerprint to
   `release/trust-root.json`.
+- [ ] Send the generated `CLAUDIAN_REMOTE_TRUSTED_BOOTSTRAP-<version>.md`
+  through an existing authenticated direct channel, separately from GitHub
+  Release. Confirm each tester verifies the MD-pinned whole-Kit SHA-256 before
+  extraction; Kit-provided code and trust files must not run first.
 - [x] Pin immutable upstream CPython `3.12.11` and uv `0.10.12` archives for
   macOS arm64 and x86_64, including their GitHub-published SHA-256 digests, in
   `release/support-matrix.json`; no mutable `latest` URL is accepted.

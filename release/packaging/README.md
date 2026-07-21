@@ -21,6 +21,14 @@ component archive under `assets/`. Its launcher supplies that same extracted
 directory as `--release-dir`, so an Agent never has to reconstruct the release
 handoff or fall back to a source checkout.
 
+The same command also creates
+`CLAUDIAN_REMOTE_TRUSTED_BOOTSTRAP-<version>.md` outside the Kit. The
+maintainer sends this small file through an existing authenticated direct
+channel, separately from GitHub Release. It pins the whole-Kit SHA-256 and the
+maintainer signing-key fingerprint, and forbids extraction or execution before
+the digest matches. Publishing the bootstrap beside the Kit through the same
+untrusted channel does not establish trust and is not release evidence.
+
 `sh release/packaging/build-assets.sh --assets-only` builds artifacts for CI
 content inspection without claiming they are releasable. The normal
 `npm run release:package` path resolves the exact CPython and uv release URLs

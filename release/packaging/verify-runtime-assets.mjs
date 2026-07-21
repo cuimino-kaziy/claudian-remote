@@ -3,27 +3,62 @@ import { readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { resolveRuntimeAssets } from "./release-contract.mjs";
 
-const root = resolve(import.meta.dirname, "../..");
-const matrix = JSON.parse(readFileSync(join(root, "release/support-matrix.json"), "utf8"));
-const targets = resolveRuntimeAssets(matrix.runtime, {});
+export const RUNTIME_ASSET_TIMEOUT_MS = 300_000;
 
-for (const target of targets) {
-  for (const component of ["python", "uv"]) {
-    const asset = target[component];
-    const response = await fetch(asset.url, { redirect: "follow" });
+function safeFinalUrl(value) {
+  const parsed = new URL(value);
+  return parsed.protocol === "https:"
+    && !parsed.username
+    && !parsed.password
+    && !parsed.hash;
+}
+
+export async function verifyRuntimeAsset(
+  target,
+  component,
+  {
+    fetchImpl = fetch,
+    timeoutMs = RUNTIME_ASSET_TIMEOUT_MS,
+    output = process.stdout
+  } = {}
+) {
+  const asset = target[component];
+  const label = `${target.platform}/${target.arch} ${component}`;
+  try {
+    const response = await fetchImpl(asset.url, {
+      redirect: "follow",
+      signal: AbortSignal.timeout(timeoutMs)
+    });
     if (!response.ok || !response.body) {
-      throw new Error(`${target.platform}/${target.arch} ${component} download failed: HTTP ${response.status}`);
+      throw new Error(`download failed: HTTP ${response.status}`);
     }
-    const finalUrl = new URL(response.url);
-    if (finalUrl.protocol !== "https:" || finalUrl.username || finalUrl.password || finalUrl.hash) {
-      throw new Error(`${target.platform}/${target.arch} ${component} redirected to an unsafe URL`);
+    if (!safeFinalUrl(response.url)) {
+      throw new Error("redirected to an unsafe URL");
     }
     const digest = createHash("sha256");
     for await (const chunk of response.body) digest.update(chunk);
     const actual = digest.digest("hex");
-    if (actual !== asset.sha256) {
-      throw new Error(`${target.platform}/${target.arch} ${component} digest mismatch`);
-    }
-    process.stdout.write(`${target.platform}/${target.arch} ${component} ${actual}: ok\n`);
+    if (actual !== asset.sha256) throw new Error("digest mismatch");
+    output.write(`${label} ${actual}: ok\n`);
+    return actual;
+  } catch (error) {
+    throw new Error(`${label} verification failed: ${error.message}`, { cause: error });
   }
+}
+
+export async function verifyRuntimeAssets(
+  runtime,
+  options = {}
+) {
+  for (const target of resolveRuntimeAssets(runtime, {})) {
+    for (const component of ["python", "uv"]) {
+      await verifyRuntimeAsset(target, component, options);
+    }
+  }
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(import.meta.filename)) {
+  const root = resolve(import.meta.dirname, "../..");
+  const matrix = JSON.parse(readFileSync(join(root, "release/support-matrix.json"), "utf8"));
+  await verifyRuntimeAssets(matrix.runtime);
 }

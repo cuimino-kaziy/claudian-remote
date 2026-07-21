@@ -1,7 +1,7 @@
 # Claudian Remote 内测故障排查
 
-先运行 `claudian-remote-lifecycle inspect`；若已有 `operation_id`，再运行
-`claudian-remote-lifecycle status --operation-id <operation-id>`。请只转述 `code`、
+在已解压的 Beta Kit 目录中先运行 `./bin/claudian-remote-lifecycle inspect`；若已有 `operation_id`，再运行
+`./bin/claudian-remote-lifecycle status --operation-id <operation-id>`。请只转述 `code`、
 `state`、phase 和 Agent-safe summary，不要发送配置文件、完整路径、URL 查询参数、
 令牌、短码、QR、主机私钥或诊断数据库。
 
