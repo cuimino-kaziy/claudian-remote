@@ -68,8 +68,8 @@ maintainer configures a real signing key and pins its public fingerprint in the
 trusted lifecycle bootstrap; no signing secret is stored here.
 
 The lifecycle release asset includes the Agent guide, executable entrypoint,
-Python package, and a per-file content lock. Private macOS arm64 and x86_64
-CPython/uv asset URLs and SHA-256 values are supplied only by the release job;
-the repository contains variable names and exact versions, not invented
-downloads or digests. See [`docs/beta-checklist.md`](docs/beta-checklist.md) for
-the remaining maintainer and real-device release gates.
+Python package, and a per-file content lock. macOS arm64 and x86_64 CPython/uv
+assets are pinned to immutable upstream release URLs and GitHub-published
+SHA-256 digests in the signed release contract. See
+[`docs/beta-checklist.md`](docs/beta-checklist.md) for the remaining maintainer
+and real-device release gates.

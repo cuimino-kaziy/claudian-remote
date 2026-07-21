@@ -23,11 +23,12 @@ released while any item in **Human release blockers** remains open.
 ## Human release blockers
 
 - [ ] Generate the maintainer Ed25519 signing key outside the repository, keep
-  the private key only in the release secret store, and commit the matching
-  trusted public key plus fingerprint to `release/trust-root.json`.
-- [ ] Select immutable private CPython `3.12.11` and uv `0.10.12` archives for
-  macOS arm64 and x86_64. Configure every URL and SHA-256 repository variable
-  named in `release/support-matrix.json`; do not use mutable `latest` URLs.
+  the private key only in macOS Keychain and the release secret store, and
+  commit the matching trusted public key plus fingerprint to
+  `release/trust-root.json`.
+- [x] Pin immutable upstream CPython `3.12.11` and uv `0.10.12` archives for
+  macOS arm64 and x86_64, including their GitHub-published SHA-256 digests, in
+  `release/support-matrix.json`; no mutable `latest` URL is accepted.
 - [ ] Create the exact signed Git tag and let the pinned release workflow create
   a private GitHub **prerelease**. Confirm all invited testers download the same
   manifest and asset digests.

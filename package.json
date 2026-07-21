@@ -12,7 +12,9 @@
     "test": "node --test tests/*.test.js",
     "test:release": "node --test tests/release-contract.test.js",
     "check:source": "node release/packaging/check-source-boundary.mjs .",
+    "release:key:init": "node release/packaging/create-signing-key.mjs",
     "release:package": "sh release/packaging/build-assets.sh",
+    "release:verify:runtimes": "node release/packaging/verify-runtime-assets.mjs",
     "release:sign": "node release/packaging/sign-release.mjs",
     "release:kit": "node release/packaging/prepare-install-kit.mjs",
     "verify": "npm run check:source && npm test && npm run build && node --check main.js"

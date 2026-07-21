@@ -20,15 +20,24 @@ handoff or fall back to a source checkout.
 
 `sh release/packaging/build-assets.sh --assets-only` builds artifacts for CI
 content inspection without claiming they are releasable. The normal
-`npm run release:package` path additionally requires all eight URL/SHA-256
-variables named by `support-matrix.json` for private CPython and uv assets on
-macOS arm64 and x86_64. A missing, non-HTTPS, credential-bearing, query-bearing,
-or digest-less runtime description stops manifest preparation.
+`npm run release:package` path resolves the exact CPython and uv release URLs
+and SHA-256 digests committed in `support-matrix.json` for macOS arm64 and
+x86_64. These upstream release URLs are immutable and the installer verifies
+the committed digest before extraction. A missing, non-HTTPS,
+credential-bearing, query-bearing, or digest-less runtime description stops
+manifest preparation.
 
-`trust-root.json` intentionally contains no key during repository bootstrap.
-The release workflow fails until a maintainer provides a signing key through
-GitHub Actions secrets and pins the corresponding public fingerprint. Never
-commit a private key or substitute GitHub authentication for signature checks.
-The empty trust root, missing runtime variables, absence of an exact private
-GitHub prerelease, or an incomplete real-device matrix are release blockers,
-not warnings that an Agent may bypass.
+`npm run release:verify:runtimes` downloads each pinned runtime as a stream and
+checks its full SHA-256 digest. The release workflow runs this availability and
+integrity gate before it creates any signed artifact.
+
+Run `npm run release:key:init` once on the maintainer Mac to generate an Ed25519
+key. The command stores the private key in macOS Keychain without printing it
+and prints only the public trust-root entry. Pin that public key and fingerprint
+in `trust-root.json`; the same private key must later be copied through a secure
+channel into the GitHub Actions secret. Local signing reads Keychain when the
+Actions secret environment variable is absent. Never commit a private key or
+substitute GitHub authentication for signature checks.
+The empty trust root, runtime metadata drift, absence of an exact private GitHub
+prerelease, or an incomplete real-device matrix are release blockers, not
+warnings that an Agent may bypass.

@@ -46,20 +46,20 @@
   "runtime": {
     "python": "3.12.11",
     "uv": "0.10.12",
-    "delivery": "private_release_asset",
+    "delivery": "immutable_upstream_asset",
     "required_assets": [
       {
         "platform": "darwin",
         "arch": "arm64",
         "python": {
           "version": "3.12.11",
-          "url_env": "CLAUDIAN_PYTHON_DARWIN_ARM64_URL",
-          "sha256_env": "CLAUDIAN_PYTHON_DARWIN_ARM64_SHA256"
+          "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20250612/cpython-3.12.11%2B20250612-aarch64-apple-darwin-install_only.tar.gz",
+          "sha256": "c6d4843e8af496f034176908ae3384556680284653a4bff45eff07e43fe4ae34"
         },
         "uv": {
           "version": "0.10.12",
-          "url_env": "CLAUDIAN_UV_DARWIN_ARM64_URL",
-          "sha256_env": "CLAUDIAN_UV_DARWIN_ARM64_SHA256"
+          "url": "https://github.com/astral-sh/uv/releases/download/0.10.12/uv-aarch64-apple-darwin.tar.gz",
+          "sha256": "ae738b5661a900579ec621d3918c0ef17bdec0da2a8a6d8b161137cd15f25414"
         }
       },
       {
@@ -67,13 +67,13 @@
         "arch": "x86_64",
         "python": {
           "version": "3.12.11",
-          "url_env": "CLAUDIAN_PYTHON_DARWIN_X86_64_URL",
-          "sha256_env": "CLAUDIAN_PYTHON_DARWIN_X86_64_SHA256"
+          "url": "https://github.com/astral-sh/python-build-standalone/releases/download/20250612/cpython-3.12.11%2B20250612-x86_64-apple-darwin-install_only.tar.gz",
+          "sha256": "7e3468bde68650fb8f63b663a24c56d0bb3353abd16158939b1de0ad60dab195"
         },
         "uv": {
           "version": "0.10.12",
-          "url_env": "CLAUDIAN_UV_DARWIN_X86_64_URL",
-          "sha256_env": "CLAUDIAN_UV_DARWIN_X86_64_SHA256"
+          "url": "https://github.com/astral-sh/uv/releases/download/0.10.12/uv-x86_64-apple-darwin.tar.gz",
+          "sha256": "17443e293f2ae407bb2d8d34b875ebfe0ae01cf1296de5647e69e7b2e2b428f0"
         }
       }
     ]

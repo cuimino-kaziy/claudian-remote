@@ -90,7 +90,7 @@
       "properties": {
         "python": {"$ref": "#/$defs/semver"},
         "uv": {"$ref": "#/$defs/semver"},
-        "delivery": {"const": "private_release_asset"},
+        "delivery": {"const": "immutable_upstream_asset"},
         "assets": {
           "type": "array",
           "minItems": 2,

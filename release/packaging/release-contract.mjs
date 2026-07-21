@@ -83,7 +83,7 @@ export function resolveRuntimeAssets(runtime, environment = process.env) {
   for (const target of RUNTIME_TARGETS) {
     if (!targets.has(target)) errors.push(`required runtime target is missing: ${target}`);
   }
-  if (runtime?.delivery !== "private_release_asset") errors.push("runtime delivery must be private_release_asset");
+  if (runtime?.delivery !== "immutable_upstream_asset") errors.push("runtime delivery must be immutable_upstream_asset");
   if (errors.length) throw new ReleaseContractError(errors);
   return assets;
 }
@@ -92,8 +92,8 @@ function validateRuntimeDistribution(runtime, matrixRuntime, errors) {
   if (runtime?.python !== matrixRuntime?.python || runtime?.uv !== matrixRuntime?.uv) {
     errors.push("runtime versions disagree");
   }
-  if (runtime?.delivery !== "private_release_asset" || matrixRuntime?.delivery !== "private_release_asset") {
-    errors.push("runtime delivery must be private_release_asset");
+  if (runtime?.delivery !== "immutable_upstream_asset" || matrixRuntime?.delivery !== "immutable_upstream_asset") {
+    errors.push("runtime delivery must be immutable_upstream_asset");
   }
   const manifestAssets = Array.isArray(runtime?.assets) ? runtime.assets : [];
   const matrixAssets = Array.isArray(matrixRuntime?.required_assets) ? matrixRuntime.required_assets : [];

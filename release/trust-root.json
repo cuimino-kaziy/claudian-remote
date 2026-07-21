@@ -1,5 +1,11 @@
 {
   "schema_version": 1,
-  "keys": [],
-  "note": "Fail-closed bootstrap placeholder. A maintainer must pin a real public Ed25519 key fingerprint before any beta publication. Private signing keys never belong in this repository."
+  "keys": [
+    {
+      "fingerprint": "ace5a202634648deff4058a124e3d51c83554dd76a2a96f6b656e70ca8687023",
+      "status": "trusted",
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5GrMeY4r6b+4ZP5IVWr2/vvsazO5Cm8nZjYfG7znzWM=\n-----END PUBLIC KEY-----\n"
+    }
+  ],
+  "note": "The trusted maintainer Ed25519 public key is pinned here. Its private key is stored outside the repository in macOS Keychain and must be copied only to the release secret store."
 }

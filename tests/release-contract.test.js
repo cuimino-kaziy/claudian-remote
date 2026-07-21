@@ -26,21 +26,8 @@ function runtimeFixture() {
   return {
     python: supportMatrix.runtime.python,
     uv: supportMatrix.runtime.uv,
-    delivery: "private_release_asset",
-    assets: supportMatrix.runtime.required_assets.map(({ platform, arch, python, uv }) => ({
-      platform,
-      arch,
-      python: {
-        version: python.version,
-        url: `https://downloads.example.test/${arch}/python.tar.gz`,
-        sha256: sha256Bytes(`python-${arch}`)
-      },
-      uv: {
-        version: uv.version,
-        url: `https://downloads.example.test/${arch}/uv.tar.gz`,
-        sha256: sha256Bytes(`uv-${arch}`)
-      }
-    }))
+    delivery: "immutable_upstream_asset",
+    assets: resolveRuntimeAssets(supportMatrix.runtime, {})
   };
 }
 
@@ -145,7 +132,7 @@ test("unsupported Claudian and missing asset digests fail closed", () => {
   assert.throws(() => validateReleaseContract(missingDigest.manifest, missingDigest.context), /asset digest/);
 });
 
-test("both macOS runtime architectures require private HTTPS URLs, digests, and exact versions", () => {
+test("both macOS runtime architectures require pinned HTTPS URLs, digests, and exact versions", () => {
   const valid = fixture();
   assert.equal(validateReleaseContract(valid.manifest, valid.context), true);
 
@@ -162,20 +149,15 @@ test("both macOS runtime architectures require private HTTPS URLs, digests, and 
   }
 });
 
-test("runtime asset preparation fails closed until all release variables are real", () => {
-  assert.throws(
-    () => resolveRuntimeAssets(supportMatrix.runtime, {}),
-    /runtime asset URL is missing or unsafe/
-  );
-  const environment = {};
-  for (const target of supportMatrix.runtime.required_assets) {
-    for (const component of ["python", "uv"]) {
-      environment[target[component].url_env] = `https://downloads.example.test/${target.arch}/${component}.tar.gz`;
-      environment[target[component].sha256_env] = sha256Bytes(`${target.arch}-${component}`);
-    }
-  }
-  const assets = resolveRuntimeAssets(supportMatrix.runtime, environment);
+test("runtime asset preparation is reproducible without external release variables", () => {
+  const assets = resolveRuntimeAssets(supportMatrix.runtime, {});
   assert.deepEqual(assets.map(({ platform, arch }) => `${platform}/${arch}`).sort(), ["darwin/arm64", "darwin/x86_64"]);
+  for (const target of assets) {
+    assert.match(target.python.url, /python-build-standalone\/releases\/download\/20250612\/cpython-3\.12\.11/);
+    assert.match(target.uv.url, /astral-sh\/uv\/releases\/download\/0\.10\.12\/uv-/);
+    assert.match(target.python.sha256, /^[a-f0-9]{64}$/);
+    assert.match(target.uv.sha256, /^[a-f0-9]{64}$/);
+  }
 });
 
 test("old plugin id is migration-only and beta update ownership is fixed", () => {
@@ -212,17 +194,17 @@ test("release schema and support matrix pin the public contract", () => {
   assert.equal(pluginManifest.id, "claudian-remote");
   assert.equal(versions[pluginManifest.version], pluginManifest.minAppVersion);
   assert.equal(supportMatrix.distribution.allowed_combinations.length, 2);
-  assert.equal(schema.$defs.runtimeDistribution.properties.delivery.const, "private_release_asset");
+  assert.equal(schema.$defs.runtimeDistribution.properties.delivery.const, "immutable_upstream_asset");
   assert.deepEqual(
     supportMatrix.runtime.required_assets.map(({ platform, arch }) => `${platform}/${arch}`).sort(),
     ["darwin/arm64", "darwin/x86_64"]
   );
   for (const target of supportMatrix.runtime.required_assets) {
     for (const component of ["python", "uv"]) {
-      assert.equal(Object.hasOwn(target[component], "url"), false);
-      assert.equal(Object.hasOwn(target[component], "sha256"), false);
-      assert.match(target[component].url_env, /^CLAUDIAN_[A-Z0-9_]+_URL$/);
-      assert.match(target[component].sha256_env, /^CLAUDIAN_[A-Z0-9_]+_SHA256$/);
+      assert.match(target[component].url, /^https:\/\/github\.com\/astral-sh\//);
+      assert.match(target[component].sha256, /^[a-f0-9]{64}$/);
+      assert.equal(Object.hasOwn(target[component], "url_env"), false);
+      assert.equal(Object.hasOwn(target[component], "sha256_env"), false);
     }
   }
   assert.match(readFileSync(join(root, "gateway/relay/relay_server.py"), "utf8"), /VERSION = "0\.2\.0-beta\.1"/);
