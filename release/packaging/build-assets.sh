@@ -52,10 +52,10 @@ cp release/lifecycle-dependencies.lock.json release/release-manifest.schema.json
   "${release_tmp}/installer/release/"
 node release/packaging/prepare-lifecycle-lock.mjs "${release_tmp}/installer"
 
-COPYFILE_DISABLE=1 tar -C "${release_tmp}/plugin" -czf "${release_dist}/claudian-remote-plugin-${release_version}.tar.gz" .
-COPYFILE_DISABLE=1 tar -C "${release_tmp}/companion" -czf "${release_dist}/claudian-remote-companion-${release_version}.tar.gz" .
-COPYFILE_DISABLE=1 tar -C "${release_tmp}/relay" -czf "${release_dist}/claudian-remote-relay-${release_version}.tar.gz" .
-COPYFILE_DISABLE=1 tar -C "${release_tmp}/installer" -czf "${release_dist}/claudian-remote-lifecycle-${release_version}.tar.gz" .
+sh release/packaging/deterministic-tar.sh "${release_tmp}/plugin" "${release_dist}/claudian-remote-plugin-${release_version}.tar.gz"
+sh release/packaging/deterministic-tar.sh "${release_tmp}/companion" "${release_dist}/claudian-remote-companion-${release_version}.tar.gz"
+sh release/packaging/deterministic-tar.sh "${release_tmp}/relay" "${release_dist}/claudian-remote-relay-${release_version}.tar.gz"
+sh release/packaging/deterministic-tar.sh "${release_tmp}/installer" "${release_dist}/claudian-remote-lifecycle-${release_version}.tar.gz"
 
 if [ "${assets_only}" = false ]; then
   node release/packaging/prepare-manifest.mjs "${CLAUDIAN_RELEASE_TAG:-v${release_version}}" "${release_dist}"

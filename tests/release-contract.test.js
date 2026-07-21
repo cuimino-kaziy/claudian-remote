@@ -295,6 +295,16 @@ test("packaged lifecycle asset contains the guide, Python package, entrypoint, a
   }
 });
 
+test("component archives are byte-for-byte reproducible", () => {
+  const assetNames = ["plugin", "companion", "relay", "lifecycle"]
+    .map((component) => `claudian-remote-${component}-${pluginManifest.version}.tar.gz`);
+  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
+  const first = Object.fromEntries(assetNames.map((name) => [name, sha256File(join(root, "dist", name))]));
+  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
+  const second = Object.fromEntries(assetNames.map((name) => [name, sha256File(join(root, "dist", name))]));
+  assert.deepEqual(second, first);
+});
+
 test("tester-facing beta kit is self-contained and its launcher binds the extracted release directory", () => {
   execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
   const directory = mkdtempSync(join(tmpdir(), "claudian-beta-kit-test-"));
@@ -320,6 +330,9 @@ test("tester-facing beta kit is self-contained and its launcher binds the extrac
   }));
 
   const kit = prepareInstallKit(directory);
+  const firstDigest = sha256File(kit);
+  const rebuiltKit = prepareInstallKit(directory);
+  assert.equal(sha256File(rebuiltKit), firstDigest);
   const listing = execFileSync("tar", ["-tzf", kit], { encoding: "utf8" });
   assert.equal(listing.includes("./CLAUDIAN_REMOTE_INSTALL.md"), true);
   assert.equal(listing.includes("./release-manifest.json"), true);

@@ -4,6 +4,9 @@ Release tooling must build from committed dependency locks, produce one asset
 for each compatibility-set component, hash every asset and lock, sign the
 canonical manifest with Ed25519 outside the repository, verify it against the
 pinned public trust root, and only then publish an exact immutable tag.
+Component archives and the tester Beta Kit use normalized timestamps, owner
+metadata, path ordering, and gzip headers so two clean checkouts of the same
+commit produce identical bytes.
 
 The lifecycle asset is an installable bundle, not a documentation placeholder.
 It contains `CLAUDIAN_REMOTE_INSTALL.md`, the Python lifecycle package, a

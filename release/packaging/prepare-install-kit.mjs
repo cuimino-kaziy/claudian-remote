@@ -45,10 +45,9 @@ export function prepareInstallKit(distDirectory) {
     copyFileSync(manifestPath, join(root, "release-manifest.json"));
     for (const asset of assets) copyFileSync(join(dist, asset.name), join(assetRoot, asset.name));
     const output = join(dist, `claudian-remote-beta-kit-${manifest.release_version}.tar.gz`);
-    rmSync(output, { force: true });
-    execFileSync("tar", ["-C", root, "-czf", output, "."], {
+    execFileSync("sh", [join(import.meta.dirname, "deterministic-tar.sh"), root, output], {
       stdio: "pipe",
-      env: { ...process.env, COPYFILE_DISABLE: "1" }
+      env: { ...process.env }
     });
     return output;
   } finally {
