@@ -3,7 +3,7 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[2]
-IGNORED_PARTS = {".git", ".venv", "venv", "node_modules", "dist", "__pycache__", ".pytest_cache"}
+IGNORED_PARTS = {".git", ".venv", ".release-venv", "venv", "node_modules", "dist", "__pycache__", ".pytest_cache"}
 FORBIDDEN_NAMES = {
     ".token",
     "config.local.json",

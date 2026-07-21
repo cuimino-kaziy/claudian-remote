@@ -188,6 +188,13 @@ test("source boundary rejects local state, credentials, personal paths, and priv
   assert.ok(findings.some((finding) => finding.includes("private deployment identifier")));
 });
 
+test("source boundary excludes release virtual environments from publishable source", () => {
+  const directory = mkdtempSync(join(tmpdir(), "claudian-source-venv-boundary-"));
+  mkdirSync(join(directory, ".release-venv"));
+  writeFileSync(join(directory, ".release-venv", "pyvenv.cfg"), "/Users/private-owner/runtime\n");
+  assert.deepEqual(scanSourceBoundary(directory), []);
+});
+
 test("release schema and support matrix pin the public contract", () => {
   const schema = JSON.parse(readFileSync(join(root, "release/release-manifest.schema.json"), "utf8"));
   assert.equal(schema.$defs.compatibilitySet.properties.claudian.properties.exact_version.const, "2.0.4");

@@ -28,15 +28,15 @@ jobs:
       - name: Install and verify locked dependencies
         run: |
           npm ci --ignore-scripts
-          python3.12 -m venv .release-venv
-          .release-venv/bin/pip install --require-hashes -r gateway/requirements.lock
+          python3.12 -m venv "${RUNNER_TEMP}/claudian-release-venv"
+          "${RUNNER_TEMP}/claudian-release-venv/bin/pip" install --require-hashes -r gateway/requirements.lock
       - name: Run release gates
         run: |
           npm run check:source
           npm test
           npm run release:verify:runtimes
-          .release-venv/bin/python -m pytest gateway/tests -q
-          .release-venv/bin/python -m pytest installer/tests -q
+          "${RUNNER_TEMP}/claudian-release-venv/bin/python" -m pytest gateway/tests -q
+          "${RUNNER_TEMP}/claudian-release-venv/bin/python" -m pytest installer/tests -q
       - name: Build exact-tag assets
         env:
           CLAUDIAN_RELEASE_TAG: ${{ github.ref_name }}

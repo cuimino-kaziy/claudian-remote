@@ -9,7 +9,7 @@ const FORBIDDEN_NAMES = [
   /^companion_state.*\.json$/,
   /\.(?:db|sqlite3?|log|wal|shm)$/
 ];
-const FORBIDDEN_DIRS = new Set([".git", ".venv", "venv", "node_modules", "dist", "data", "logs", "__pycache__", ".pytest_cache"]);
+const FORBIDDEN_DIRS = new Set([".git", ".venv", ".release-venv", "venv", "node_modules", "dist", "data", "logs", "__pycache__", ".pytest_cache"]);
 const SECRET_PATTERNS = [
   /\b(?:ghp|github_pat|xox[baprs])[-_][A-Za-z0-9_-]{12,}\b/g,
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
