@@ -4,6 +4,7 @@ from pathlib import Path
 
 from installer.claudian_remote_lifecycle.cli import LifecycleServices, main
 from installer.claudian_remote_lifecycle.inspect import Inspector, LocalInspectionProbe
+from installer.claudian_remote_lifecycle.model import SNAPSHOT_SCHEMA
 
 
 class FakeProbe:
@@ -49,9 +50,10 @@ def test_inspect_is_read_only_versioned_and_deterministic():
     second = Inspector(probe).snapshot()
 
     assert first == second
-    assert first["snapshot_schema"] == "claudian-remote.inspection/v1"
+    assert first["snapshot_schema"] == SNAPSHOT_SCHEMA
     assert first["snapshot_id"].startswith("inspection-")
     assert first["read_only"] is True
+    assert first["journey"]["journey"] == "fresh_install"
     assert [vault["vault_id"] for vault in first["vaults"]] == ["vault-a", "vault-b"]
     assert first["support"]["reason_codes"] == ["vault_selection_required"]
 
@@ -152,3 +154,150 @@ def test_local_probe_hashes_profile_generation_without_exposing_endpoint(tmp_pat
     assert str(installation["profile_generation_id"]).startswith("profile-generation-")
     assert endpoint not in encoded
     assert str(tmp_path) not in encoded
+
+
+def test_local_probe_classifies_recognized_legacy_plugin_without_exposing_credential(tmp_path):
+    home = tmp_path / "home"
+    vault = tmp_path / "Private" / "Notes"
+    plugin = vault / ".obsidian" / "plugins" / "whale-agent-bridge"
+    plugin.mkdir(parents=True)
+    (plugin / "manifest.json").write_text(
+        json.dumps(
+            {
+                "id": "whale-agent-bridge",
+                "version": "recognized-dogfood-lineage",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (plugin / "data.json").write_text(
+        json.dumps({"mobile_token": "synthetic-secret-must-not-leak"}),
+        encoding="utf-8",
+    )
+    (vault / ".obsidian" / "community-plugins.json").write_text(
+        '["whale-agent-bridge"]', encoding="utf-8"
+    )
+    config = home / "Library" / "Application Support" / "obsidian"
+    config.mkdir(parents=True)
+    (config / "obsidian.json").write_text(
+        json.dumps({"vaults": {"vault-a": {"path": str(vault), "open": True}}}),
+        encoding="utf-8",
+    )
+
+    snapshot = Inspector(LocalInspectionProbe(home=home)).snapshot()
+    encoded = json.dumps(snapshot)
+
+    assert snapshot["journey"]["journey"] == "legacy_upgrade"
+    assert snapshot["journey"]["legacy_authority_capability"] == "unavailable"
+    assert snapshot["installation"]["legacy_authority_adapter"] == "unclassified"
+    assert snapshot["installation"]["plugin_lineage"]["legacy"] == {
+        "enabled": True,
+        "present": True,
+        "recognized": True,
+        "versions": ["recognized-dogfood-lineage"],
+    }
+    assert "synthetic-secret-must-not-leak" not in encoded
+    assert str(tmp_path) not in encoded
+
+
+def test_local_probe_rejects_unknown_legacy_plugin_version_before_upgrade(tmp_path):
+    home = tmp_path / "home"
+    vault = tmp_path / "Private" / "Notes"
+    plugin = vault / ".obsidian" / "plugins" / "whale-agent-bridge"
+    plugin.mkdir(parents=True)
+    (plugin / "manifest.json").write_text(
+        json.dumps({"id": "whale-agent-bridge", "version": "custom-build"}),
+        encoding="utf-8",
+    )
+    (vault / ".obsidian" / "community-plugins.json").write_text(
+        '["whale-agent-bridge"]', encoding="utf-8"
+    )
+    config = home / "Library" / "Application Support" / "obsidian"
+    config.mkdir(parents=True)
+    (config / "obsidian.json").write_text(
+        json.dumps({"vaults": {"vault-a": {"path": str(vault), "open": True}}}),
+        encoding="utf-8",
+    )
+
+    snapshot = Inspector(LocalInspectionProbe(home=home)).snapshot()
+
+    assert snapshot["installation"]["plugin_lineage"]["legacy"] == {
+        "enabled": True,
+        "present": True,
+        "recognized": False,
+        "versions": ["custom-build"],
+    }
+    assert snapshot["journey"]["journey"] == "coexistence_conflict"
+    assert snapshot["journey"]["reason_code"] == "unsupported_legacy_lineage"
+    assert snapshot["journey"]["blocked"] is True
+
+
+def test_both_enabled_remote_plugins_are_reported_as_a_conflict(tmp_path):
+    home = tmp_path / "home"
+    vault = tmp_path / "Notes"
+    for plugin_id in ("whale-agent-bridge", "claudian-remote"):
+        plugin = vault / ".obsidian" / "plugins" / plugin_id
+        plugin.mkdir(parents=True, exist_ok=True)
+        version = (
+            "recognized-dogfood-lineage"
+            if plugin_id == "whale-agent-bridge"
+            else "fixture"
+        )
+        (plugin / "manifest.json").write_text(
+            json.dumps({"id": plugin_id, "version": version}), encoding="utf-8"
+        )
+    (vault / ".obsidian" / "community-plugins.json").write_text(
+        '["whale-agent-bridge","claudian-remote"]', encoding="utf-8"
+    )
+    config = home / "Library" / "Application Support" / "obsidian"
+    config.mkdir(parents=True)
+    (config / "obsidian.json").write_text(
+        json.dumps({"vaults": {"vault-a": {"path": str(vault)}}}), encoding="utf-8"
+    )
+
+    snapshot = Inspector(LocalInspectionProbe(home=home)).snapshot()
+
+    assert snapshot["journey"]["journey"] == "coexistence_conflict"
+    assert snapshot["journey"]["reason_code"] == "legacy_and_current_plugin_enabled"
+    assert "legacy_and_current_plugin_enabled" in snapshot["support"]["reason_codes"]
+
+
+def test_inspection_binds_unresolved_operation_arbitration_before_journey_selection():
+    arbitration = {
+        "state": "reconciliation_required",
+        "reason_code": "prior_operation_recovery_required",
+        "prior_operation_terminal": False,
+        "terminal_operation_ids": [],
+        "operation_id": "op-" + "a" * 32,
+        "recommended_action": "rollback",
+    }
+
+    snapshot = Inspector(FakeProbe()).snapshot(operation_arbitration=arbitration)
+
+    assert snapshot["operation_arbitration"] == arbitration
+    assert snapshot["journey"]["journey"] == "unclassified"
+    assert snapshot["journey"]["prior_operation_terminal"] is False
+    assert snapshot["journey"]["existing_operation"] == {
+        "operation_id": "op-" + "a" * 32,
+        "terminal": False,
+        "recommended_action": "rollback",
+    }
+    assert "operation_reconciliation_required" in snapshot["support"]["reason_codes"]
+
+
+def test_invalid_prior_artifact_without_readable_operation_id_still_blocks_inspection():
+    arbitration = {
+        "state": "blocked",
+        "reason_code": "prior_operation_artifact_invalid",
+        "prior_operation_terminal": False,
+        "terminal_operation_ids": [],
+        "recommended_action": "manual_recovery_required",
+    }
+
+    snapshot = Inspector(FakeProbe()).snapshot(operation_arbitration=arbitration)
+
+    assert snapshot["journey"]["journey"] == "unclassified"
+    assert "existing_operation" not in snapshot["journey"]
+    assert snapshot["operation_arbitration"]["reason_code"] == (
+        "prior_operation_artifact_invalid"
+    )

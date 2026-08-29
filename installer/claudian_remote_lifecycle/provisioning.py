@@ -137,6 +137,14 @@ class SecureInputFile:
                     os.close(descriptor)
                 self.path.unlink(missing_ok=True)
 
+    def discard(self) -> bool:
+        """Securely remove an operation-owned input without using its value."""
+
+        if not self.path.exists() and not self.path.is_symlink():
+            return False
+        self.consume(lambda _value: None)
+        return True
+
 
 class PairingAdminProvisioner:
     """Own Pairing Admin/Companion/Bridge identities in macOS Keychain.

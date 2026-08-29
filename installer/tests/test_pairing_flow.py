@@ -1,6 +1,12 @@
 import json
 
-from installer.claudian_remote_lifecycle.pairing import PairingAdminBootstrap, PairingLifecycle
+import pytest
+
+from installer.claudian_remote_lifecycle.pairing import (
+    PairingAdminBootstrap,
+    PairingIdentityTransition,
+    PairingLifecycle,
+)
 
 
 PROFILE = {
@@ -171,3 +177,147 @@ def test_revoke_and_repair_paths_are_explicit_and_never_reuse_credentials():
         assert repair["reuse_credential"] is False
         assert repair["gate"]["gate_type"] == "pairing_repair_required"
         assert_agent_safe(repair)
+
+
+def test_current_update_preserve_keeps_the_existing_device_without_revocation(tmp_path):
+    devices = {"iphone-a"}
+    revoked = []
+    transition = PairingIdentityTransition(
+        tmp_path,
+        active_device_ids=lambda: devices,
+        revoke_device=lambda device_id, reason: revoked.append((device_id, reason)),
+    )
+    operation_id = "op-" + "a" * 32
+    plan_id = "plan-" + "a" * 64
+
+    transition.capture(operation_id=operation_id, plan_id=plan_id, policy="preserve")
+    result = transition.finalize(
+        operation_id=operation_id, plan_id=plan_id, policy="preserve"
+    )
+
+    assert result == {
+        "state": "ready",
+        "code": "pairing_identity_preserved",
+        "re_pair_required": False,
+    }
+    assert revoked == []
+
+
+def test_current_update_rotate_revokes_once_and_requires_a_deliberate_new_device(tmp_path):
+    devices = {"iphone-old"}
+    revoked = []
+
+    def revoke(device_id, reason):
+        revoked.append((device_id, reason))
+        devices.discard(device_id)
+        return {"state": "ready", "code": "device_revoked"}
+
+    transition = PairingIdentityTransition(
+        tmp_path,
+        active_device_ids=lambda: devices,
+        revoke_device=revoke,
+    )
+    operation_id = "op-" + "b" * 32
+    plan_id = "plan-" + "b" * 64
+    transition.capture(operation_id=operation_id, plan_id=plan_id, policy="rotate")
+
+    waiting = transition.finalize(
+        operation_id=operation_id, plan_id=plan_id, policy="rotate"
+    )
+    assert waiting == {
+        "state": "blocked",
+        "code": "pairing_approval_required",
+        "re_pair_required": True,
+    }
+    assert revoked == [("iphone-old", "profile_changed")]
+
+    assert transition.finalize(
+        operation_id=operation_id, plan_id=plan_id, policy="rotate"
+    ) == waiting
+    assert revoked == [("iphone-old", "profile_changed")]
+
+    devices.add("iphone-new")
+    assert transition.finalize(
+        operation_id=operation_id, plan_id=plan_id, policy="rotate"
+    ) == {
+        "state": "ready",
+        "code": "pairing_identity_rotated",
+        "re_pair_required": False,
+    }
+
+
+def test_operation_rotation_committed_accepts_valid_preserve_journal(
+    tmp_path,
+) -> None:
+    transition = PairingIdentityTransition(
+        tmp_path,
+        active_device_ids=lambda: ["iphone-existing"],
+    )
+    operation_id = "op-" + "d" * 32
+    plan_id = "plan-" + "d" * 64
+
+    transition.capture(
+        operation_id=operation_id,
+        plan_id=plan_id,
+        policy="preserve",
+    )
+
+    assert transition.operation_rotation_committed(
+        operation_id=operation_id,
+        plan_id=plan_id,
+    ) is False
+
+    assert transition.finalize(
+        operation_id=operation_id,
+        plan_id=plan_id,
+        policy="preserve",
+    )["state"] == "ready"
+    assert transition.rollback(
+        operation_id=operation_id,
+        plan_id=plan_id,
+        policy="preserve",
+    ) is True
+
+
+def test_rotation_checkpoint_is_irreversible_and_replay_safe_after_interruption(tmp_path):
+    devices = {"iphone-old"}
+    revoked = []
+    interrupted = {"enabled": True}
+
+    def revoke(device_id, reason):
+        revoked.append((device_id, reason))
+        devices.discard(device_id)
+        return {"state": "ready"}
+
+    def interrupt(phase):
+        if interrupted["enabled"]:
+            raise RuntimeError(phase)
+
+    transition = PairingIdentityTransition(
+        tmp_path,
+        active_device_ids=lambda: devices,
+        revoke_device=revoke,
+        interruption_probe=interrupt,
+    )
+    operation_id = "op-" + "c" * 32
+    plan_id = "plan-" + "c" * 64
+    transition.capture(operation_id=operation_id, plan_id=plan_id, policy="rotate")
+
+    with pytest.raises(RuntimeError, match="after_pairing_identity_rotation"):
+        transition.finalize(
+            operation_id=operation_id, plan_id=plan_id, policy="rotate"
+        )
+
+    assert transition.rotation_committed(
+        operation_id=operation_id, plan_id=plan_id, policy="rotate"
+    ) is True
+    assert transition.rollback(
+        operation_id=operation_id, plan_id=plan_id, policy="rotate"
+    ) is False
+
+    interrupted["enabled"] = False
+    devices.add("iphone-new")
+    assert transition.finalize(
+        operation_id=operation_id, plan_id=plan_id, policy="rotate"
+    )["state"] == "ready"
+    assert revoked == [("iphone-old", "profile_changed")]

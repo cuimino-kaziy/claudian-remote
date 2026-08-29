@@ -1,5 +1,10 @@
 # U9 internal beta acceptance record — beta.2
 
+> Superseded on 2026-07-22; the current replacement is `0.2.0-beta.4`. A real clean install exposed
+> `release_archive_unsafe_member`: beta.2 rejected the pinned CPython runtime's
+> legitimate archive-internal relative symlinks. Do not distribute or resume
+> beta.2; begin a new operation from the independently verified beta.4 Kit.
+
 Date: 2026-07-22  
 Candidate: `0.2.0-beta.2`  
 Implementation revision tested: `a2d4eb2`  

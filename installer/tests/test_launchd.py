@@ -68,6 +68,66 @@ def test_loaded_system_job_is_booted_out_before_new_definition_is_bootstrapped(t
     ]
 
 
+def test_availability_agent_opens_bound_vault_at_login_without_changing_sleep_policy(tmp_path):
+    layout = RuntimeLayout(tmp_path / "Claudian Remote", tmp_path / "LaunchAgents")
+    python = layout.runtime / "python" / "3.12.11" / "bin" / "python3"
+    python.parent.mkdir(parents=True)
+    python.write_text("python")
+    runner = InMemoryLaunchctl()
+    manager = LaunchAgentManager(layout, runner=runner)
+
+    result = manager.install_local_agents(python, vault_name="Whale")
+
+    assert result["ready"] is True
+    assert len(runner.loaded) == 3
+    value = plistlib.loads(layout.availability_launch_agent.read_bytes())
+    assert value["ProgramArguments"][0] == str(python)
+    assert value["ProgramArguments"][-2:] == [
+        "--status", str(layout.availability_status)
+    ]
+    assert "/usr/bin/caffeinate" not in value["ProgramArguments"]
+    assert value["KeepAlive"] is False
+    assert layout.availability_config.stat().st_mode & 0o777 == 0o600
+    assert manager.status()["availability"] == "launch_pending"
+
+
+def test_availability_status_never_treats_loaded_job_as_success(tmp_path):
+    layout = RuntimeLayout(tmp_path / "Claudian Remote", tmp_path / "LaunchAgents")
+    python = tmp_path / "python3"
+    python.write_text("python")
+    manager = LaunchAgentManager(layout, runner=InMemoryLaunchctl())
+    manager.install_local_agents(python, vault_name="Whale")
+
+    layout.availability_status.write_text(
+        '{"schema":"claudian-remote.availability-status/v1",'
+        '"vault_name":"Whale","state":"launch_failed"}'
+    )
+
+    assert manager.status()["ready"] is True
+    assert manager.status()["availability"] == "launch_failed"
+
+
+def test_remove_local_agents_cleans_availability_job_config_and_status(tmp_path):
+    layout = RuntimeLayout(tmp_path / "Claudian Remote", tmp_path / "LaunchAgents")
+    python = tmp_path / "python3"
+    python.write_text("python")
+    runner = InMemoryLaunchctl()
+    manager = LaunchAgentManager(layout, runner=runner)
+    manager.install_local_agents(python, vault_name="Whale")
+    layout.availability_status.write_text(
+        '{"schema":"claudian-remote.availability-status/v1",'
+        '"vault_name":"Whale","state":"launch_succeeded"}'
+    )
+
+    result = manager.remove_local_agents()
+
+    assert result == {"changed": True, "ready": False}
+    assert runner.loaded == {}
+    assert not layout.availability_launch_agent.exists()
+    assert not layout.availability_config.exists()
+    assert not layout.availability_status.exists()
+
+
 def test_launchctl_timeout_is_bounded_and_fails_closed(tmp_path):
     def runner(arguments, **_kwargs):
         raise subprocess.TimeoutExpired(arguments, 15)

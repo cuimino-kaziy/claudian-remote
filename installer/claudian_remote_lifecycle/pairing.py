@@ -8,9 +8,14 @@ the operation journal or returned to an Agent.
 
 from __future__ import annotations
 
+import json
+import re
 import secrets
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
+
+from .private_io import write_private_json
 
 
 SUPPORTED_MODES = frozenset({"local_tailscale", "local_lan", "remote_vps"})
@@ -23,6 +28,8 @@ REPAIR_REASONS = frozenset(
         "endpoint_changed",
     }
 )
+PAIRING_IDENTITY_SCHEMA = "claudian-remote.pairing-identity/v1"
+DEVICE_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
 class PairingManagement(Protocol):
@@ -260,4 +267,239 @@ class PairingLifecycle:
             "device": {"device_id": device_id},
             "profile": dict(operation.profile),
             "repair_required": False,
+        }
+
+
+class PairingIdentityTransition:
+    """Persist and enforce the signed pairing policy for one update operation.
+
+    Device identifiers are private lifecycle state. They never appear in the
+    Agent-facing result. Rotation is deliberately delayed until the new
+    release and desktop bridge have both passed verification.
+    """
+
+    def __init__(
+        self,
+        state_directory: Path,
+        *,
+        active_device_ids: Callable[[], object],
+        revoke_device: Callable[[str, str], Mapping[str, Any]] | None = None,
+        interruption_probe: Callable[[str], None] = lambda _phase: None,
+    ) -> None:
+        self._state_directory = Path(state_directory)
+        self._active_device_ids = active_device_ids
+        self._revoke_device = revoke_device
+        self._interrupt = interruption_probe
+
+    def _path(self, operation_id: str) -> Path:
+        return self._state_directory / f"{operation_id}.pairing-identity.json"
+
+    @staticmethod
+    def _normalize_device_ids(value: object) -> list[str]:
+        if isinstance(value, (str, bytes, Mapping)) or not isinstance(
+            value, (list, tuple, set, frozenset)
+        ):
+            raise ValueError("pairing_device_inventory_invalid")
+        normalized: set[str] = set()
+        for item in value:
+            device_id = str(item or "")
+            if not DEVICE_ID_PATTERN.fullmatch(device_id):
+                raise ValueError("pairing_device_inventory_invalid")
+            normalized.add(device_id)
+        return sorted(normalized)
+
+    def _read(
+        self,
+        *,
+        operation_id: str,
+        plan_id: str,
+        policy: str,
+    ) -> dict[str, Any] | None:
+        try:
+            value = json.loads(self._path(operation_id).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return None
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("pairing_identity_journal_invalid") from exc
+        expected = {
+            "pairing_identity_schema",
+            "operation_id",
+            "plan_id",
+            "policy",
+            "phase",
+            "original_device_ids",
+            "revoked_device_ids",
+        }
+        if (
+            not isinstance(value, dict)
+            or set(value) != expected
+            or value.get("pairing_identity_schema") != PAIRING_IDENTITY_SCHEMA
+            or value.get("operation_id") != operation_id
+            or value.get("plan_id") != plan_id
+            or value.get("policy") != policy
+            or value.get("phase")
+            not in {"captured", "rotation_committed", "ready", "rolled_back"}
+        ):
+            raise ValueError("pairing_identity_journal_invalid")
+        original = self._normalize_device_ids(value.get("original_device_ids"))
+        revoked = self._normalize_device_ids(value.get("revoked_device_ids"))
+        if not set(revoked).issubset(original):
+            raise ValueError("pairing_identity_journal_invalid")
+        return {**value, "original_device_ids": original, "revoked_device_ids": revoked}
+
+    def _write(self, operation_id: str, value: Mapping[str, Any]) -> None:
+        write_private_json(self._path(operation_id), dict(value))
+
+    def capture(
+        self,
+        *,
+        operation_id: str,
+        plan_id: str,
+        policy: str,
+    ) -> None:
+        if policy not in {"preserve", "rotate"}:
+            raise ValueError("current_update_pairing_identity_policy_invalid")
+        if self._read(operation_id=operation_id, plan_id=plan_id, policy=policy) is not None:
+            return
+        self._write(
+            operation_id,
+            {
+                "pairing_identity_schema": PAIRING_IDENTITY_SCHEMA,
+                "operation_id": operation_id,
+                "plan_id": plan_id,
+                "policy": policy,
+                "phase": "captured",
+                "original_device_ids": self._normalize_device_ids(
+                    self._active_device_ids()
+                ),
+                "revoked_device_ids": [],
+            },
+        )
+
+    def rotation_committed(
+        self, *, operation_id: str, plan_id: str, policy: str
+    ) -> bool:
+        value = self._read(operation_id=operation_id, plan_id=plan_id, policy=policy)
+        return bool(value and value["phase"] in {"rotation_committed", "ready"})
+
+    def operation_rotation_committed(
+        self, *, operation_id: str, plan_id: str
+    ) -> bool:
+        """Return whether this operation crossed the irreversible rotate boundary.
+
+        Recovery does not yet have the signed plan payload, so it must inspect
+        the journal's own policy before selecting the matching strict reader.
+        A valid preserve journal is not a rotate recovery and must return False.
+        """
+
+        path = self._path(operation_id)
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return False
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError("pairing_identity_journal_invalid") from exc
+        if not isinstance(raw, dict) or raw.get("policy") not in {
+            "preserve",
+            "rotate",
+        }:
+            raise ValueError("pairing_identity_journal_invalid")
+        policy = str(raw["policy"])
+        value = self._read(
+            operation_id=operation_id,
+            plan_id=plan_id,
+            policy=policy,
+        )
+        return bool(
+            policy == "rotate"
+            and value
+            and value["phase"] in {"rotation_committed", "ready"}
+        )
+
+    def ready(self, *, operation_id: str, plan_id: str, policy: str) -> bool:
+        value = self._read(operation_id=operation_id, plan_id=plan_id, policy=policy)
+        return bool(value and value["phase"] == "ready")
+
+    def rollback(self, *, operation_id: str, plan_id: str, policy: str) -> bool:
+        value = self._read(operation_id=operation_id, plan_id=plan_id, policy=policy)
+        if value is None:
+            return True
+        if policy == "rotate" and value["phase"] in {
+            "rotation_committed",
+            "ready",
+        }:
+            return False
+        self._write(operation_id, {**value, "phase": "rolled_back"})
+        return True
+
+    def finalize(
+        self, *, operation_id: str, plan_id: str, policy: str
+    ) -> dict[str, Any]:
+        value = self._read(operation_id=operation_id, plan_id=plan_id, policy=policy)
+        if value is None or value["phase"] == "rolled_back":
+            raise ValueError("pairing_identity_capture_missing")
+        active = set(self._normalize_device_ids(self._active_device_ids()))
+        original = set(value["original_device_ids"])
+
+        if policy == "preserve":
+            if original and not original.issubset(active):
+                return {
+                    "state": "blocked",
+                    "code": "pairing_identity_preservation_failed",
+                    "re_pair_required": True,
+                }
+            if not active:
+                return {
+                    "state": "blocked",
+                    "code": "pairing_approval_required",
+                    "re_pair_required": True,
+                }
+            self._write(operation_id, {**value, "phase": "ready"})
+            return {
+                "state": "ready",
+                "code": "pairing_identity_preserved",
+                "re_pair_required": False,
+            }
+
+        if value["phase"] == "captured":
+            if self._revoke_device is None:
+                return {
+                    "state": "blocked",
+                    "code": "pairing_identity_authority_unavailable",
+                    "re_pair_required": False,
+                }
+            revoked = set(value["revoked_device_ids"])
+            for device_id in sorted(original - revoked):
+                result = dict(self._revoke_device(device_id, "profile_changed"))
+                if result.get("state") not in {"ready", "revoked"}:
+                    return {
+                        "state": "blocked",
+                        "code": "pairing_identity_rotation_failed",
+                        "re_pair_required": False,
+                    }
+                revoked.add(device_id)
+                value = {**value, "revoked_device_ids": sorted(revoked)}
+                self._write(operation_id, value)
+            value = {**value, "phase": "rotation_committed"}
+            self._write(operation_id, value)
+            self._interrupt("after_pairing_identity_rotation")
+
+        active = set(self._normalize_device_ids(self._active_device_ids()))
+        if original.intersection(active):
+            return {
+                "state": "blocked",
+                "code": "pairing_identity_rotation_unverified",
+                "re_pair_required": False,
+            }
+        if not (active - original):
+            return {
+                "state": "blocked",
+                "code": "pairing_approval_required",
+                "re_pair_required": True,
+            }
+        self._write(operation_id, {**value, "phase": "ready"})
+        return {
+            "state": "ready",
+            "code": "pairing_identity_rotated",
+            "re_pair_required": False,
         }

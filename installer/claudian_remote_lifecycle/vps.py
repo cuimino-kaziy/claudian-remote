@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
@@ -13,6 +16,56 @@ from .private_io import write_private_json
 
 
 HOST_RE = re.compile(r"^(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+
+
+@contextmanager
+def trusted_regular_file(path: Path, root: Path):
+    """Open a regular file beneath root without traversing symlink parents."""
+
+    path = Path(path)
+    root = Path(root).resolve()
+    if not path.is_absolute() or ".." in path.parts:
+        raise ValueError("retirement_helper_path_invalid")
+    try:
+        relative = path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("retirement_helper_path_invalid") from exc
+    if not relative.parts:
+        raise ValueError("retirement_helper_path_invalid")
+    directory_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    directory_flags |= getattr(os, "O_DIRECTORY", 0)
+    directory_flags |= getattr(os, "O_NOFOLLOW", 0)
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    file_flags |= getattr(os, "O_NOFOLLOW", 0)
+    directory_fd = None
+    descriptor = None
+    try:
+        directory_fd = os.open(root, directory_flags)
+        for component in relative.parts[:-1]:
+            next_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        descriptor = os.open(
+            relative.parts[-1],
+            file_flags,
+            dir_fd=directory_fd,
+        )
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        ):
+            raise ValueError("retirement_helper_unsafe")
+        yield descriptor, metadata
+    except ValueError:
+        raise
+    except OSError as exc:
+        raise ValueError("retirement_helper_unsafe") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory_fd is not None:
+            os.close(directory_fd)
 
 
 @dataclass(frozen=True)
@@ -121,6 +174,133 @@ class VpsSagaAdapter(Protocol):
 
 class VpsSagaInterrupted(RuntimeError):
     pass
+
+
+class PinnedSshResponseLost(RuntimeError):
+    """The remote action may have completed after its request was written."""
+
+
+class PinnedSshChannel(Protocol):
+    """OS-owned SSH channel; credentials never enter lifecycle payloads."""
+
+    hostname: str
+    host_key_fingerprint: str
+
+    def upload_from_fd(self, source_fd: int, destination: str) -> None: ...
+
+    def run_json(
+        self,
+        action: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]: ...
+
+    def remove(self, destination: str) -> None: ...
+
+
+class PinnedSshRetirementPrimitives:
+    """Pinned-host, immutable-upload primitives shared by retirement only."""
+
+    ACTIONS = frozenset(
+        {
+            "verify_inert_asset",
+            "retirement_preflight",
+            "retirement_commit",
+            "retirement_reconcile",
+        }
+    )
+
+    def __init__(
+        self,
+        channel: PinnedSshChannel,
+        *,
+        expected_hostname: str,
+        expected_host_key_fingerprint: str,
+        trusted_source_root: Path,
+    ) -> None:
+        if not isinstance(expected_hostname, str) or not HOST_RE.fullmatch(
+            expected_hostname
+        ):
+            raise ValueError("invalid_vps_hostname")
+        if (
+            not isinstance(expected_host_key_fingerprint, str)
+            or not expected_host_key_fingerprint.startswith("SHA256:")
+        ):
+            raise ValueError("vps_host_key_fingerprint_invalid")
+        if channel.hostname != expected_hostname:
+            raise ValueError("vps_host_mismatch")
+        if channel.host_key_fingerprint != expected_host_key_fingerprint:
+            raise ValueError("vps_host_key_mismatch")
+        self.channel = channel
+        self.expected_hostname = expected_hostname
+        self.expected_host_key_fingerprint = expected_host_key_fingerprint
+        self.trusted_source_root = Path(trusted_source_root).resolve()
+
+    def _assert_pinned(self) -> None:
+        if self.channel.hostname != self.expected_hostname:
+            raise ValueError("vps_host_changed")
+        if self.channel.host_key_fingerprint != self.expected_host_key_fingerprint:
+            raise ValueError("vps_host_key_changed")
+
+    def upload_immutable(
+        self,
+        source: Path,
+        destination: str,
+        *,
+        expected_digest: str,
+    ) -> None:
+        self._assert_pinned()
+        source = Path(source)
+        with trusted_regular_file(
+            source,
+            self.trusted_source_root,
+        ) as (descriptor, opened):
+            digest = hashlib.sha256()
+            while True:
+                chunk = os.read(descriptor, 1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+            if digest.hexdigest() != expected_digest:
+                raise ValueError("retirement_helper_digest_mismatch")
+            after = os.fstat(descriptor)
+            if (
+                after.st_size != opened.st_size
+                or after.st_mtime_ns != opened.st_mtime_ns
+            ):
+                raise ValueError("retirement_helper_changed")
+            os.lseek(descriptor, 0, os.SEEK_SET)
+            self.channel.upload_from_fd(descriptor, destination)
+        result = dict(
+            self.run(
+                "verify_inert_asset",
+                {
+                    "path": destination,
+                    "sha256": expected_digest,
+                    "required_mode": "0444",
+                },
+            )
+        )
+        if result != {
+            "ok": True,
+            "digest": expected_digest,
+            "immutable": True,
+            "inert": True,
+        }:
+            raise ValueError("retirement_remote_stage_unverified")
+
+    def run(
+        self,
+        action: str,
+        payload: Mapping[str, Any],
+    ) -> Mapping[str, Any]:
+        self._assert_pinned()
+        if action not in self.ACTIONS:
+            raise ValueError("vps_action_not_allowed")
+        return self.channel.run_json(action, dict(payload))
+
+    def remove_owned(self, destination: str) -> None:
+        self._assert_pinned()
+        self.channel.remove(destination)
 
 
 class VpsSagaExecutor:

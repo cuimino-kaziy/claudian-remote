@@ -271,6 +271,33 @@ def test_tailscale_controller_uses_app_binary_when_cli_integration_is_missing(mo
     ]
 
 
+def test_tailscale_controller_uses_app_binary_when_cli_integration_is_stale(monkeypatch):
+    calls = []
+    status = {
+        "BackendState": "Running",
+        "Version": "1.80.0",
+        "Self": {"DNSName": "mac.tailnet.ts.net."},
+        "CertDomains": ["mac.tailnet.ts.net"],
+    }
+
+    def fake_run(arguments, **_kwargs):
+        calls.append(list(arguments))
+        if arguments[0] == "tailscale":
+            return CommandResult(1, "", "stale CLI integration")
+        return CommandResult(0, json.dumps(status), "")
+
+    monkeypatch.setattr(tailscale_module.subprocess, "run", fake_run)
+
+    assert TailscaleController().preflight() == {
+        "state": "ready",
+        "endpoint": "https://mac.tailnet.ts.net",
+    }
+    assert calls[:2] == [
+        ["tailscale", "status", "--json"],
+        ["/Applications/Tailscale.app/Contents/MacOS/Tailscale", "status", "--json"],
+    ]
+
+
 def test_tailscale_controller_requires_https_consent_before_serve_mutation():
     status = {
         "BackendState": "Running",
@@ -287,9 +314,57 @@ def test_tailscale_controller_requires_https_consent_before_serve_mutation():
     assert outcome["state"] == "blocked"
     assert outcome["code"] == "tailscale_https_consent_required"
     assert outcome["gate"]["verification_probe"] == "tailscale_https_ready"
+    assert [option["id"] for option in outcome["gate"]["operator_options"]] == [
+        "agent_continue", "manual"
+    ]
+    assert all(
+        option["url"].startswith("https://login.tailscale.com/")
+        for option in outcome["gate"]["operator_options"]
+    )
     assert controller.installed() is True
     assert controller.logged_in() is True
     assert controller.https_ready() is False
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "expected_url"),
+    [
+        (None, "tailscale_install_required", "https://tailscale.com/download/mac"),
+        (
+            {"BackendState": "NeedsLogin", "Version": "1.80.0"},
+            "tailscale_login_required",
+            None,
+        ),
+        (
+            {"BackendState": "Running", "Version": "1.40.0"},
+            "tailscale_update_required",
+            "https://tailscale.com/download/mac",
+        ),
+        (
+            {
+                "BackendState": "Running",
+                "Version": "1.80.0",
+                "Self": {"DNSName": ""},
+            },
+            "tailscale_dns_required",
+            "https://login.tailscale.com/admin/dns",
+        ),
+    ],
+)
+def test_tailscale_setup_gates_offer_agent_or_manual_operation(status, code, expected_url):
+    def runner(_args):
+        if status is None:
+            return CommandResult(127, "", "tailscale unavailable")
+        return CommandResult(0, json.dumps(status), "")
+
+    outcome = TailscaleController(runner=runner).preflight()
+
+    assert outcome["code"] == code
+    options = outcome["gate"]["operator_options"]
+    assert [option["id"] for option in options] == ["agent_continue", "manual"]
+    assert options[0]["recommended"] is True
+    if expected_url:
+        assert all(option["url"] == expected_url for option in options)
 
 
 def test_tailscale_remove_fails_closed_when_owned_proxy_survives():
@@ -305,6 +380,20 @@ def test_tailscale_remove_fails_closed_when_owned_proxy_survives():
 
     with pytest.raises(RuntimeError, match="tailscale_serve_remove_unverified"):
         TailscaleController(runner=runner).remove_serve()
+
+
+def test_tailscale_remove_is_idempotent_when_owned_proxy_was_never_created():
+    calls = []
+
+    def runner(arguments):
+        calls.append(tuple(arguments))
+        if tuple(arguments) == ("tailscale", "serve", "status", "--json"):
+            return CommandResult(0, "{}", "")
+        return CommandResult(1, "", "no matching serve configuration")
+
+    TailscaleController(runner=runner).remove_serve()
+
+    assert calls == [("tailscale", "serve", "status", "--json")]
 
 
 @pytest.mark.parametrize(

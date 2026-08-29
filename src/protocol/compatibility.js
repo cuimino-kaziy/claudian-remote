@@ -11,10 +11,10 @@ export const REQUIRED_CLAUDIAN_CAPABILITIES = Object.freeze([
 ]);
 
 export const COMPATIBILITY_SET = Object.freeze({
-  id: "claudian-remote-0.2.0-beta.2",
-  plugin: "0.2.0-beta.2",
-  companion: "0.2.0-beta.2",
-  relay: "0.2.0-beta.2",
+  id: "claudian-remote-0.2.0-beta.4",
+  plugin: "0.2.0-beta.4",
+  companion: "0.2.0-beta.4",
+  relay: "0.2.0-beta.4",
   protocol: "claudian.remote.v2",
   configuration_schema: 1
 });

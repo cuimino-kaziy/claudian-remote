@@ -86,14 +86,15 @@ class TokenAuthenticator:
             self._records[record.verifier_digest] = record
 
     def revoke_credential(self, credential_id: str) -> bool:
-        changed = False
+        matched = False
         with self._lock:
             for record in self._records.values():
                 if secrets.compare_digest(record.credential_id, str(credential_id)):
-                    record.revoked = True
-                    record.generation += 1
-                    changed = True
-        return changed
+                    matched = True
+                    if not record.revoked:
+                        record.revoked = True
+                        record.generation += 1
+        return matched
 
     def credential_count(self, *, role: Optional[str] = None, active_only: bool = False) -> int:
         with self._lock:

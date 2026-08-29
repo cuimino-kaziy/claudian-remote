@@ -33,7 +33,7 @@ def test_repeated_plan_and_fail_closed_mutation_are_idempotent(tmp_path):
     assert not list(saved_state.glob("op-*.json"))
 
 
-def test_selected_vault_must_itself_have_supported_enabled_claudian():
+def test_selected_vault_must_itself_have_supported_enabled_claudian(tmp_path):
     probe = FakeProbe(
         vaults=[
             {"vault_id": "good", "claudian_version": "2.0.4", "claudian_enabled": True},
@@ -42,7 +42,15 @@ def test_selected_vault_must_itself_have_supported_enabled_claudian():
     )
     output = io.StringIO()
     code = main(
-        ["plan", "--mode", "local_tailscale", "--vault-id", "bad"],
+        [
+            "--state-dir",
+            str(tmp_path / "state"),
+            "plan",
+            "--mode",
+            "local_tailscale",
+            "--vault-id",
+            "bad",
+        ],
         stdout=output,
         services=LifecycleServices(probe, {}),
     )
@@ -53,7 +61,15 @@ def test_selected_vault_must_itself_have_supported_enabled_claudian():
 
     good_output = io.StringIO()
     good_code = main(
-        ["plan", "--mode", "local_tailscale", "--vault-id", "good"],
+        [
+            "--state-dir",
+            str(tmp_path / "state"),
+            "plan",
+            "--mode",
+            "local_tailscale",
+            "--vault-id",
+            "good",
+        ],
         stdout=good_output,
         services=LifecycleServices(probe, {}),
     )

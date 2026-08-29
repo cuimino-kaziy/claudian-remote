@@ -1,0 +1,309 @@
+{
+  "fixture_schema": "claudian-remote.beta4-entry-states/v1",
+  "baseline": {
+    "release_version": "0.2.0-beta.4",
+    "compatibility_set_id": "claudian-remote-0.2.0-beta.4",
+    "components": {
+      "plugin": "0.2.0-beta.4",
+      "companion": "0.2.0-beta.4",
+      "relay": "0.2.0-beta.4",
+      "installer": "0.2.0-beta.4"
+    },
+    "claudian_exact_version": "2.0.4",
+    "topology": "local_tailscale",
+    "checkpoint_schema": "claudian-remote.checkpoint/v1",
+    "transaction_schema": "claudian-remote.local-transaction/v1"
+  },
+  "entries": [
+    {
+      "fixture_id": "clean",
+      "entry_state": {
+        "vault": {
+          "plugin_directories": [],
+          "enabled_plugin_ids": []
+        },
+        "lifecycle": {
+          "checkpoint": null,
+          "transaction": null
+        },
+        "runtime": {
+          "active_release": null,
+          "launch_agents": [],
+          "tailscale_serve_configured": false,
+          "ownership_receipt_present": false
+        }
+      },
+      "expected_beta4_behavior": {
+        "route": "local_tailscale_install",
+        "future_journey": "fresh_install",
+        "terminal_state": "ready",
+        "code": "installation_ready",
+        "legacy_authority_calls": 0,
+        "release_stage_calls": 1,
+        "reaches_local_tailscale_preflight": true
+      }
+    },
+    {
+      "fixture_id": "current",
+      "entry_state": {
+        "vault": {
+          "plugin_directories": [
+            {
+              "id": "claudian-remote",
+              "version": "0.2.0-beta.4",
+              "enabled": true,
+              "preferences": {
+                "schema_version": 2,
+                "vault_id": "vault-a",
+                "connection_mode": "local_tailscale",
+                "notifications_enabled": true,
+                "haptics_enabled": true
+              }
+            }
+          ],
+          "enabled_plugin_ids": [
+            "claudian-remote"
+          ]
+        },
+        "lifecycle": {
+          "checkpoint": null,
+          "transaction": null
+        },
+        "runtime": {
+          "active_release": {
+            "compatibility_set_id": "claudian-remote-0.2.0-beta.4",
+            "coherent": true
+          },
+          "launch_agents": [
+            "relay",
+            "companion",
+            "availability"
+          ],
+          "tailscale_serve_configured": true,
+          "ownership_receipt_present": true
+        }
+      },
+      "expected_beta4_behavior": {
+        "route": "ordinary_signed_update",
+        "future_journey": "current_update",
+        "terminal_state": "ready",
+        "code": "installation_ready",
+        "legacy_authority_calls": 0,
+        "release_stage_calls": 1,
+        "legacy_migration_journal_created": false
+      }
+    },
+    {
+      "fixture_id": "legacy",
+      "entry_state": {
+        "vault": {
+          "plugin_directories": [
+            {
+              "id": "whale-agent-bridge",
+              "version": "recognized-dogfood-lineage",
+              "enabled": true,
+              "legacy_credential_present": true,
+              "credential_value_in_fixture": false,
+              "preferences": {
+                "vault_id": "vault-a",
+                "connection_mode": "local_tailscale",
+                "notifications_enabled": true
+              }
+            }
+          ],
+          "enabled_plugin_ids": [
+            "whale-agent-bridge"
+          ]
+        },
+        "legacy_authority": {
+          "profile": "recognized_dogfood",
+          "production_revoker_available": false
+        },
+        "lifecycle": {
+          "checkpoint": null,
+          "transaction": null
+        },
+        "runtime": {
+          "active_release": null,
+          "launch_agents": [],
+          "tailscale_serve_configured": false,
+          "ownership_receipt_present": false
+        }
+      },
+      "expected_beta4_behavior": {
+        "route": "legacy_migration_gate",
+        "future_journey": "legacy_upgrade",
+        "terminal_state": "blocked",
+        "code": "legacy_credential_revocation_unavailable",
+        "mutation_performed": false,
+        "release_stage_calls": 0,
+        "old_plugin_preserved": true
+      }
+    },
+    {
+      "fixture_id": "conflict",
+      "entry_state": {
+        "vault": {
+          "plugin_directories": [
+            {
+              "id": "whale-agent-bridge",
+              "version": "recognized-dogfood-lineage",
+              "enabled": true,
+              "legacy_credential_present": true,
+              "credential_value_in_fixture": false,
+              "preferences": {}
+            },
+            {
+              "id": "claudian-remote",
+              "version": "0.2.0-beta.4",
+              "enabled": true,
+              "preferences": {
+                "schema_version": 2,
+                "vault_id": "vault-a",
+                "connection_mode": "local_tailscale"
+              }
+            }
+          ],
+          "enabled_plugin_ids": [
+            "whale-agent-bridge",
+            "claudian-remote"
+          ]
+        },
+        "lifecycle": {
+          "checkpoint": null,
+          "transaction": null
+        },
+        "runtime": {
+          "active_release": null,
+          "launch_agents": [],
+          "tailscale_serve_configured": false,
+          "ownership_receipt_present": false
+        }
+      },
+      "expected_beta4_behavior": {
+        "route": "coexistence_conflict",
+        "future_journey": "coexistence_conflict",
+        "terminal_state": "blocked",
+        "code": "legacy_and_current_plugin_enabled",
+        "mutation_performed": false,
+        "release_stage_calls": 0,
+        "both_plugin_directories_preserved": true
+      }
+    },
+    {
+      "fixture_id": "recovery-required",
+      "entry_state": {
+        "vault": {
+          "plugin_directories": [
+            {
+              "id": "whale-agent-bridge",
+              "version": "recognized-dogfood-lineage",
+              "enabled": true,
+              "legacy_credential_present": true,
+              "credential_value_in_fixture": false,
+              "preferences": {
+                "vault_id": "vault-a",
+                "connection_mode": "local_tailscale"
+              }
+            },
+            {
+              "id": "claudian-remote",
+              "version": "0.2.0-beta.4",
+              "enabled": false,
+              "preferences": {}
+            }
+          ],
+          "enabled_plugin_ids": [
+            "whale-agent-bridge"
+          ]
+        },
+        "lifecycle": {
+          "checkpoint": {
+            "checkpoint_schema": "claudian-remote.checkpoint/v1",
+            "operation_id": "op-44444444444444444444444444444444",
+            "command": "install",
+            "plan_id": "plan-4444444444444444444444444444444444444444444444444444444444444444",
+            "state": "recovery_required",
+            "phase": "installation_compensation_failed",
+            "completed_phases": [
+              "staging"
+            ],
+            "recorded_answers": {},
+            "active_gate": null
+          },
+          "transaction": {
+            "transaction_schema": "claudian-remote.local-transaction/v1",
+            "operation_id": "op-44444444444444444444444444444444",
+            "plan_id": "plan-4444444444444444444444444444444444444444444444444444444444444444",
+            "phase": "recovery_required",
+            "completed_phases": [
+              "staging"
+            ],
+            "prior_availability_vault": null,
+            "prior_release_id": null,
+            "activation_started": false,
+            "plugin_activated": false
+          }
+        },
+        "runtime": {
+          "staging_artifacts": [
+            {
+              "kind": "directory",
+              "name": "op-44444444444444444444444444444444.partial",
+              "owned_by_operation": true,
+              "inert": true
+            }
+          ],
+          "active_release": {
+            "present": false,
+            "compatibility_set_id": null,
+            "current_pointer_present": false
+          },
+          "launch_agents": {
+            "relay": {
+              "present": false,
+              "loaded": false,
+              "owned_by_operation": false
+            },
+            "companion": {
+              "present": false,
+              "loaded": false,
+              "owned_by_operation": false
+            },
+            "availability": {
+              "present": false,
+              "loaded": false,
+              "owned_by_operation": false
+            }
+          },
+          "tailscale_serve": {
+            "configured": false,
+            "owned_by_operation": false,
+            "endpoint": null
+          },
+          "ownership": {
+            "receipt_present": false,
+            "resources": []
+          }
+        },
+        "credential_effect": {
+          "state": "not_applied",
+          "authority_request_dispatched": false,
+          "authority_receipt_present": false,
+          "local_credential_present": true,
+          "credential_value_in_fixture": false,
+          "external_effect_observed": false
+        }
+      },
+      "expected_beta4_behavior": {
+        "route": "existing_operation_recovery",
+        "future_journey": "legacy_upgrade",
+        "terminal_state": "recovery_required",
+        "code": "installation_compensation_failed",
+        "recovery_action": "rollback",
+        "new_operation_allowed": false,
+        "credential_effect": "not_applied"
+      }
+    }
+  ]
+}

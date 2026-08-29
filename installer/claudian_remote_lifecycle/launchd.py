@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import os
+import json
 import plistlib
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Protocol, Sequence
 
+from .availability import validate_bound_vault_name
 from .runtime import RuntimeLayout
 
 
@@ -55,7 +57,7 @@ class SystemLaunchctl:
     def bootout(self, label: str, path: Path) -> None:
         self._run(["bootout", self.domain, str(path)], allowed=(0, 3, 113))
 
-    def loaded_status(self, label: str) -> bool:
+    def verified_loaded_status(self, label: str) -> bool | None:
         try:
             result = self.runner(
                 ["/bin/launchctl", "print", f"{self.domain}/{label}"],
@@ -65,8 +67,11 @@ class SystemLaunchctl:
                 timeout=15,
             )
         except (OSError, subprocess.TimeoutExpired):
-            return False
+            return None
         return result.returncode == 0
+
+    def loaded_status(self, label: str) -> bool:
+        return self.verified_loaded_status(label) is True
 
 
 class InMemoryLaunchctl:
@@ -83,6 +88,9 @@ class InMemoryLaunchctl:
 
     def loaded_status(self, label: str) -> bool:
         return label in self.loaded
+
+    def verified_loaded_status(self, label: str) -> bool:
+        return self.loaded_status(label)
 
 
 def _write_private(path: Path, content: bytes) -> bool:
@@ -106,6 +114,7 @@ def _write_private(path: Path, content: bytes) -> bool:
 class LaunchAgentManager:
     RELAY_LABEL = "com.claudian.remote.relay"
     COMPANION_LABEL = "com.claudian.remote.companion"
+    AVAILABILITY_LABEL = "com.claudian.remote.availability"
 
     def __init__(self, layout: RuntimeLayout, *, runner: Launchctl | None = None) -> None:
         self.layout = layout
@@ -117,16 +126,19 @@ class LaunchAgentManager:
             str(self.layout.current / "companion"),
             str(self.layout.current / "relay"),
         ))
+        service_arguments = [
+            str(python),
+            "-m",
+            "installer.claudian_remote_lifecycle.runtime_entrypoints",
+            role,
+            "--config",
+            str(config),
+        ]
+        if role == "availability":
+            service_arguments.extend(["--status", str(self.layout.availability_status)])
         value = {
             "Label": label,
-            "ProgramArguments": [
-                str(python),
-                "-m",
-                "installer.claudian_remote_lifecycle.runtime_entrypoints",
-                role,
-                "--config",
-                str(config),
-            ],
+            "ProgramArguments": service_arguments,
             "WorkingDirectory": str(self.layout.current / "installer"),
             "EnvironmentVariables": {
                 "PYTHONPATH": python_path,
@@ -134,7 +146,7 @@ class LaunchAgentManager:
                 "UV_NO_CONFIG": "1",
             },
             "RunAtLoad": True,
-            "KeepAlive": {"SuccessfulExit": False},
+            "KeepAlive": False if role == "availability" else {"SuccessfulExit": False},
             "ProcessType": "Background",
             "StandardOutPath": str(self.layout.logs / f"{role}.out.log"),
             "StandardErrorPath": str(self.layout.logs / f"{role}.err.log"),
@@ -142,11 +154,25 @@ class LaunchAgentManager:
         }
         return plistlib.dumps(value, fmt=plistlib.FMT_XML, sort_keys=True)
 
-    def install_local_agents(self, python: Path) -> dict[str, object]:
+    def install_local_agents(self, python: Path, *, vault_name: str | None = None) -> dict[str, object]:
         self.layout.ensure()
         self.layout.launch_agents.mkdir(parents=True, exist_ok=True)
         changed = False
-        for label, path, role, config in (
+        if vault_name is not None:
+            bound_vault = validate_bound_vault_name(vault_name)
+            changed = _write_private(
+                self.layout.availability_config,
+                json.dumps(
+                    {
+                        "schema": "claudian-remote.availability/v1",
+                        "vault_name": bound_vault,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8"),
+            ) or changed
+            self.layout.availability_status.unlink(missing_ok=True)
+        services = [
             (self.RELAY_LABEL, self.layout.relay_launch_agent, "relay", self.layout.relay_config),
             (
                 self.COMPANION_LABEL,
@@ -154,11 +180,44 @@ class LaunchAgentManager:
                 "companion",
                 self.layout.companion_config,
             ),
-        ):
+        ]
+        if self.layout.availability_config.is_file():
+            services.append((
+                self.AVAILABILITY_LABEL,
+                self.layout.availability_launch_agent,
+                "availability",
+                self.layout.availability_config,
+            ))
+        for label, path, role, config in services:
             content = self._payload(label, Path(python), role, config)
             changed = _write_private(path, content) or changed
             self.runner.bootstrap(label, path)
         return {"changed": changed, "ready": self.status()["ready"]}
+
+    def availability_vault_name(self) -> str | None:
+        try:
+            value = json.loads(self.layout.availability_config.read_text(encoding="utf-8"))
+            if not isinstance(value, dict) or value.get("schema") != "claudian-remote.availability/v1":
+                return None
+            return validate_bound_vault_name(value.get("vault_name"))
+        except (OSError, json.JSONDecodeError, ValueError, TypeError):
+            return None
+
+    def _availability_state(self) -> str:
+        if not self.layout.availability_config.is_file():
+            return "not_configured"
+        try:
+            value = json.loads(self.layout.availability_status.read_text(encoding="utf-8"))
+            if (
+                not isinstance(value, dict)
+                or value.get("schema") != "claudian-remote.availability-status/v1"
+                or value.get("vault_name") != self.availability_vault_name()
+                or value.get("state") not in {"launching", "launch_succeeded", "launch_failed"}
+            ):
+                return "status_invalid"
+            return str(value["state"])
+        except (OSError, json.JSONDecodeError, TypeError):
+            return "launch_pending"
 
     def status(self) -> dict[str, object]:
         relay = self.runner.loaded_status(self.RELAY_LABEL)
@@ -167,11 +226,36 @@ class LaunchAgentManager:
             "ready": relay and companion,
             "relay": "running" if relay else "stopped",
             "companion": "running" if companion else "stopped",
+            "availability": self._availability_state(),
         }
+
+    def managed_agents_absent(self) -> bool:
+        """Prove that no Claudian Remote LaunchAgent is loaded or installed."""
+
+        probe = getattr(self.runner, "verified_loaded_status", None)
+        if not callable(probe):
+            return False
+        labels = (
+            self.RELAY_LABEL,
+            self.COMPANION_LABEL,
+            self.AVAILABILITY_LABEL,
+        )
+        states = [probe(label) for label in labels]
+        paths = (
+            self.layout.relay_launch_agent,
+            self.layout.companion_launch_agent,
+            self.layout.availability_launch_agent,
+            self.layout.availability_config,
+            self.layout.availability_status,
+        )
+        return all(state is False for state in states) and all(
+            not path.exists() and not path.is_symlink() for path in paths
+        )
 
     def remove_local_agents(self) -> dict[str, object]:
         changed = False
         for label, path in (
+            (self.AVAILABILITY_LABEL, self.layout.availability_launch_agent),
             (self.COMPANION_LABEL, self.layout.companion_launch_agent),
             (self.RELAY_LABEL, self.layout.relay_launch_agent),
         ):
@@ -179,4 +263,10 @@ class LaunchAgentManager:
                 self.runner.bootout(label, path)
                 changed = True
             path.unlink(missing_ok=True)
+        if self.layout.availability_config.exists():
+            self.layout.availability_config.unlink()
+            changed = True
+        if self.layout.availability_status.exists():
+            self.layout.availability_status.unlink()
+            changed = True
         return {"changed": changed, "ready": False}

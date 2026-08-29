@@ -1,9 +1,41 @@
 import AppKit
 import Foundation
 
-private let companionLabel = "com.claudian.remote.companion"
-private let companionPlist = (NSHomeDirectory() as NSString)
-    .appendingPathComponent("Library/LaunchAgents/com.claudian.remote.companion.plist")
+private struct ManagedService {
+    let label: String
+    let plist: String
+    let persistent: Bool
+}
+
+private struct ServiceSnapshot {
+    let service: ManagedService
+    let loaded: Bool
+    let disabled: Bool
+}
+
+private let launchAgentsDirectory = (NSHomeDirectory() as NSString)
+    .appendingPathComponent("Library/LaunchAgents")
+
+private let managedServices = [
+    ManagedService(
+        label: "com.claudian.remote.relay",
+        plist: (launchAgentsDirectory as NSString)
+            .appendingPathComponent("com.claudian.remote.relay.plist"),
+        persistent: true
+    ),
+    ManagedService(
+        label: "com.claudian.remote.companion",
+        plist: (launchAgentsDirectory as NSString)
+            .appendingPathComponent("com.claudian.remote.companion.plist"),
+        persistent: true
+    ),
+    ManagedService(
+        label: "com.claudian.remote.availability",
+        plist: (launchAgentsDirectory as NSString)
+            .appendingPathComponent("com.claudian.remote.availability.plist"),
+        persistent: false
+    ),
+]
 
 @main
 final class ClaudianRemoteControl: NSObject, NSApplicationDelegate {
@@ -45,45 +77,64 @@ final class ClaudianRemoteControl: NSObject, NSApplicationDelegate {
 
     @objc private func startService() {
         runServiceAction { domain in
-            _ = self.runLaunchctl(["enable", "\(domain)/\(companionLabel)"])
-            _ = self.runLaunchctl(["bootout", "\(domain)/\(companionLabel)"])
-            let bootstrap = self.runLaunchctl(["bootstrap", domain, companionPlist])
-            guard bootstrap.status == 0 else { return bootstrap }
-            return self.runLaunchctl(["kickstart", "-k", "\(domain)/\(companionLabel)"])
+            self.startAllServices(domain: domain)
         }
     }
 
     @objc private func restartService() {
         runServiceAction { domain in
-            let result = self.runLaunchctl(["kickstart", "-k", "\(domain)/\(companionLabel)"])
-            if result.status == 0 { return result }
-            _ = self.runLaunchctl(["enable", "\(domain)/\(companionLabel)"])
-            return self.runLaunchctl(["bootstrap", domain, companionPlist])
+            self.startAllServices(domain: domain)
         }
     }
 
     @objc private func stopService() {
         runServiceAction { domain in
-            self.runLaunchctl(["bootout", "\(domain)/\(companionLabel)"])
+            var outcome: (status: Int32, output: String) = (0, "")
+            for service in managedServices.reversed() where self.isServiceLoaded(service, domain: domain) {
+                let result = self.runLaunchctl(["bootout", self.serviceTarget(service, domain: domain)])
+                if result.status != 0 && outcome.status == 0 { outcome = result }
+            }
+            return outcome
         }
     }
 
     @objc private func toggleAutoStart() {
         runServiceAction { domain in
             if self.isAutoStartDisabled() {
-                let enable = self.runLaunchctl(["enable", "\(domain)/\(companionLabel)"])
-                guard enable.status == 0 else { return enable }
-                return self.runLaunchctl(["bootstrap", domain, companionPlist])
+                return self.startAllServices(domain: domain)
             }
-            _ = self.runLaunchctl(["bootout", "\(domain)/\(companionLabel)"])
-            return self.runLaunchctl(["disable", "\(domain)/\(companionLabel)"])
+            let snapshots = managedServices.map {
+                ServiceSnapshot(
+                    service: $0,
+                    loaded: self.isServiceLoaded($0, domain: domain),
+                    disabled: self.isServiceDisabled($0, domain: domain)
+                )
+            }
+            for service in managedServices {
+                if self.isServiceLoaded(service, domain: domain) {
+                    let bootout = self.runLaunchctl([
+                        "bootout", self.serviceTarget(service, domain: domain),
+                    ])
+                    guard bootout.status == 0 else {
+                        self.restoreServices(snapshots, domain: domain)
+                        return bootout
+                    }
+                }
+                let result = self.runLaunchctl(["disable", "\(domain)/\(service.label)"])
+                guard result.status == 0 else {
+                    self.restoreServices(snapshots, domain: domain)
+                    return result
+                }
+            }
+            return (0, "")
         }
     }
 
     @objc private func openLogs() {
         let logs = [
-            "/tmp/claudian-remote-companion-v2.out.log",
-            "/tmp/claudian-remote-companion-v2.err.log",
+            (NSHomeDirectory() as NSString).appendingPathComponent(
+                "Library/Application Support/Claudian Remote/logs"
+            ),
         ]
         let workspace = NSWorkspace.shared
         for path in logs where FileManager.default.fileExists(atPath: path) {
@@ -132,13 +183,88 @@ final class ClaudianRemoteControl: NSObject, NSApplicationDelegate {
     }
 
     private func isServiceRunning() -> Bool {
-        let result = runLaunchctl(["print", "\(userDomain())/\(companionLabel)"])
-        return result.status == 0 && result.output.contains("state = running")
+        managedServices.filter(\.persistent).allSatisfy { service in
+            let result = runLaunchctl(["print", "\(userDomain())/\(service.label)"])
+            return result.status == 0 && result.output.contains("state = running")
+        }
     }
 
     private func isAutoStartDisabled() -> Bool {
         let result = runLaunchctl(["print-disabled", userDomain()])
-        return result.output.contains("\(companionLabel) => true")
+        return managedServices.contains { service in
+            result.output.contains("\(service.label) => true")
+        }
+    }
+
+    private func startAllServices(domain: String) -> (status: Int32, output: String) {
+        let missingRequired = managedServices.filter {
+            $0.persistent && !FileManager.default.fileExists(atPath: $0.plist)
+        }
+        guard missingRequired.isEmpty else {
+            let labels = missingRequired.map(\.label).joined(separator: ", ")
+            return (66, "缺少必需的 LaunchAgent：\(labels)")
+        }
+        let candidates = managedServices.filter {
+            $0.persistent || FileManager.default.fileExists(atPath: $0.plist)
+        }
+        let snapshots = managedServices.map {
+            ServiceSnapshot(
+                service: $0,
+                loaded: isServiceLoaded($0, domain: domain),
+                disabled: isServiceDisabled($0, domain: domain)
+            )
+        }
+        for service in managedServices {
+            let enable = runLaunchctl(["enable", "\(domain)/\(service.label)"])
+            guard enable.status == 0 else {
+                restoreServices(snapshots, domain: domain)
+                return enable
+            }
+        }
+        for service in candidates {
+            if isServiceLoaded(service, domain: domain) {
+                let bootout = runLaunchctl(["bootout", serviceTarget(service, domain: domain)])
+                guard bootout.status == 0 else {
+                    restoreServices(snapshots, domain: domain)
+                    return bootout
+                }
+            }
+            let bootstrap = runLaunchctl(["bootstrap", domain, service.plist])
+            guard bootstrap.status == 0 else {
+                restoreServices(snapshots, domain: domain)
+                return bootstrap
+            }
+        }
+        return (0, "")
+    }
+
+    private func serviceTarget(_ service: ManagedService, domain: String) -> String {
+        "\(domain)/\(service.label)"
+    }
+
+    private func isServiceLoaded(_ service: ManagedService, domain: String) -> Bool {
+        runLaunchctl(["print", serviceTarget(service, domain: domain)]).status == 0
+    }
+
+    private func isServiceDisabled(_ service: ManagedService, domain: String) -> Bool {
+        let result = runLaunchctl(["print-disabled", domain])
+        return result.output.contains("\(service.label) => true")
+    }
+
+    private func restoreServices(_ snapshots: [ServiceSnapshot], domain: String) {
+        for snapshot in snapshots.reversed() {
+            let service = snapshot.service
+            if isServiceLoaded(service, domain: domain) {
+                _ = runLaunchctl(["bootout", serviceTarget(service, domain: domain)])
+            }
+            _ = runLaunchctl([
+                snapshot.disabled ? "disable" : "enable",
+                serviceTarget(service, domain: domain),
+            ])
+            if snapshot.loaded && FileManager.default.fileExists(atPath: service.plist) {
+                _ = runLaunchctl(["bootstrap", domain, service.plist])
+            }
+        }
     }
 
     private func runLaunchctl(_ arguments: [String]) -> (status: Int32, output: String) {

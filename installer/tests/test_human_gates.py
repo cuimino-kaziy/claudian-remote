@@ -1,3 +1,7 @@
+import json
+
+import pytest
+
 from installer.claudian_remote_lifecycle.checkpoint import CheckpointStore
 from installer.claudian_remote_lifecycle.human_gates import HumanGateController
 
@@ -23,13 +27,42 @@ def test_human_gate_survives_restart_and_chat_ack_cannot_satisfy_it(tmp_path):
     assert blocked["chat_acknowledged"] is True
 
     external_state["logged_in"] = True
-    resumed = HumanGateController(
+    verified = HumanGateController(
         CheckpointStore(tmp_path / "state"),
         {"tailscale_logged_in": lambda: external_state["logged_in"]},
     ).verify_and_resume(checkpoint["operation_id"])
-    assert resumed["verified"] is True
-    assert resumed["checkpoint"]["active_gate"] is None
-    assert resumed["checkpoint"]["state"] == "prepared"
+    assert verified["verified"] is True
+    assert verified["checkpoint"]["active_gate"] == gate.to_dict()
+    assert verified["checkpoint"]["state"] == "blocked"
+
+
+def test_expired_gate_refreshes_under_the_same_operation(tmp_path):
+    now = {"value": 1000.0}
+    store = CheckpointStore(tmp_path / "state")
+    checkpoint = store.create(command="install", plan_id="plan-a", phase="await_login")
+    controller = HumanGateController(
+        store,
+        {"tailscale_logged_in": lambda: True},
+        now=lambda: now["value"],
+        gate_ttl_seconds=60,
+    )
+    original = controller.require(
+        checkpoint["operation_id"],
+        gate_type="tailscale_login_required",
+        explanation="Tailscale must be logged in by the user.",
+        exact_action="Open Tailscale and finish sign-in.",
+        verification_probe="tailscale_logged_in",
+    )
+
+    now["value"] = 1060.0
+    result = controller.verify(checkpoint["operation_id"])
+
+    assert result["verified"] is False
+    assert result["code"] == "human_gate_refreshed"
+    assert result["checkpoint"]["operation_id"] == checkpoint["operation_id"]
+    assert result["gate"]["gate_id"] != original.gate_id
+    assert result["gate"]["refresh_generation"] == 1
+    assert result["gate"]["expires_at_epoch"] == 1120
 
 
 def test_gate_requires_a_known_verification_probe(tmp_path):
@@ -48,3 +81,81 @@ def test_gate_requires_a_known_verification_probe(tmp_path):
         assert str(exc) == "unknown_gate_probe"
     else:
         raise AssertionError("unknown probes must fail closed")
+
+
+def test_operator_options_are_narrowly_validated_before_checkpointing(tmp_path):
+    store = CheckpointStore(tmp_path / "state")
+    checkpoint = store.create(command="install", plan_id="plan-a")
+    controller = HumanGateController(store, {"ready": lambda: False})
+
+    gate = controller.require(
+        checkpoint["operation_id"],
+        gate_type="tailscale_install_required",
+        explanation="Install Tailscale.",
+        exact_action="Use one supported route.",
+        verification_probe="ready",
+        operator_options=({
+            "id": "agent_continue",
+            "label": "由 Agent 继续操作",
+            "instructions": "Open the official page.",
+            "recommended": True,
+            "url": "https://tailscale.com/download/mac",
+            "requires_capability": "browser_control",
+        },),
+    )
+
+    assert gate.to_dict()["operator_options"][0]["url"] == "https://tailscale.com/download/mac"
+    with pytest.raises(ValueError, match="invalid_operator_option"):
+        controller.require(
+            checkpoint["operation_id"],
+            gate_type="bad_option",
+            explanation="Bad option.",
+            exact_action="Reject it.",
+            verification_probe="ready",
+            operator_options=({
+                "id": "manual",
+                "label": "Manual",
+                "instructions": "Open it.",
+                "url": "http://attacker.example/collect?token=secret",
+            },),
+        )
+
+
+def test_legacy_authority_gate_offers_agent_and_manual_routes_without_secret_data(
+    tmp_path,
+):
+    store = CheckpointStore(tmp_path / "state")
+    checkpoint = store.create(command="install", plan_id="plan-a")
+    controller = HumanGateController(
+        store,
+        {"legacy_authority_authorized": lambda: False},
+    )
+
+    gate = controller.require(
+        checkpoint["operation_id"],
+        gate_type="legacy_authority_authorization_required",
+        explanation="Authorize retirement for this installation only.",
+        exact_action="Choose one supported authorization route.",
+        verification_probe="legacy_authority_authorized",
+        operator_options=(
+            {
+                "id": "agent_continue",
+                "label": "由 Agent 继续",
+                "instructions": "Use the pinned authority profile.",
+                "recommended": True,
+                "requires_capability": "legacy_retirement",
+            },
+            {
+                "id": "manual_continue",
+                "label": "我自己操作",
+                "instructions": "Confirm the displayed authority identity.",
+            },
+        ),
+    )
+
+    encoded = json.dumps(gate.to_dict(), ensure_ascii=False)
+    assert [item["id"] for item in gate.to_dict()["operator_options"]] == [
+        "agent_continue",
+        "manual_continue",
+    ]
+    assert "token" not in encoded.lower()

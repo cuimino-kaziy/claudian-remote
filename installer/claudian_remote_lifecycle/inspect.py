@@ -6,6 +6,7 @@ import hashlib
 import json
 import platform
 import plistlib
+import re
 import shutil
 import socket
 import subprocess
@@ -14,12 +15,25 @@ from pathlib import Path
 from typing import Any, Mapping, Protocol, Sequence
 
 from .keychain import MacOSKeychain
-from .model import SNAPSHOT_SCHEMA
+from .journey import classify_journey
+from .legacy_authority import legacy_authority_profile_status
+from .model import (
+    CHECKPOINT_SCHEMA,
+    SNAPSHOT_SCHEMA,
+    AmbiguityState,
+    CredentialEffect,
+    EffectDisposition,
+    Journey,
+    LifecyclePhase,
+    PairingIdentityPolicy,
+    RecoveryPolicy,
+)
 from .provisioning import verify_secure_provisioning
 from .runtime import RuntimeLayout
 
 
 SUPPORTED_CLAUDIAN_VERSION = "2.0.4"
+SUPPORTED_LEGACY_PLUGIN_VERSIONS = frozenset({"recognized-dogfood-lineage"})
 
 
 class InspectionProbe(Protocol):
@@ -97,6 +111,8 @@ class LocalInspectionProbe:
 
     def installation(self) -> Mapping[str, Any]:
         manifests = []
+        current = self._remote_plugin_summary("claudian-remote")
+        legacy = self._remote_plugin_summary("whale-agent-bridge")
         for vault in self._discover_vaults():
             path = vault["_path"] / ".obsidian" / "plugins" / "claudian-remote" / "manifest.json"
             value = self._read_json(path)
@@ -105,15 +121,67 @@ class LocalInspectionProbe:
         versions = sorted({str(value.get("version")) for value in manifests if value.get("version")})
         provisioning = self._secure_provisioning_status()
         managed = self._managed_installation_status()
+        authority = (
+            legacy_authority_profile_status(
+                self.home
+                / "Library"
+                / "Application Support"
+                / "Claudian Remote"
+                / "lifecycle"
+                / "legacy-authority-profile.json"
+            )
+            if legacy["present"]
+            else {"adapter": "not_applicable", "capability": "not_applicable"}
+        )
         return {
             "installed": bool(manifests),
             "plugin_versions": versions,
+            "plugin_lineage": {"current": current, "legacy": legacy},
+            "legacy_authority_adapter": authority["adapter"],
+            "legacy_authority_capability": authority["capability"],
             **managed,
             "operation_id": None,
             # A lifecycle process cannot safely provision an Obsidian WebView's
             # localStorage. This becomes true only when the signed Companion
             # secure-provisioning route and its OS-backed store are probed.
             **provisioning,
+        }
+
+    def _remote_plugin_summary(self, plugin_id: str) -> dict[str, Any]:
+        present = False
+        enabled = False
+        recognized = True
+        versions: set[str] = set()
+        for vault in self._discover_vaults():
+            plugin = vault["_path"] / ".obsidian" / "plugins" / plugin_id
+            if not plugin.exists() and not plugin.is_symlink():
+                continue
+            present = True
+            if plugin.is_symlink() or not plugin.is_dir():
+                recognized = False
+                continue
+            manifest = self._read_json(plugin / "manifest.json")
+            if not isinstance(manifest, Mapping) or manifest.get("id") != plugin_id:
+                recognized = False
+                continue
+            version = manifest.get("version")
+            if version is not None:
+                versions.add(str(version))
+            if (
+                plugin_id == "whale-agent-bridge"
+                and str(version or "") not in SUPPORTED_LEGACY_PLUGIN_VERSIONS
+            ):
+                recognized = False
+            enabled_plugins = self._read_json(
+                vault["_path"] / ".obsidian" / "community-plugins.json"
+            )
+            if isinstance(enabled_plugins, list) and plugin_id in enabled_plugins:
+                enabled = True
+        return {
+            "present": present,
+            "enabled": enabled,
+            "recognized": recognized,
+            "versions": sorted(versions),
         }
 
     def _managed_installation_status(self) -> Mapping[str, Any]:
@@ -282,7 +350,11 @@ def validate_snapshot(snapshot: Mapping[str, Any]) -> None:
 class Inspector:
     probe: InspectionProbe
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(
+        self,
+        *,
+        operation_arbitration: Mapping[str, Any] | None = None,
+    ) -> dict[str, Any]:
         body = {
             "snapshot_schema": SNAPSHOT_SCHEMA,
             "macos": dict(self.probe.macos()),
@@ -293,10 +365,191 @@ class Inspector:
             "network": dict(self.probe.network()),
         }
         body = _normalize(body)
+        installation = body["installation"]
+        lineage = installation.get("plugin_lineage")
+        if not isinstance(lineage, Mapping):
+            current_present = bool(installation.get("installed"))
+            lineage = {
+                "current": {
+                    "present": current_present,
+                    "enabled": current_present,
+                    "recognized": True,
+                },
+                "legacy": {"present": False, "enabled": False, "recognized": True},
+            }
+        prior_operation = installation.get("existing_operation")
+        prior_operation_terminal: bool | None = None
+        if operation_arbitration is not None:
+            arbitration = self._operation_arbitration(operation_arbitration)
+            body["operation_arbitration"] = arbitration
+            prior_operation_terminal = arbitration["prior_operation_terminal"]
+            operation_id = arbitration.get("operation_id")
+            if operation_id is not None:
+                prior_operation = {
+                    "operation_id": operation_id,
+                    "terminal": prior_operation_terminal,
+                    "recommended_action": arbitration.get("recommended_action"),
+                }
+        decision = classify_journey(
+            {
+                "current": {
+                    key: bool(lineage.get("current", {}).get(key))
+                    for key in ("present", "enabled", "recognized")
+                },
+                "legacy": {
+                    key: bool(lineage.get("legacy", {}).get(key))
+                    for key in ("present", "enabled", "recognized")
+                },
+                "legacy_authority_capability": installation.get(
+                    "legacy_authority_capability", "not_applicable"
+                ),
+            },
+            prior_operation=prior_operation,
+            prior_operation_terminal=prior_operation_terminal,
+        )
+        body["journey"] = decision.to_dict()
         body["read_only"] = True
         body["support"] = self._support(body)
         body["snapshot_id"] = content_id("inspection", body)
         return body
+
+    @staticmethod
+    def _operation_arbitration(value: Mapping[str, Any]) -> dict[str, Any]:
+        base_fields = {
+            "state",
+            "reason_code",
+            "prior_operation_terminal",
+            "terminal_operation_ids",
+            "operation_id",
+            "recommended_action",
+        }
+        control_fields = {
+            "operation_schema",
+            "journey",
+            "phase",
+            "irreversible_boundary_crossed",
+            "ambiguity_state",
+            "recovery_policy",
+            "effect_summary",
+            "cancellation_available",
+            "pairing_identity_policy",
+        }
+        if not isinstance(value, Mapping) or not set(value).issubset(
+            base_fields | control_fields
+        ):
+            raise ValueError("invalid_operation_arbitration")
+        present_controls = set(value) & control_fields
+        if present_controls and present_controls != control_fields:
+            raise ValueError("invalid_operation_arbitration")
+        state = value.get("state")
+        reason_code = value.get("reason_code")
+        terminal = value.get("prior_operation_terminal")
+        terminal_ids = value.get("terminal_operation_ids")
+        if (
+            state not in {"clear", "reconciliation_required", "blocked"}
+            or not isinstance(reason_code, str)
+            or not reason_code
+            or not isinstance(terminal, bool)
+            or not isinstance(terminal_ids, list)
+            or any(
+                not isinstance(item, str)
+                or re.fullmatch(r"op-[0-9a-f]{32}", item) is None
+                for item in terminal_ids
+            )
+        ):
+            raise ValueError("invalid_operation_arbitration")
+        operation_id = value.get("operation_id")
+        if operation_id is not None and (
+            not isinstance(operation_id, str)
+            or re.fullmatch(r"op-[0-9a-f]{32}", operation_id) is None
+        ):
+            raise ValueError("invalid_operation_arbitration")
+        action = value.get("recommended_action")
+        if action is not None and action not in {
+            "resume",
+            "rollback",
+            "finish_forward",
+            "reconcile_retirement_outcome",
+            "manual_recovery_required",
+        }:
+            raise ValueError("invalid_operation_arbitration")
+        if terminal and state != "clear":
+            raise ValueError("invalid_operation_arbitration")
+        if not terminal and state == "clear":
+            raise ValueError("invalid_operation_arbitration")
+        projection = {
+            "state": state,
+            "reason_code": reason_code,
+            "prior_operation_terminal": terminal,
+            "terminal_operation_ids": list(terminal_ids),
+            **({"operation_id": operation_id} if operation_id is not None else {}),
+            **({"recommended_action": action} if action is not None else {}),
+        }
+        if present_controls:
+            effect = value.get("effect_summary")
+            if (
+                value.get("operation_schema") != CHECKPOINT_SCHEMA
+                or value.get("journey") not in {item.value for item in Journey}
+                or value.get("phase") not in {item.value for item in LifecyclePhase}
+                or not isinstance(value.get("irreversible_boundary_crossed"), bool)
+                or value.get("ambiguity_state")
+                not in {item.value for item in AmbiguityState}
+                or value.get("recovery_policy")
+                not in {item.value for item in RecoveryPolicy}
+                or not isinstance(value.get("cancellation_available"), bool)
+                or value.get("pairing_identity_policy")
+                not in {item.value for item in PairingIdentityPolicy}
+                or not isinstance(effect, Mapping)
+                or set(effect)
+                != {
+                    "local_effect",
+                    "remote_effect",
+                    "credential_effect",
+                    "mutation_performed",
+                    "owned_resource_count",
+                    "effect_codes",
+                }
+                or effect.get("local_effect")
+                not in {item.value for item in EffectDisposition}
+                or effect.get("remote_effect")
+                not in {item.value for item in EffectDisposition}
+                or effect.get("credential_effect")
+                not in {item.value for item in CredentialEffect}
+                or (
+                    effect.get("mutation_performed") is not None
+                    and not isinstance(effect.get("mutation_performed"), bool)
+                )
+                or isinstance(effect.get("owned_resource_count"), bool)
+                or not isinstance(effect.get("owned_resource_count"), int)
+                or effect.get("owned_resource_count", -1) < 0
+                or not isinstance(effect.get("effect_codes"), list)
+                or any(
+                    not isinstance(code, str) or not code
+                    for code in effect.get("effect_codes", [])
+                )
+            ):
+                raise ValueError("invalid_operation_arbitration")
+            projection.update(
+                {
+                    "operation_schema": CHECKPOINT_SCHEMA,
+                    "journey": value["journey"],
+                    "phase": value["phase"],
+                    "irreversible_boundary_crossed": value[
+                        "irreversible_boundary_crossed"
+                    ],
+                    "ambiguity_state": value["ambiguity_state"],
+                    "recovery_policy": value["recovery_policy"],
+                    "effect_summary": {
+                        **effect,
+                        "effect_codes": list(effect["effect_codes"]),
+                    },
+                    "cancellation_available": value["cancellation_available"],
+                    "pairing_identity_policy": value[
+                        "pairing_identity_policy"
+                    ],
+                }
+            )
+        return projection
 
     @staticmethod
     def _support(snapshot: Mapping[str, Any]) -> dict[str, Any]:
@@ -310,6 +563,9 @@ class Inspector:
             reasons.append("claudian_not_enabled")
         if not snapshot["installation"].get("secure_provisioning_available"):
             reasons.append("secure_provisioning_missing")
+        journey = snapshot.get("journey", {})
+        if journey.get("blocked"):
+            reasons.append(str(journey.get("reason_code") or "journey_classification_failed"))
         vaults = snapshot["vaults"]
         if not vaults:
             reasons.append("vault_not_found")

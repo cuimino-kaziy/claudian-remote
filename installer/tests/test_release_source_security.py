@@ -108,6 +108,51 @@ def test_safe_extract_supports_the_macos_bootstrap_python(tmp_path):
     assert (destination / "payload.txt").read_text(encoding="utf-8") == "verified payload"
 
 
+def test_safe_extract_allows_internal_relative_runtime_symlink(tmp_path):
+    source_root = tmp_path / "source"
+    binary = source_root / "python" / "bin" / "python3.12"
+    binary.parent.mkdir(parents=True)
+    binary.write_text("pinned runtime", encoding="utf-8")
+    archive = tmp_path / "python-runtime.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        bundle.add(source_root / "python", arcname="python")
+        link = tarfile.TarInfo("python/bin/python3")
+        link.type = tarfile.SYMTYPE
+        link.linkname = "python3.12"
+        bundle.addfile(link)
+
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    _safe_extract(archive, destination)
+
+    assert (destination / "python/bin/python3").is_symlink()
+    assert (destination / "python/bin/python3").read_text(encoding="utf-8") == "pinned runtime"
+
+
+@pytest.mark.parametrize(
+    ("member_name", "link_name", "link_type"),
+    [
+        ("python/bin/python", "/tmp/escape", tarfile.SYMTYPE),
+        ("python/bin/python", "../../../escape", tarfile.SYMTYPE),
+        ("python/bin/python", "../../escape", tarfile.LNKTYPE),
+    ],
+)
+def test_safe_extract_rejects_link_targets_outside_archive(
+    tmp_path, member_name, link_name, link_type
+):
+    archive = tmp_path / "unsafe-runtime.tar.gz"
+    with tarfile.open(archive, "w:gz") as bundle:
+        link = tarfile.TarInfo(member_name)
+        link.type = link_type
+        link.linkname = link_name
+        bundle.addfile(link)
+
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    with pytest.raises(ReleaseValidationError, match="release_archive_path_escape"):
+        _safe_extract(archive, destination)
+
+
 def test_manifest_signature_is_verified_by_lifecycle_not_a_forgeable_receipt(tmp_path):
     release, trust, plan = write_release(tmp_path)
     (release / "release-verification.json").write_text(json.dumps({

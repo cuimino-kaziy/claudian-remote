@@ -113,6 +113,7 @@ class TailscaleController:
                 [str(executable), *arguments[1:]]
                 for executable in TAILSCALE_APP_EXECUTABLES
             ])
+        last_result = CommandResult(127, "", "tailscale unavailable")
         for candidate in candidates:
             try:
                 result = subprocess.run(
@@ -125,12 +126,134 @@ class TailscaleController:
             except OSError:
                 continue
             except subprocess.TimeoutExpired:
-                return CommandResult(124, "", "tailscale timed out")
-            return CommandResult(result.returncode, result.stdout, result.stderr)
-        return CommandResult(127, "", "tailscale unavailable")
+                last_result = CommandResult(124, "", "tailscale timed out")
+                continue
+            last_result = CommandResult(result.returncode, result.stdout, result.stderr)
+            if result.returncode == 0:
+                return last_result
+        return last_result
 
     @staticmethod
     def _blocked(code: str, action: str, probe: str) -> dict:
+        operator_options: list[dict[str, Any]] = []
+        if code == "tailscale_install_required":
+            operator_options = [
+                {
+                    "id": "agent_continue",
+                    "label": "由 Agent 继续操作",
+                    "recommended": True,
+                    "requires_capability": "browser_control",
+                    "url": "https://tailscale.com/download/mac",
+                    "instructions": (
+                        "Open the official Tailscale for macOS download page and guide installation. "
+                        "Pause for the user to approve the installer, VPN/network extension, login, "
+                        "2FA, or any macOS password prompt. CLI integration is optional."
+                    ),
+                },
+                {
+                    "id": "manual",
+                    "label": "我自己操作",
+                    "recommended": False,
+                    "url": "https://tailscale.com/download/mac",
+                    "instructions": (
+                        "Download and install the official Tailscale app, approve its VPN/network "
+                        "extension, open it, and sign in. CLI integration is optional."
+                    ),
+                },
+            ]
+        elif code == "tailscale_update_required":
+            operator_options = [
+                {
+                    "id": "agent_continue",
+                    "label": "由 Agent 继续操作",
+                    "recommended": True,
+                    "requires_capability": "browser_control",
+                    "url": "https://tailscale.com/download/mac",
+                    "instructions": (
+                        "Open the official Tailscale for macOS download page and guide the update. "
+                        "Pause for installer approval, a macOS password, or VPN/network extension "
+                        "permission, then resume and probe the installed version automatically."
+                    ),
+                },
+                {
+                    "id": "manual",
+                    "label": "我自己操作",
+                    "recommended": False,
+                    "url": "https://tailscale.com/download/mac",
+                    "instructions": (
+                        "Update Tailscale from the official macOS download page, reopen it, and "
+                        "return here when the app reports that it is connected."
+                    ),
+                },
+            ]
+        elif code == "tailscale_login_required":
+            operator_options = [
+                {
+                    "id": "agent_continue",
+                    "label": "由 Agent 继续操作",
+                    "recommended": True,
+                    "requires_capability": "computer_control",
+                    "instructions": (
+                        "Open the installed Tailscale app and guide sign-in. Pause for account "
+                        "selection, password, passkey, 2FA, or macOS permission prompts."
+                    ),
+                },
+                {
+                    "id": "manual",
+                    "label": "我自己操作",
+                    "recommended": False,
+                    "instructions": "Open the Tailscale app on this Mac and finish sign-in.",
+                },
+            ]
+        elif code == "tailscale_https_consent_required":
+            operator_options = [
+                {
+                    "id": "agent_continue",
+                    "label": "由 Agent 继续操作",
+                    "recommended": True,
+                    "requires_capability": "browser_control",
+                    "url": "https://login.tailscale.com/admin/dns",
+                    "instructions": (
+                        "Open the official Tailscale DNS page, enable MagicDNS if needed, "
+                        "then enable HTTPS Certificates. Pause only for login, 2FA, or the "
+                        "certificate-transparency acknowledgement. Resume and probe automatically."
+                    ),
+                },
+                {
+                    "id": "manual",
+                    "label": "我自己操作",
+                    "recommended": False,
+                    "url": "https://login.tailscale.com/admin/dns",
+                    "instructions": (
+                        "Open DNS, enable MagicDNS if needed, then select Enable HTTPS under "
+                        "HTTPS Certificates. Return here when the console reports it enabled."
+                    ),
+                },
+            ]
+        elif code == "tailscale_dns_required":
+            operator_options = [
+                {
+                    "id": "agent_continue",
+                    "label": "由 Agent 继续操作",
+                    "recommended": True,
+                    "requires_capability": "browser_control",
+                    "url": "https://login.tailscale.com/admin/dns",
+                    "instructions": (
+                        "Open the official Tailscale DNS page and enable MagicDNS. Pause for login "
+                        "or 2FA, then resume and verify that this Mac has a Tailnet DNS name."
+                    ),
+                },
+                {
+                    "id": "manual",
+                    "label": "我自己操作",
+                    "recommended": False,
+                    "url": "https://login.tailscale.com/admin/dns",
+                    "instructions": (
+                        "Open the Tailscale DNS page, enable MagicDNS, and return here after the "
+                        "device list shows a DNS name for this Mac."
+                    ),
+                },
+            ]
         return {
             "state": "blocked",
             "code": code,
@@ -140,6 +263,7 @@ class TailscaleController:
                 "exact_action": action,
                 "verification_probe": probe,
                 "resume_reference": "network_mode:local_tailscale",
+                "operator_options": operator_options,
             },
         }
 
@@ -280,10 +404,50 @@ class TailscaleController:
             return False
         return True
 
+    def owned_serve_absent(self, loopback_port: int = 8787) -> bool:
+        """Prove that no Serve handler targets Claudian Remote's loopback.
+
+        A failed or malformed status probe is not evidence of absence.  This
+        deliberately ignores unrelated user-owned Serve routes while failing
+        closed if the lifecycle's exact loopback target is still exposed.
+        """
+
+        if not 1 <= int(loopback_port) <= 65535:
+            return False
+        result = self.runner(("tailscale", "serve", "status", "--json"))
+        if result.returncode != 0:
+            return False
+        try:
+            status = json.loads(result.stdout or "{}")
+        except json.JSONDecodeError:
+            return False
+        if not isinstance(status, Mapping):
+            return False
+        target = f"http://127.0.0.1:{int(loopback_port)}"
+
+        def contains_target(value: Any) -> bool:
+            if isinstance(value, Mapping):
+                return any(contains_target(item) for item in value.values())
+            if isinstance(value, list):
+                return any(contains_target(item) for item in value)
+            return value == target
+
+        return not contains_target(status)
+
     def remove_serve(self, loopback_port: int = 8787) -> None:
         if not 1 <= int(loopback_port) <= 65535:
             raise ValueError("invalid_tailscale_serve_port")
         target = f"http://127.0.0.1:{int(loopback_port)}"
+        status_result = self.runner(("tailscale", "serve", "status", "--json"))
+        if status_result.returncode != 0:
+            raise RuntimeError("tailscale_serve_remove_unverified")
+        try:
+            status = json.loads(status_result.stdout or "{}")
+        except json.JSONDecodeError as exc:
+            raise RuntimeError("tailscale_serve_remove_unverified") from exc
+        encoded_status = json.dumps(status, separators=(",", ":"))
+        if f'"Proxy":"{target}"' not in encoded_status:
+            return
         # Re-run the exact HTTPS/path selector with `off`; unlike `serve
         # reset`, this preserves unrelated user-owned Serve configuration.
         result = self.runner((

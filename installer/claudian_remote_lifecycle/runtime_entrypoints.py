@@ -41,10 +41,30 @@ def load_relay_config(path: Path, keychain=None):
 
 def main(argv=None) -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("role", choices=("relay", "companion"))
+    parser.add_argument("role", choices=("relay", "companion", "availability"))
     parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--status", type=Path)
     args = parser.parse_args(argv)
-    if args.role == "relay":
+    if args.role == "availability":
+        from .availability import ObsidianLauncher, validate_bound_vault_name
+        from .private_io import write_private_json
+
+        value = json.loads(args.config.read_text(encoding="utf-8"))
+        if not isinstance(value, dict) or value.get("schema") != "claudian-remote.availability/v1":
+            raise ValueError("availability_config_invalid")
+        if args.status is None:
+            raise ValueError("availability_status_path_required")
+        vault_name = validate_bound_vault_name(value.get("vault_name"))
+        base_status = {
+            "schema": "claudian-remote.availability-status/v1",
+            "vault_name": vault_name,
+        }
+        write_private_json(args.status, {**base_status, "state": "launching"})
+        if not ObsidianLauncher().launch(vault_name):
+            write_private_json(args.status, {**base_status, "state": "launch_failed"})
+            raise RuntimeError("obsidian_launch_failed")
+        write_private_json(args.status, {**base_status, "state": "launch_succeeded"})
+    elif args.role == "relay":
         from gateway.relay.app import run_relay
 
         run_relay(load_relay_config(args.config))

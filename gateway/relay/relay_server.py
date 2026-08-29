@@ -21,7 +21,7 @@ except ImportError:  # pragma: no cover - script execution fallback
     from config import DEFAULT_LIMITS
 
 
-VERSION = "0.2.0-beta.2"
+VERSION = "0.2.0-beta.4"
 ROLES = {"mac", "mobile"}
 ALLOWED_EVENT_TYPES = {
     "mac": {"message.receipt", "conversation.snapshot", "conversation.event"},
@@ -84,6 +84,13 @@ class RelayConfig:
     upload_stream_bytes: int = 64 * 1024
     upload_reserve_min_bytes: int = 1024 * 1024 * 1024
     upload_reserve_fraction: float = 0.10
+    legacy_retirement_enabled: bool = False
+    legacy_retirement_database_path: str = ""
+    legacy_retirement_authority_instance_id: str = ""
+    legacy_retirement_runtime_key_id: str = ""
+    legacy_retirement_runtime_key_path: str = ""
+    legacy_retirement_owner_id: str = ""
+    legacy_retirement_mac_id: str = ""
 
     def __post_init__(self) -> None:
         if self.host not in {"127.0.0.1", "::1", "localhost"}:
@@ -103,6 +110,20 @@ class RelayConfig:
         self.public_base_url = self.public_base_url.rstrip("/")
         if not self.pairing_database_path:
             self.pairing_database_path = f"{self.database_path}.pairing"
+        if not self.legacy_retirement_database_path:
+            self.legacy_retirement_database_path = (
+                f"{self.database_path}.legacy-retirement"
+            )
+        if self.legacy_retirement_enabled and not all(
+            (
+                self.legacy_retirement_authority_instance_id,
+                self.legacy_retirement_runtime_key_id,
+                self.legacy_retirement_runtime_key_path,
+                self.legacy_retirement_owner_id,
+                self.legacy_retirement_mac_id,
+            )
+        ):
+            raise ValueError("legacy_retirement_configuration_incomplete")
         exact_limits = {
             "retention_seconds": DEFAULT_LIMITS.stale_in_flight_seconds,
             "completed_grace_seconds": DEFAULT_LIMITS.terminal_recovery_seconds,
@@ -195,6 +216,27 @@ class RelayConfig:
             upload_stream_bytes=min(64 * 1024, max(4096, int(data.get("upload_stream_bytes", 64 * 1024)))),
             upload_reserve_min_bytes=max(0, int(data.get("upload_reserve_min_bytes", 1024 * 1024 * 1024))),
             upload_reserve_fraction=max(0.0, min(0.90, float(data.get("upload_reserve_fraction", 0.10)))),
+            legacy_retirement_enabled=bool(
+                data.get("legacy_retirement_enabled", False)
+            ),
+            legacy_retirement_database_path=str(
+                data.get("legacy_retirement_database_path") or ""
+            ),
+            legacy_retirement_authority_instance_id=str(
+                data.get("legacy_retirement_authority_instance_id") or ""
+            ),
+            legacy_retirement_runtime_key_id=str(
+                data.get("legacy_retirement_runtime_key_id") or ""
+            ),
+            legacy_retirement_runtime_key_path=str(
+                data.get("legacy_retirement_runtime_key_path") or ""
+            ),
+            legacy_retirement_owner_id=str(
+                data.get("legacy_retirement_owner_id") or ""
+            ),
+            legacy_retirement_mac_id=str(
+                data.get("legacy_retirement_mac_id") or ""
+            ),
         )
 
     def token_index(self) -> Dict[str, RelayToken]:

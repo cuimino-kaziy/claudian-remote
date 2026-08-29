@@ -65,6 +65,8 @@ class OwnershipUninstaller:
             "previous_release_pointer": self.layout.previous,
             "relay_launch_agent": self.layout.relay_launch_agent,
             "companion_launch_agent": self.layout.companion_launch_agent,
+            "availability_launch_agent": self.layout.availability_launch_agent,
+            "availability_config": self.layout.availability_config,
             "connection_profile": self.layout.connection_profile,
             "relay_config": self.layout.relay_config,
             "companion_config": self.layout.companion_config,

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import contextlib
+import functools
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Optional
@@ -21,6 +24,11 @@ from gateway.relay.relay_server import RelayConfig, RelayService, VERSION
 from gateway.relay.retention import RetentionCoordinator
 from gateway.relay.upload_store import UploadError, UploadStore
 from gateway.relay.websocket_hub import SlowConsumer, WebSocketClient, WebSocketHub
+from gateway.relay.legacy_retirement import (
+    LegacyRetirementRequest,
+    LegacyRetirementStore,
+    read_private_runtime_key,
+)
 
 
 CONFIG = web.AppKey("config", RelayConfig)
@@ -34,6 +42,11 @@ REJECT_COMMANDS = web.AppKey("reject_commands", dict)
 UPLOADS = web.AppKey("uploads", UploadStore)
 RETENTION = web.AppKey("retention", RetentionCoordinator)
 PAIRING = web.AppKey("pairing", PairingStore)
+LEGACY_RETIREMENT = web.AppKey("legacy_retirement", LegacyRetirementStore)
+LEGACY_RETIREMENT_IO = web.AppKey(
+    "legacy_retirement_io",
+    concurrent.futures.ThreadPoolExecutor,
+)
 
 
 def _error(code: str, status: int = 400) -> web.Response:
@@ -63,6 +76,245 @@ def _pairing_error(exc: PairingError) -> web.Response:
     if exc.code in {"claim_replayed", "claim_expired", "attempt_limit_exceeded", "credential_delivery_expired"}:
         return _error(exc.code, 409)
     return _error(exc.code, 400)
+
+
+def _retirement_store(request: web.Request) -> LegacyRetirementStore:
+    try:
+        return request.app[LEGACY_RETIREMENT]
+    except KeyError as exc:
+        raise web.HTTPNotFound() from exc
+
+
+async def _retirement_request_with_credential(
+    request: web.Request,
+) -> tuple[LegacyRetirementRequest, str, bytes]:
+    payload = await request.json()
+    retirement_request = LegacyRetirementRequest.from_mapping(payload)
+    authorization = _bearer(request)
+    if not authorization.startswith("Bearer "):
+        raise AuthError("missing_bearer")
+    credential = authorization[7:].strip().encode("utf-8")
+    if not credential:
+        raise AuthError("missing_bearer")
+    return retirement_request, authorization, credential
+
+
+async def _run_retirement_io(request: web.Request, function, /, *args, **kwargs):
+    call = functools.partial(function, *args, **kwargs)
+    return await asyncio.get_running_loop().run_in_executor(
+        request.app[LEGACY_RETIREMENT_IO],
+        call,
+    )
+
+
+async def legacy_retirement_descriptor(request: web.Request) -> web.Response:
+    try:
+        principal = _authenticate(request, "mobile")
+        value = await _run_retirement_io(
+            request,
+            _retirement_store(request).descriptor,
+            str(principal.credential_id),
+            authority_origin=request.app[CONFIG].public_base_url,
+        )
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+    except ValueError as exc:
+        return _error(str(exc), 409)
+    return web.json_response(
+        {"ok": True, **value},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def legacy_retirement_commit(request: web.Request) -> web.Response:
+    try:
+        retirement_request, authorization, credential = (
+            await _retirement_request_with_credential(request)
+        )
+        if (
+            retirement_request.installation_id
+            != request.app[CONFIG].installation_id
+            or retirement_request.vault_id != request.app[CONFIG].vault_id
+            or retirement_request.role != "mobile"
+            or retirement_request.mac_id
+            != request.app[CONFIG].legacy_retirement_mac_id
+            or retirement_request.owner_id
+            != request.app[CONFIG].legacy_retirement_owner_id
+            or retirement_request.authority_origin
+            != request.app[CONFIG].public_base_url
+        ):
+            raise ValueError("retirement_scope_mismatch")
+        proof = await _run_retirement_io(
+            request,
+            _retirement_store(request).retire,
+            retirement_request,
+            credential,
+        )
+        if not request.app[AUTH].revoke_credential(retirement_request.slot_id):
+            raise ValueError("retirement_runtime_revocation_failed")
+        try:
+            request.app[AUTH].authenticate(
+                authorization,
+                "mobile",
+                installation_id=retirement_request.installation_id,
+                vault_id=retirement_request.vault_id,
+                endpoint_audience=request.app[CONFIG].endpoint_audience,
+            )
+        except AuthError as exc:
+            if exc.code != "revoked":
+                raise ValueError("retirement_old_credential_rejection_unverified")
+        else:
+            raise ValueError("retirement_old_credential_rejection_unverified")
+    except AuthError as exc:
+        return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        code = str(exc)
+        if code not in {
+            "legacy_retirement_request_invalid",
+            "legacy_retirement_operation_invalid",
+            "legacy_retirement_plan_invalid",
+            "legacy_retirement_digest_invalid",
+            "legacy_authority_origin_invalid",
+            "retirement_scope_invalid",
+            "retirement_scope_mismatch",
+            "retirement_slot_invalid",
+            "retirement_slot_unknown",
+            "retirement_generation_invalid",
+            "retirement_generation_mismatch",
+            "retirement_nonce_invalid",
+            "retirement_idempotency_invalid",
+            "retirement_idempotency_conflict",
+            "retirement_credential_invalid",
+            "retirement_runtime_revocation_failed",
+            "retirement_old_credential_rejection_unverified",
+            "shared_credential_scope_unsupported",
+        }:
+            code = "legacy_retirement_failed"
+        return _error(code, 409)
+    return web.json_response(
+        {"ok": True, "proof": proof},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def legacy_retirement_verify(request: web.Request) -> web.Response:
+    try:
+        retirement_request, _, credential = (
+            await _retirement_request_with_credential(request)
+        )
+        verification = await _run_retirement_io(
+            request,
+            _retirement_store(request).verify_retirement,
+            retirement_request,
+            credential,
+        )
+    except AuthError as exc:
+        return _error(exc.code, 401)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        code = str(exc)
+        if code not in {
+            "legacy_retirement_request_invalid",
+            "legacy_retirement_operation_invalid",
+            "legacy_retirement_plan_invalid",
+            "legacy_retirement_digest_invalid",
+            "legacy_authority_origin_invalid",
+            "retirement_scope_invalid",
+            "retirement_slot_invalid",
+            "retirement_generation_invalid",
+            "retirement_nonce_invalid",
+            "retirement_idempotency_invalid",
+            "retirement_verification_binding_invalid",
+            "retirement_verification_state_invalid",
+        }:
+            code = "legacy_retirement_verification_failed"
+        return _error(code, 409)
+    return web.json_response(
+        {"ok": True, "verification": verification},
+        headers={"Cache-Control": "no-store"},
+    )
+
+
+async def legacy_retirement_reconcile(request: web.Request) -> web.Response:
+    try:
+        retirement_request, authorization, credential = (
+            await _retirement_request_with_credential(request)
+        )
+        if (
+            retirement_request.installation_id
+            != request.app[CONFIG].installation_id
+            or retirement_request.vault_id != request.app[CONFIG].vault_id
+            or retirement_request.role != "mobile"
+            or retirement_request.mac_id
+            != request.app[CONFIG].legacy_retirement_mac_id
+            or retirement_request.owner_id
+            != request.app[CONFIG].legacy_retirement_owner_id
+            or retirement_request.authority_origin
+            != request.app[CONFIG].public_base_url
+        ):
+            raise ValueError("retirement_scope_mismatch")
+        reconciliation = await _run_retirement_io(
+            request,
+            _retirement_store(request).reconcile,
+            retirement_request,
+            credential,
+        )
+        if reconciliation.get("outcome") == "retired":
+            try:
+                request.app[AUTH].authenticate(
+                    authorization,
+                    "mobile",
+                    installation_id=retirement_request.installation_id,
+                    vault_id=retirement_request.vault_id,
+                    endpoint_audience=request.app[CONFIG].endpoint_audience,
+                )
+            except AuthError as exc:
+                if exc.code != "revoked":
+                    raise ValueError(
+                        "retirement_old_credential_rejection_unverified"
+                    ) from None
+            else:
+                raise ValueError(
+                    "retirement_old_credential_rejection_unverified"
+                )
+        elif reconciliation.get("outcome") == "not_applied":
+            request.app[AUTH].authenticate(
+                authorization,
+                "mobile",
+                installation_id=retirement_request.installation_id,
+                vault_id=retirement_request.vault_id,
+                endpoint_audience=request.app[CONFIG].endpoint_audience,
+            )
+        else:
+            raise ValueError("legacy_retirement_reconciliation_failed")
+    except AuthError as exc:
+        return _error(exc.code, 401)
+    except (ValueError, TypeError, json.JSONDecodeError) as exc:
+        code = str(exc)
+        if code not in {
+            "legacy_retirement_request_invalid",
+            "legacy_retirement_operation_invalid",
+            "legacy_retirement_plan_invalid",
+            "legacy_retirement_digest_invalid",
+            "legacy_authority_origin_invalid",
+            "retirement_scope_invalid",
+            "retirement_scope_mismatch",
+            "retirement_slot_invalid",
+            "retirement_slot_unknown",
+            "retirement_generation_invalid",
+            "retirement_generation_mismatch",
+            "retirement_nonce_invalid",
+            "retirement_idempotency_invalid",
+            "retirement_idempotency_conflict",
+            "retirement_credential_invalid",
+            "retirement_verification_state_invalid",
+            "retirement_old_credential_rejection_unverified",
+        }:
+            code = "legacy_retirement_reconciliation_failed"
+        return _error(code, 409)
+    return web.json_response(
+        {"ok": True, "reconciliation": reconciliation},
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 async def create_pairing_claim(request: web.Request) -> web.Response:
@@ -1120,6 +1372,49 @@ async def _startup(app: web.Application) -> None:
     app[UPLOADS] = uploads
     app[RETENTION] = RetentionCoordinator(store, uploads)
     app[AUTH] = TokenAuthenticator(config.tokens)
+    if config.legacy_retirement_enabled:
+        try:
+            runtime_key = read_private_runtime_key(
+                Path(config.legacy_retirement_runtime_key_path)
+            )
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
+        retirement = LegacyRetirementStore(
+            Path(config.legacy_retirement_database_path),
+            authority_instance_id=config.legacy_retirement_authority_instance_id,
+            protocol_version="legacy-retirement/v1",
+            runtime_key_id=config.legacy_retirement_runtime_key_id,
+            runtime_key=runtime_key,
+            restart_epoch=max(1, int(time.time_ns())),
+            clock=lambda: int(time.time()),
+        )
+        for token in config.tokens:
+            if token.role != "mobile":
+                continue
+            credential_id = str(
+                getattr(token, "credential_id", "")
+                or f"bootstrap:{token.role}:{token.name}:{token.device_id}"
+            )
+            retirement.register_credential(
+                slot_id=credential_id,
+                credential=token.token.encode("utf-8"),
+                owner_id=config.legacy_retirement_owner_id,
+                installation_id=token.installation_id,
+                mac_id=config.legacy_retirement_mac_id,
+                vault_id=token.vault_id,
+                role=token.role,
+                consumer_installation_ids=(token.installation_id,),
+                generation=token.generation,
+            )
+            if not retirement.credential_active(
+                credential_id, token.token.encode("utf-8")
+            ):
+                app[AUTH].revoke_credential(credential_id)
+        app[LEGACY_RETIREMENT] = retirement
+        app[LEGACY_RETIREMENT_IO] = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="legacy-retirement",
+        )
     pairing = PairingStore(
         config.pairing_database_path,
         authenticator=app[AUTH],
@@ -1148,6 +1443,13 @@ async def _cleanup(app: web.Application) -> None:
     await app[UPLOADS].close()
     await app[STORE].close()
     await app[PAIRING].close()
+    executor = app.get(LEGACY_RETIREMENT_IO)
+    if executor is not None:
+        await asyncio.to_thread(
+            executor.shutdown,
+            wait=True,
+            cancel_futures=True,
+        )
 
 
 def create_app(config: RelayConfig) -> web.Application:
@@ -1164,6 +1466,22 @@ def create_app(config: RelayConfig) -> web.Application:
             web.post("/api/v2/pairing/claims/{claim_id}/complete", complete_pairing_claim),
             web.get("/api/v2/pairing/devices", list_pairing_devices),
             web.post("/api/v2/pairing/devices/{device_id}/revoke", revoke_pairing_device),
+            web.get(
+                "/api/v2/legacy-retirement/descriptor",
+                legacy_retirement_descriptor,
+            ),
+            web.post(
+                "/api/v2/legacy-retirement/commit",
+                legacy_retirement_commit,
+            ),
+            web.post(
+                "/api/v2/legacy-retirement/verify",
+                legacy_retirement_verify,
+            ),
+            web.post(
+                "/api/v2/legacy-retirement/reconcile",
+                legacy_retirement_reconcile,
+            ),
             web.post("/api/v2/ws-ticket", issue_ticket),
             web.post("/api/v2/commands", submit_command),
             web.post("/api/v2/uploads", begin_upload),

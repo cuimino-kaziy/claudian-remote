@@ -13,6 +13,7 @@ import base64
 import json
 import os
 import platform
+import posixpath
 import re
 import shutil
 import subprocess
@@ -22,6 +23,7 @@ import tempfile
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
+from pathlib import PurePosixPath
 from typing import Any, Callable, Mapping, Protocol
 from urllib.parse import urlsplit
 
@@ -190,6 +192,14 @@ class RuntimeLayout:
         return self.config / "companion.json"
 
     @property
+    def availability_config(self) -> Path:
+        return self.config / "availability.json"
+
+    @property
+    def availability_status(self) -> Path:
+        return self.state / "availability.json"
+
+    @property
     def bridge_bootstrap(self) -> Path:
         return self.state / "bridge-bootstrap.json"
 
@@ -216,6 +226,10 @@ class RuntimeLayout:
     @property
     def companion_launch_agent(self) -> Path:
         return self.launch_agents / "com.claudian.remote.companion.plist"
+
+    @property
+    def availability_launch_agent(self) -> Path:
+        return self.launch_agents / "com.claudian.remote.availability.plist"
 
     def release_path(self, compatibility_set_id: str) -> Path:
         self._validate_component(compatibility_set_id)
@@ -267,14 +281,40 @@ class ReleaseSource(Protocol):
     ) -> StagedRelease: ...
 
 
+def _archive_path(value: str, *, base: PurePosixPath | None = None) -> PurePosixPath:
+    """Return a normalized archive-internal path or fail closed.
+
+    Tar member names and link targets always use POSIX path semantics, even on
+    macOS. Symlink targets are relative to the symlink's parent while hardlink
+    targets are relative to the archive root.
+    """
+
+    raw = str(value or "")
+    if "\x00" in raw or PurePosixPath(raw).is_absolute():
+        raise ReleaseValidationError("release_archive_path_escape")
+    normalized = posixpath.normpath(str((base or PurePosixPath(".")) / raw))
+    path = PurePosixPath(normalized)
+    if path.is_absolute() or (path.parts and path.parts[0] == ".."):
+        raise ReleaseValidationError("release_archive_path_escape")
+    return path
+
+
 def _safe_extract(archive: Path, destination: Path) -> None:
     destination = destination.resolve()
     with tarfile.open(archive, "r:*") as bundle:
         for member in bundle.getmembers():
-            target = (destination / member.name).resolve()
+            member_path = _archive_path(member.name)
+            target = (destination / Path(*member_path.parts)).resolve()
             if destination != target and destination not in target.parents:
                 raise ReleaseValidationError("release_archive_path_escape")
-            if member.issym() or member.islnk() or member.isdev():
+
+            if member.isdev() or member.isfifo():
+                raise ReleaseValidationError("release_archive_unsafe_member")
+            if member.issym():
+                _archive_path(member.linkname, base=member_path.parent)
+            elif member.islnk():
+                _archive_path(member.linkname)
+            elif not (member.isfile() or member.isdir()):
                 raise ReleaseValidationError("release_archive_unsafe_member")
         # The lifecycle initially runs on the macOS bootstrap Python (3.9 on
         # supported older systems) before it installs the pinned 3.12 runtime.

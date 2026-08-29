@@ -59,3 +59,14 @@ def test_every_actionable_result_and_gate_has_guide_copy():
     assert all(gate in text for gate in gate_types)
     assert "不要让用户粘贴密码、令牌、私钥" in text
     assert "curl | shell" in text
+
+
+def test_guide_explains_product_defaults_to_tailscale_and_minimizes_questions():
+    text = GUIDE.read_text(encoding="utf-8")
+    assert "Claudian 的移动端远程客户端" in text
+    assert "类似在手机上使用 Codex" in text
+    assert "默认使用免费的 Tailscale" in text
+    assert "是否拥有并希望使用一台受支持的 VPS" not in text
+    assert "由 Agent 继续操作" in text
+    assert "我自己操作" in text
+    assert "remote_vps" in text and "尚未开放" in text

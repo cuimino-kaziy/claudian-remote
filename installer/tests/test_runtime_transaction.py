@@ -7,6 +7,12 @@ import pytest
 
 from gateway.mac_companion.config import InMemoryKeychain
 from installer.claudian_remote_lifecycle.launchd import InMemoryLaunchctl, LaunchAgentManager
+from installer.claudian_remote_lifecycle.legacy_authority import (
+    LegacyCredentialRetirementService,
+    LegacyRetirementOutcomeUnknown,
+    RetirementCommit,
+    RetirementReconciliationResult,
+)
 from installer.claudian_remote_lifecycle.runtime import (
     BootstrapVerifiedReleaseSource,
     ReleaseValidationError,
@@ -20,6 +26,107 @@ from installer.claudian_remote_lifecycle.transaction import (
 )
 
 
+BETA4_VERSION = "0.2.0-beta.4"
+BETA4_SET_ID = f"claudian-remote-{BETA4_VERSION}"
+
+
+class FixtureRetirementService(LegacyCredentialRetirementService):
+    def __init__(self, calls=None, *, outcome="commit"):
+        self.calls = calls if calls is not None else []
+        self.outcome = outcome
+
+    def retire(
+        self,
+        *,
+        credential,
+        operation_id,
+        plan_id,
+        installation_id,
+        vault_id,
+        role,
+    ):
+        self.calls.append(credential.read_once().decode("utf-8"))
+        if self.outcome != "commit":
+            return self.outcome
+        return RetirementCommit(
+            authority_instance_id="authority-a",
+            authority_origin_digest="a" * 64,
+            runtime_key_id="runtime-key-a",
+            owner_id="owner-a",
+            installation_id=installation_id,
+            mac_id="mac-a",
+            vault_id=vault_id,
+            role=role,
+            slot_id="slot-a",
+            old_generation=1,
+            target_generation=2,
+            operation_id=operation_id,
+            plan_id=plan_id,
+            release_digest="b" * 64,
+            helper_digest="c" * 64,
+            nonce_digest="d" * 64,
+            idempotency_digest="e" * 64,
+            proof_digest="f" * 64,
+            consumed_at_epoch=1_800_000_000,
+        )
+
+    def authorized(self, *, operation_id, plan_id):
+        return True
+
+
+class AuthorizationRequiredRetirementService(FixtureRetirementService):
+    def authorized(self, *, operation_id, plan_id):
+        return False
+
+
+class AmbiguousRetirementService(FixtureRetirementService):
+    def __init__(self, *, reconciliation):
+        super().__init__()
+        self.reconciliation = reconciliation
+        self.dispatches = 0
+        self.reconciliations = 0
+
+    def retire(self, *, credential, **_kwargs):
+        self.dispatches += 1
+        credential.read_once()
+        raise LegacyRetirementOutcomeUnknown("response_lost_after_dispatch")
+
+    def reconcile(
+        self,
+        *,
+        credential,
+        operation_id,
+        plan_id,
+        installation_id,
+        vault_id,
+        role,
+        **_kwargs,
+    ):
+        self.reconciliations += 1
+        credential.read_once()
+        commit = (
+            FixtureRetirementService().retire(
+                credential=_ReusableCredential(b"unused"),
+                operation_id=operation_id,
+                plan_id=plan_id,
+                installation_id=installation_id,
+                vault_id=vault_id,
+                role=role,
+            )
+            if self.reconciliation == "retired"
+            else None
+        )
+        return RetirementReconciliationResult(self.reconciliation, commit)
+
+
+class _ReusableCredential:
+    def __init__(self, value):
+        self.value = value
+
+    def read_once(self):
+        return self.value
+
+
 class FixtureReleaseSource:
     """Test-only source representing an already signature-verified release."""
 
@@ -31,7 +138,7 @@ class FixtureReleaseSource:
     def verify(self, _plan):
         if self.fail:
             raise ValueError("manifest_signature_invalid")
-        return {"release_version": "0.2.0-beta.1", "verified": True}
+        return {"release_version": BETA4_VERSION, "verified": True}
 
     def stage(self, plan, destination, runtime_root):
         self.calls += 1
@@ -43,7 +150,7 @@ class FixtureReleaseSource:
         plugin = destination / "plugin"
         plugin.mkdir()
         (plugin / "manifest.json").write_text(
-            json.dumps({"id": "claudian-remote", "version": "0.2.0-beta.1"})
+            json.dumps({"id": "claudian-remote", "version": BETA4_VERSION})
         )
         python = runtime_root / "environments" / str(plan["compatibility_set_id"]) / "bin" / "python"
         python.parent.mkdir(parents=True, exist_ok=True)
@@ -53,7 +160,7 @@ class FixtureReleaseSource:
         uv.parent.mkdir(parents=True, exist_ok=True)
         uv.write_text("fixture uv")
         uv.chmod(0o700)
-        return StagedRelease(destination, plugin, python, uv, "0.2.0-beta.1")
+        return StagedRelease(destination, plugin, python, uv, BETA4_VERSION)
 
 
 class FakeTailscale:
@@ -87,11 +194,14 @@ class FakeTailscale:
     def remove_serve(self):
         self.removed += 1
 
+    def owned_serve_absent(self, port=8787):
+        return port == 8787 and self.serve_calls == 0
+
 
 def plan():
     return {
         "plan_id": "plan-" + "a" * 64,
-        "compatibility_set_id": "claudian-remote-0.2.0-beta.1",
+        "compatibility_set_id": BETA4_SET_ID,
         "installation_id": "installation-a",
         "vault_id": "vault-a",
         "topology": {"mode": "local_tailscale"},
@@ -99,12 +209,43 @@ def plan():
     }
 
 
+def legacy_plan(*, prior_operation_terminal=True):
+    return {
+        **plan(),
+        "journey": "legacy_upgrade",
+        "prior_operation_terminal": prior_operation_terminal,
+    }
+
+
+def current_update_plan(*, policy="preserve", suffix="2"):
+    return {
+        **plan(),
+        "plan_id": "plan-" + suffix * 64,
+        "compatibility_set_id": f"claudian-remote-0.2.0-beta.{suffix}",
+        "journey": "current_update",
+        "pairing_identity_policy": policy,
+    }
+
+
 def dependencies(
     tmp_path, *, source=None, tailscale=None, pairing_ready=True,
     bridge_ready=True, interrupt_after=None, revoked=None,
+    pairing_devices=None, pairing_revocations=None,
 ):
     layout = RuntimeLayout(tmp_path / "app", tmp_path / "LaunchAgents")
     launchctl = InMemoryLaunchctl()
+    devices = (
+        pairing_devices
+        if pairing_devices is not None
+        else ({"iphone-a"} if pairing_ready else set())
+    )
+    device_revocations = pairing_revocations if pairing_revocations is not None else []
+
+    def revoke_pairing_device(device_id, reason):
+        device_revocations.append((device_id, reason))
+        devices.discard(device_id)
+        return {"state": "ready", "code": "device_revoked"}
+
     return TransactionDependencies(
         layout=layout,
         release_source=source or FixtureReleaseSource(),
@@ -114,14 +255,15 @@ def dependencies(
         vault_path=lambda vault_id: tmp_path / f"vault-{vault_id}",
         health_probe=lambda: True,
         pairing_probe=lambda: pairing_ready,
+        active_pairing_device_ids=lambda: devices,
+        revoke_pairing_device=revoke_pairing_device,
         bridge_ready_probe=lambda: bridge_ready,
-        legacy_credential_revoker=(
-            lambda credential: ((revoked if revoked is not None else []).append(credential), {"verified": True})[1]
-        ),
+        legacy_credential_revoker=FixtureRetirementService(revoked),
         migration_safe_probe=lambda: True,
         interruption_probe=(lambda phase: phase == interrupt_after),
         readiness_attempts=1,
         readiness_delay_seconds=0,
+        local_listener_absent_probe=lambda port: port == 8787,
     ), launchctl
 
 
@@ -157,19 +299,128 @@ def test_local_install_is_atomic_private_owned_and_idempotent(tmp_path):
     receipt = json.loads(deps.layout.ownership_receipt.read_text())
     resource_ids = {item["resource_id"] for item in receipt["resources"]}
     assert resource_ids >= {
-        "managed_runtime", "managed_release_store", "active_release_pointer", "active_release",
-        "relay_launch_agent", "companion_launch_agent", "plugin_directory",
+            "managed_runtime", "managed_release_store", "active_release_pointer", "active_release",
+            "relay_launch_agent", "companion_launch_agent", "availability_launch_agent",
+            "availability_config", "plugin_directory",
     }
     assert any(value.startswith("plugin_shipped_file:") for value in resource_ids)
     active_release = next(item for item in receipt["resources"] if item["resource_id"] == "active_release")
     assert active_release["path"] == str(deps.layout.release_path(plan()["compatibility_set_id"]))
     assert all("secret" not in json.dumps(item).lower() for item in receipt["resources"])
-    assert len(launchctl.loaded) == 2
+    assert len(launchctl.loaded) == 3
 
     second = transaction.install(plan(), operation_id="op-" + "2" * 32)
     assert second["state"] == "ready"
     assert second["code"] == "already_ready"
-    assert len(launchctl.loaded) == 2
+    assert len(launchctl.loaded) == 3
+
+
+def test_current_update_preserve_survives_activation_and_restart_without_repair(tmp_path):
+    devices = {"iphone-existing"}
+    revocations = []
+    deps, _ = dependencies(
+        tmp_path,
+        pairing_devices=devices,
+        pairing_revocations=revocations,
+    )
+    transaction = LocalTailscaleTransaction(deps)
+    assert transaction.install(plan(), operation_id="op-" + "1" * 32)["state"] == "ready"
+    deps.revoke_pairing_device = None
+
+    update = current_update_plan(policy="preserve", suffix="2")
+    operation_id = "op-" + "2" * 32
+    result = transaction.install(update, operation_id=operation_id)
+
+    assert result["state"] == "ready"
+    assert devices == {"iphone-existing"}
+    assert revocations == []
+    restarted = LocalTailscaleTransaction(deps).install(update, operation_id=operation_id)
+    assert restarted["state"] == "ready"
+    assert restarted["code"] == "already_ready"
+    assert revocations == []
+
+
+def test_current_update_rotate_waits_until_verified_then_repairs_in_the_same_operation(tmp_path):
+    devices = {"iphone-old"}
+    revocations = []
+    deps, _ = dependencies(
+        tmp_path,
+        pairing_devices=devices,
+        pairing_revocations=revocations,
+    )
+    transaction = LocalTailscaleTransaction(deps)
+    transaction.install(plan(), operation_id="op-" + "3" * 32)
+
+    update = current_update_plan(policy="rotate", suffix="9")
+    operation_id = "op-" + "4" * 32
+    waiting = transaction.install(update, operation_id=operation_id)
+
+    assert waiting["state"] == "blocked"
+    assert waiting["code"] == "pairing_approval_required"
+    assert waiting["re_pair_required"] is True
+    assert devices == set()
+    assert revocations == [("iphone-old", "profile_changed")]
+    assert transaction.rollback(update, operation_id=operation_id) == {
+        "state": "blocked",
+        "code": "rollback_unavailable_after_pairing_rotation",
+        "mutation_performed": False,
+        "recovery_action": "resume",
+    }
+
+    devices.add("iphone-new")
+    ready = transaction.install(update, operation_id=operation_id)
+    assert ready["state"] == "ready"
+    assert ready["code"] == "installation_ready"
+    assert revocations == [("iphone-old", "profile_changed")]
+
+
+def test_current_update_rotate_precommit_health_failure_restores_old_release_and_identity(tmp_path):
+    devices = {"iphone-old"}
+    revocations = []
+    deps, _ = dependencies(
+        tmp_path,
+        pairing_devices=devices,
+        pairing_revocations=revocations,
+    )
+    transaction = LocalTailscaleTransaction(deps)
+    transaction.install(plan(), operation_id="op-" + "5" * 32)
+    prior = deps.layout.current.resolve()
+    deps.health_probe = lambda: False
+
+    failed = transaction.install(
+        current_update_plan(policy="rotate", suffix="6"),
+        operation_id="op-" + "6" * 32,
+    )
+
+    assert failed["state"] == "rolled_back"
+    assert deps.layout.current.resolve() == prior
+    assert devices == {"iphone-old"}
+    assert revocations == []
+
+
+def test_current_update_rotate_resumes_after_rotation_interruption_without_double_revoke(tmp_path):
+    devices = {"iphone-old"}
+    revocations = []
+    deps, _ = dependencies(
+        tmp_path,
+        pairing_devices=devices,
+        pairing_revocations=revocations,
+    )
+    transaction = LocalTailscaleTransaction(deps)
+    transaction.install(plan(), operation_id="op-" + "7" * 32)
+    update = current_update_plan(policy="rotate", suffix="8")
+    operation_id = "op-" + "8" * 32
+    deps.interruption_probe = lambda phase: phase == "after_pairing_identity_rotation"
+
+    with pytest.raises(LifecycleInterrupted, match="after_pairing_identity_rotation"):
+        transaction.install(update, operation_id=operation_id)
+
+    assert revocations == [("iphone-old", "profile_changed")]
+    deps.interruption_probe = lambda _phase: False
+    devices.add("iphone-new")
+    ready = LocalTailscaleTransaction(deps).install(update, operation_id=operation_id)
+    assert ready["state"] == "ready"
+    assert revocations == [("iphone-old", "profile_changed")]
 
 
 @pytest.mark.parametrize("phase", ["before_staging", "before_activation", "after_activation"])
@@ -184,6 +435,45 @@ def test_interruption_has_stable_resume_or_rollback_without_duplicate_resources(
     assert resumed["state"] == "ready"
     assert deps.layout.current.resolve() == deps.layout.release_path(plan()["compatibility_set_id"])
     assert not list(deps.layout.staging.glob("*.partial"))
+
+
+@pytest.mark.parametrize("phase", ["before_staging", "before_activation"])
+def test_pre_activation_rollback_preserves_the_operation_specific_active_release(tmp_path, phase):
+    deps, _ = dependencies(tmp_path)
+    transaction = LocalTailscaleTransaction(deps)
+    transaction.install(plan(), operation_id="op-" + "1" * 32)
+    second = dict(
+        plan(),
+        plan_id="plan-" + "2" * 64,
+        compatibility_set_id="claudian-remote-0.2.0-beta.2",
+    )
+    transaction.install(second, operation_id="op-" + "2" * 32)
+    active_before = deps.layout.current.resolve()
+    plugin = deps.vault_path("vault-a") / ".obsidian/plugins/claudian-remote/manifest.json"
+    plugin_before = plugin.read_text()
+
+    third = dict(
+        plan(),
+        plan_id="plan-" + "3" * 64,
+        compatibility_set_id="claudian-remote-0.2.0-beta.4",
+    )
+    deps.interruption_probe = lambda candidate: candidate == phase
+    operation_id = "op-" + "3" * 32
+    with pytest.raises(LifecycleInterrupted, match=phase):
+        transaction.install(third, operation_id=operation_id)
+
+    deps.interruption_probe = lambda _phase: False
+    result = transaction.rollback(third, operation_id=operation_id)
+
+    assert result == {
+        "state": "rolled_back",
+        "code": "rollback_completed",
+        "mutation_performed": False,
+        "restored_previous": False,
+    }
+    assert deps.layout.current.resolve() == active_before
+    assert plugin.read_text() == plugin_before
+    assert deps.launchd.status()["ready"] is True
 
 
 def test_signature_failure_and_health_failure_fail_closed_or_restore_prior(tmp_path):
@@ -202,6 +492,109 @@ def test_signature_failure_and_health_failure_fail_closed_or_restore_prior(tmp_p
     failed = LocalTailscaleTransaction(good).install(changed, operation_id="op-" + "6" * 32)
     assert failed["state"] == "rolled_back"
     assert good.layout.current.resolve() == prior
+
+
+def test_compensation_restores_prior_availability_only_when_prior_release_supports_it(tmp_path):
+    deps, launchctl = dependencies(tmp_path)
+    transaction = LocalTailscaleTransaction(deps)
+    transaction.install(plan(), operation_id="op-" + "a" * 32)
+    prior = deps.layout.current.resolve()
+    capability = (
+        prior / "installer" / "installer" / "claudian_remote_lifecycle" / "availability.py"
+    )
+    capability.parent.mkdir(parents=True)
+    capability.write_text("# availability capability\n")
+
+    changed = dict(plan(), compatibility_set_id="claudian-remote-0.2.0-beta.2")
+    deps.health_probe = lambda: False
+    failed = transaction.install(changed, operation_id="op-" + "b" * 32)
+
+    assert failed["state"] == "rolled_back"
+    assert deps.layout.current.resolve() == prior
+    assert deps.launchd.availability_vault_name() == "vault-vault-a"
+    assert len(launchctl.loaded) == 3
+
+
+def test_compensation_omits_availability_for_prior_release_without_capability(tmp_path):
+    deps, launchctl = dependencies(tmp_path)
+    transaction = LocalTailscaleTransaction(deps)
+    transaction.install(plan(), operation_id="op-" + "7" * 32)
+    prior = deps.layout.current.resolve()
+    assert not LocalTailscaleTransaction._supports_availability(prior)
+
+    changed = dict(
+        plan(),
+        plan_id="plan-" + "d" * 64,
+        compatibility_set_id="claudian-remote-0.2.0-beta.2",
+        vault_id="vault-b",
+    )
+    deps.health_probe = lambda: False
+    failed = transaction.install(changed, operation_id="op-" + "8" * 32)
+
+    assert failed["state"] == "rolled_back"
+    assert deps.layout.current.resolve() == prior
+    assert deps.launchd.availability_vault_name() is None
+    assert not deps.layout.availability_launch_agent.exists()
+    assert len(launchctl.loaded) == 2
+
+
+def test_explicit_rollback_restores_prior_availability_capability(tmp_path):
+    deps, launchctl = dependencies(tmp_path)
+    transaction = LocalTailscaleTransaction(deps)
+    transaction.install(plan(), operation_id="op-" + "c" * 32)
+    prior = deps.layout.current.resolve()
+    capability = (
+        prior / "installer" / "installer" / "claudian_remote_lifecycle" / "availability.py"
+    )
+    capability.parent.mkdir(parents=True)
+    capability.write_text("# availability capability\n")
+    changed = dict(
+        plan(),
+        plan_id="plan-" + "b" * 64,
+        compatibility_set_id="claudian-remote-0.2.0-beta.2",
+        vault_id="vault-b",
+    )
+    transaction.install(changed, operation_id="op-" + "d" * 32)
+
+    assert deps.launchd.availability_vault_name() == "vault-vault-b"
+
+    result = transaction.rollback(changed, operation_id="op-" + "d" * 32)
+
+    assert result["state"] == "rolled_back"
+    assert deps.layout.current.resolve() == prior
+    assert deps.launchd.availability_vault_name() == "vault-vault-a"
+    assert len(launchctl.loaded) == 3
+
+
+def test_resume_compensation_preserves_prior_availability_binding(tmp_path):
+    deps, _launchctl = dependencies(tmp_path)
+    transaction = LocalTailscaleTransaction(deps)
+    transaction.install(plan(), operation_id="op-" + "1" * 32)
+    prior = deps.layout.current.resolve()
+    capability = (
+        prior / "installer" / "installer" / "claudian_remote_lifecycle" / "availability.py"
+    )
+    capability.parent.mkdir(parents=True)
+    capability.write_text("# availability capability\n")
+
+    changed = dict(
+        plan(),
+        plan_id="plan-" + "c" * 64,
+        compatibility_set_id="claudian-remote-0.2.0-beta.2",
+        vault_id="vault-b",
+    )
+    deps.bridge_ready_probe = lambda: False
+    blocked = transaction.install(changed, operation_id="op-" + "2" * 32)
+    assert blocked["code"] == "desktop_plugin_bootstrap_required"
+    assert deps.launchd.availability_vault_name() == "vault-vault-b"
+
+    deps.bridge_ready_probe = lambda: True
+    deps.health_probe = lambda: False
+    failed = transaction.install(changed, operation_id="op-" + "2" * 32)
+
+    assert failed["state"] == "rolled_back"
+    assert deps.layout.current.resolve() == prior
+    assert deps.launchd.availability_vault_name() == "vault-vault-a"
 
 
 def test_staging_failure_happens_before_legacy_revocation_or_vault_mutation(tmp_path):
@@ -229,7 +622,7 @@ def test_staging_failure_happens_before_legacy_revocation_or_vault_mutation(tmp_
     assert json.loads(enabled.read_text()) == ["whale-agent-bridge"]
 
 
-def test_failure_after_migration_compensates_and_never_restores_token(tmp_path):
+def test_failure_after_retirement_requires_finish_forward_and_never_restores_legacy(tmp_path):
     class FailingKeychain(InMemoryKeychain):
         def set(self, reference, value):
             raise RuntimeError("keychain_unavailable")
@@ -246,14 +639,308 @@ def test_failure_after_migration_compensates_and_never_restores_token(tmp_path):
     enabled.parent.mkdir(parents=True, exist_ok=True)
     enabled.write_text(json.dumps(["whale-agent-bridge"]))
 
-    result = LocalTailscaleTransaction(deps).install(plan(), operation_id="op-" + "f" * 32)
+    transaction = LocalTailscaleTransaction(deps)
+    operation_id = "op-" + "f" * 32
+    result = transaction.install(legacy_plan(), operation_id=operation_id)
 
-    assert result["state"] == "rolled_back"
-    assert result["code"] == "installation_failed_rolled_back"
+    assert result["state"] == "recovery_required"
+    assert result["code"] == "post_retirement_finish_forward_required"
+    assert result["recovery_action"] == "finish_forward"
     assert revoked == ["retire-me"]
+    assert not legacy.exists()
+    assert json.loads(enabled.read_text()) == []
+    assert transaction.recovery_action(operation_id, legacy_plan()["plan_id"]) == "finish_forward"
+
+    rollback = transaction.rollback(legacy_plan(), operation_id=operation_id)
+    assert rollback == {
+        "state": "blocked",
+        "code": "rollback_unavailable_after_retirement",
+        "mutation_performed": False,
+        "recovery_action": "finish_forward",
+    }
+
+
+@pytest.mark.parametrize(
+    ("reconciliation", "expected_state", "expected_code"),
+    [
+        (
+            "retired",
+            "recovery_required",
+            "post_retirement_finish_forward_required",
+        ),
+        ("not_applied", "rolled_back", "rollback_completed"),
+    ],
+)
+def test_transaction_reconciliation_does_not_continue_plugin_migration(
+    tmp_path,
+    reconciliation,
+    expected_state,
+    expected_code,
+):
+    source = FixtureReleaseSource()
+    deps, _ = dependencies(tmp_path, source=source)
+    service = AmbiguousRetirementService(reconciliation=reconciliation)
+    deps.legacy_credential_revoker = service
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(
+        json.dumps({"id": "whale-agent-bridge"})
+    )
+    (legacy / "data.json").write_text(
+        json.dumps({"mobile_token": "legacy-secret"})
+    )
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+    transaction = LocalTailscaleTransaction(deps)
+    operation_id = "op-" + "9" * 32
+
+    ambiguous = transaction.install(legacy_plan(), operation_id=operation_id)
+    assert ambiguous["code"] == "legacy_retirement_outcome_unknown"
     assert legacy.is_dir()
-    assert "retire-me" not in (legacy / "data.json").read_text()
+    assert json.loads((legacy / "data.json").read_text())["mobile_token"] == (
+        "legacy-secret"
+    )
+
+    result = transaction.reconcile_legacy_retirement(
+        legacy_plan(), operation_id=operation_id
+    )
+
+    assert result["state"] == expected_state
+    assert result["code"] == expected_code
+    assert service.dispatches == 1
+    assert service.reconciliations == 1
+    assert legacy.is_dir()
+    assert json.loads((legacy / "data.json").read_text())["mobile_token"] == (
+        "legacy-secret"
+    )
     assert json.loads(enabled.read_text()) == ["whale-agent-bridge"]
+
+
+def test_legacy_install_requires_terminal_prior_operation_before_staging(tmp_path):
+    source = FixtureReleaseSource()
+    deps, _ = dependencies(tmp_path, source=source)
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+    (legacy / "data.json").write_text(json.dumps({"mobile_token": "still-active"}))
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+
+    result = LocalTailscaleTransaction(deps).install(
+        legacy_plan(prior_operation_terminal=False),
+        operation_id="op-" + "1" * 32,
+    )
+
+    assert result == {
+        "state": "blocked",
+        "code": "prior_operation_not_terminal",
+        "mutation_performed": False,
+        "recovery_action": "reconcile_prior_operation",
+    }
+    assert source.calls == 0
+    assert json.loads((legacy / "data.json").read_text())["mobile_token"] == "still-active"
+
+
+def test_failed_unverified_revocation_does_not_remove_uncreated_runtime(tmp_path):
+    class FailIfInactiveTailscale(FakeTailscale):
+        def remove_serve(self):
+            if self.serve_calls == 0:
+                raise RuntimeError("serve_was_never_created")
+            super().remove_serve()
+
+    tailscale = FailIfInactiveTailscale()
+    deps, _ = dependencies(tmp_path, tailscale=tailscale)
+    deps.legacy_credential_revoker = FixtureRetirementService(outcome={"verified": False})
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+    (legacy / "data.json").write_text(json.dumps({"mobile_token": "still-active"}))
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+
+    result = LocalTailscaleTransaction(deps).install(
+        plan(), operation_id="op-" + "d" * 32
+    )
+
+    assert result["state"] == "blocked"
+    assert result["code"] == "legacy_credential_revocation_required"
+    assert result["recovery_action"] == "retire_legacy_credential_and_retry"
+    assert tailscale.removed == 0
+    assert json.loads((legacy / "data.json").read_text())["mobile_token"] == "still-active"
+    assert json.loads(enabled.read_text()) == ["whale-agent-bridge"]
+    assert not list(deps.layout.staging.glob("*.partial"))
+
+
+def test_unavailable_legacy_revoker_blocks_before_staging_or_compensation(tmp_path):
+    source = FixtureReleaseSource()
+    tailscale = FakeTailscale()
+    deps, _ = dependencies(tmp_path, source=source, tailscale=tailscale)
+    deps.legacy_credential_revoker = None
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+    (legacy / "data.json").write_text(json.dumps({"mobile_token": "still-active"}))
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+
+    result = LocalTailscaleTransaction(deps).install(
+        plan(), operation_id="op-" + "8" * 32
+    )
+
+    assert result == {
+        "state": "blocked",
+        "code": "legacy_credential_revocation_unavailable",
+        "mutation_performed": False,
+        "recovery_action": "retire_legacy_credential_and_retry",
+    }
+    assert source.calls == 0
+    assert tailscale.removed == 0
+    assert not deps.layout.base.exists()
+    assert json.loads((legacy / "data.json").read_text())["mobile_token"] == "still-active"
+
+
+def test_unavailable_revoker_does_not_block_legacy_plugin_without_a_credential(tmp_path):
+    deps, _ = dependencies(tmp_path)
+    deps.legacy_credential_revoker = None
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+    (legacy / "data.json").write_text(json.dumps({"notifications_enabled": True}))
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+
+    result = LocalTailscaleTransaction(deps).install(
+        plan(), operation_id="op-" + "9" * 32
+    )
+
+    assert result["state"] == "ready"
+    assert not legacy.exists()
+
+
+def test_beta3_staging_only_recovery_rolls_back_without_touching_legacy_runtime(tmp_path):
+    tailscale = FakeTailscale()
+    deps, _ = dependencies(tmp_path, tailscale=tailscale)
+    deps.legacy_credential_revoker = FixtureRetirementService(outcome={"verified": False})
+    transaction = LocalTailscaleTransaction(deps)
+    operation_id = "op-" + "e" * 32
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+    (legacy / "data.json").write_text(json.dumps({"mobile_token": "still-active"}))
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+    deps.layout.ensure()
+    partial = deps.layout.staging / f"{operation_id}.partial"
+    partial.mkdir(parents=True)
+
+    with pytest.raises(ValueError, match="legacy_credential_revocation_unverified"):
+        transaction._legacy_migration(
+            "vault-a",
+            plan_id=plan()["plan_id"],
+            installation_id=plan()["installation_id"],
+        ).prepare(operation_id=operation_id)
+    operation_file = deps.layout.state / f"{operation_id}.transaction.json"
+    operation_file.write_text(json.dumps({
+        "transaction_schema": "claudian-remote.local-transaction/v1",
+        "operation_id": operation_id,
+        "plan_id": plan()["plan_id"],
+        "phase": "recovery_required",
+        "completed_phases": ["staging"],
+        "prior_availability_vault": None,
+        "prior_release_id": None,
+        "activation_started": False,
+        "plugin_activated": False,
+    }))
+
+    assert transaction.recovery_action(operation_id, plan()["plan_id"]) == "rollback"
+
+    result = transaction.rollback(plan(), operation_id=operation_id)
+
+    assert result == {
+        "state": "rolled_back",
+        "code": "rollback_completed",
+        "mutation_performed": False,
+        "restored_previous": False,
+    }
+    assert tailscale.removed == 0
+    assert json.loads((legacy / "data.json").read_text()) == {
+        "mobile_token": "still-active"
+    }
+    assert json.loads(enabled.read_text()) == ["whale-agent-bridge"]
+    assert not partial.exists()
+    assert json.loads(operation_file.read_text())["phase"] == "rolled_back"
+    assert transaction.recovery_action(operation_id, plan()["plan_id"]) == "manual_recovery_required"
+
+
+def test_legacy_retirement_requires_explicit_human_authorization_after_staging(
+    tmp_path,
+):
+    source = FixtureReleaseSource()
+    deps, _ = dependencies(tmp_path, source=source)
+    deps.legacy_credential_revoker = AuthorizationRequiredRetirementService()
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+    (legacy / "data.json").write_text(json.dumps({"mobile_token": "still-active"}))
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+
+    result = LocalTailscaleTransaction(deps).install(
+        legacy_plan(), operation_id="op-" + "4" * 32
+    )
+
+    assert result["state"] == "blocked"
+    assert result["code"] == "legacy_authority_authorization_required"
+    assert result["gate"]["gate_type"] == "legacy_authority_authorization_required"
+    assert source.calls == 1
+    journal = json.loads(
+        (
+            deps.layout.state / ("op-" + "4" * 32 + ".transaction.json")
+        ).read_text()
+    )
+    assert journal["phase"] == "before_legacy_migration"
+    assert journal["completed_phases"] == ["staging"]
+    assert json.loads((legacy / "data.json").read_text())["mobile_token"] == "still-active"
+
+
+def test_staging_failure_never_requests_legacy_retirement_authorization(tmp_path):
+    class AuthorizationMustNotBeChecked(FixtureRetirementService):
+        def authorized(self, *, operation_id, plan_id):
+            raise AssertionError("authorization_checked_before_staging_completed")
+
+    source = FixtureReleaseSource(stage_fail=True)
+    deps, _ = dependencies(tmp_path, source=source)
+    deps.legacy_credential_revoker = AuthorizationMustNotBeChecked()
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+    (legacy / "data.json").write_text(json.dumps({"mobile_token": "still-active"}))
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+
+    with pytest.raises(ReleaseValidationError, match="runtime_asset_digest_mismatch"):
+        LocalTailscaleTransaction(deps).install(
+            legacy_plan(), operation_id="op-" + "5" * 32
+        )
+
+    assert source.calls == 1
+    assert json.loads((legacy / "data.json").read_text())["mobile_token"] == "still-active"
 
 
 def test_pairing_is_a_verified_gate_after_runtime_activation(tmp_path):
@@ -279,6 +966,26 @@ def test_pairing_waits_until_the_selected_desktop_plugin_authenticates(tmp_path)
     deps.bridge_ready_probe = lambda: True
     resumed = transaction.install(plan(), operation_id=operation_id)
     assert resumed["state"] == "ready"
+
+
+def test_install_waits_for_login_launch_agent_to_open_bound_obsidian_vault(tmp_path):
+    bridge = {"checks": 0}
+    deps, _ = dependencies(tmp_path, bridge_ready=False)
+    deps.readiness_attempts = 2
+
+    def bridge_ready():
+        bridge["checks"] += 1
+        return bridge["checks"] >= 2
+
+    deps.bridge_ready_probe = bridge_ready
+
+    result = LocalTailscaleTransaction(deps).install(
+        plan(), operation_id="op-" + "8" * 32
+    )
+
+    assert result["state"] == "ready"
+    assert bridge["checks"] == 2
+    assert deps.layout.availability_config.is_file()
 
 
 def test_clean_install_seeds_selected_vault_and_mode_into_synced_plugin_preferences(tmp_path):
@@ -379,7 +1086,7 @@ def test_resume_from_pairing_gate_preserves_original_plugin_rollback_boundary(tm
     assert plugin.read_text() == "old plugin"
 
 
-def test_install_migrates_old_plugin_id_and_health_rollback_never_restores_token(tmp_path):
+def test_install_migrates_old_plugin_id_and_post_retirement_health_failure_finishes_forward(tmp_path):
     revoked = []
     deps, _ = dependencies(tmp_path, revoked=revoked)
     vault = deps.vault_path("vault-a")
@@ -395,7 +1102,7 @@ def test_install_migrates_old_plugin_id_and_health_rollback_never_restores_token
     enabled.parent.mkdir(parents=True, exist_ok=True)
     enabled.write_text(json.dumps(["whale-agent-bridge"]))
 
-    ready = LocalTailscaleTransaction(deps).install(plan(), operation_id="op-" + "9" * 32)
+    ready = LocalTailscaleTransaction(deps).install(legacy_plan(), operation_id="op-" + "9" * 32)
     assert ready["state"] == "ready"
     assert revoked == ["legacy-secret"]
     assert not legacy.exists()
@@ -415,13 +1122,13 @@ def test_install_migrates_old_plugin_id_and_health_rollback_never_restores_token
     failed_enabled.write_text(json.dumps(["whale-agent-bridge"]))
     failed_deps.health_probe = lambda: False
 
-    rolled_back = LocalTailscaleTransaction(failed_deps).install(
-        plan(), operation_id="op-" + "0" * 32
+    recovery = LocalTailscaleTransaction(failed_deps).install(
+        legacy_plan(), operation_id="op-" + "0" * 32
     )
-    assert rolled_back["state"] == "rolled_back"
-    assert failed_legacy.is_dir()
-    assert json.loads(failed_enabled.read_text()) == ["whale-agent-bridge"]
-    assert "never-restore" not in (failed_legacy / "data.json").read_text()
+    assert recovery["state"] == "recovery_required"
+    assert recovery["recovery_action"] == "finish_forward"
+    assert not failed_legacy.exists()
+    assert json.loads(failed_enabled.read_text()) == ["claudian-remote"]
 
 
 def test_install_blocks_legacy_and_current_enabled_before_release_or_plugin_mutation(tmp_path):

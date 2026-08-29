@@ -1,8 +1,9 @@
 # U9 internal beta acceptance record
 
-> Superseded on 2026-07-22 by `0.2.0-beta.2`. Real Tailscale validation found
+> Superseded on 2026-07-22; the current replacement is `0.2.0-beta.4`. Real Tailscale validation found
 > that beta.1 rejected Tailscale versions with a build suffix and assumed the
-> optional CLI integration was installed. Do not distribute or resume beta.1.
+> optional CLI integration was installed. A later clean-install pass also
+> superseded beta.2, and beta.4 later repaired lifecycle recovery. Do not distribute or resume beta.1.
 
 Date: 2026-07-22  
 Candidate: `0.2.0-beta.1`  
