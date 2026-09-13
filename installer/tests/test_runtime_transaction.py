@@ -79,6 +79,26 @@ class AuthorizationRequiredRetirementService(FixtureRetirementService):
         return False
 
 
+class ForbiddenRetirementService(FixtureRetirementService):
+    """Fail a non-legacy journey if it touches the legacy authority seam."""
+
+    def __init__(self):
+        super().__init__()
+        self.authority_calls = []
+
+    def authorized(self, *, operation_id, plan_id):
+        self.authority_calls.append(("authorized", operation_id, plan_id))
+        raise AssertionError("legacy authority must not be called")
+
+    def retire(self, **kwargs):
+        self.authority_calls.append(("retire", kwargs.get("operation_id")))
+        raise AssertionError("legacy authority must not be called")
+
+    def reconcile(self, **kwargs):
+        self.authority_calls.append(("reconcile", kwargs.get("operation_id")))
+        raise AssertionError("legacy authority must not be called")
+
+
 class AmbiguousRetirementService(FixtureRetirementService):
     def __init__(self, *, reconciliation):
         super().__init__()
@@ -315,6 +335,123 @@ def test_local_install_is_atomic_private_owned_and_idempotent(tmp_path):
     assert len(launchctl.loaded) == 3
 
 
+def test_reinstall_recreates_ownership_receipt_after_receipt_loss(tmp_path):
+    deps, launchctl = dependencies(tmp_path)
+    transaction = LocalTailscaleTransaction(deps)
+    expected_plan = plan()
+
+    assert transaction.install(expected_plan, operation_id="op-" + "1" * 32)["code"] == "installation_ready"
+    assert deps.layout.ownership_receipt.is_file()
+
+    # Simulate an interrupted installation that activated successfully but
+    # lost its ownership receipt before recording (or receipt loss after a
+    # completed install). A missing receipt must never satisfy readiness, so
+    # reinstall must recreate and validate the receipt rather than claiming
+    # already_ready.
+    deps.layout.ownership_receipt.unlink()
+    assert deps.layout.ownership_receipt.is_file() is False
+
+    recovered = transaction.install(expected_plan, operation_id="op-" + "2" * 32)
+    assert recovered["state"] == "ready"
+    assert recovered["code"] == "installation_ready"
+    assert deps.layout.ownership_receipt.is_file()
+    receipt = json.loads(deps.layout.ownership_receipt.read_text())
+    assert receipt["receipt_schema"] == "claudian-remote.ownership/v1"
+    assert receipt["plan_id"] == expected_plan["plan_id"]
+    assert transaction.verify(expected_plan)["code"] == "verification_ready"
+
+
+def test_fresh_and_current_journeys_share_the_tail_without_legacy_calls_or_journals(
+    tmp_path,
+):
+    devices = {"iphone-existing"}
+    device_revocations = []
+    deps, _ = dependencies(
+        tmp_path,
+        pairing_devices=devices,
+        pairing_revocations=device_revocations,
+    )
+    forbidden = ForbiddenRetirementService()
+    deps.legacy_credential_revoker = forbidden
+    transaction = LocalTailscaleTransaction(deps)
+    shared_phases = [
+        "staging",
+        "secure_provisioning",
+        "plugin_activation",
+        "launchd",
+        "tailscale_serve",
+        "verified",
+        "paired",
+    ]
+
+    fresh_operation = "op-" + "a" * 32
+    assert transaction.install(plan(), operation_id=fresh_operation)["state"] == "ready"
+
+    preserve_operation = "op-" + "b" * 32
+    preserve = current_update_plan(policy="preserve", suffix="2")
+    assert transaction.install(preserve, operation_id=preserve_operation)["state"] == "ready"
+
+    rotate_operation = "op-" + "c" * 32
+    rotate = current_update_plan(policy="rotate", suffix="3")
+    waiting = transaction.install(rotate, operation_id=rotate_operation)
+    assert waiting["code"] == "pairing_approval_required"
+    assert device_revocations == [("iphone-existing", "profile_changed")]
+    devices.add("iphone-replacement")
+    assert transaction.install(rotate, operation_id=rotate_operation)["state"] == "ready"
+
+    assert forbidden.authority_calls == []
+    for operation_id in (fresh_operation, preserve_operation, rotate_operation):
+        assert not (deps.layout.state / f"{operation_id}.legacy-plugin.json").exists()
+        journal = json.loads(
+            (deps.layout.state / f"{operation_id}.transaction.json").read_text()
+        )
+        assert journal["operation_id"] == operation_id
+        assert journal["phase"] == "ready"
+        assert journal["completed_phases"] == shared_phases
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    [
+        "invalid_schema",
+        "wrong_operation",
+        "wrong_plan",
+        "wrong_compatibility_set",
+        "wrong_plugin_root",
+        "wrong_resource_digest",
+    ],
+)
+def test_ready_fails_closed_when_ownership_receipt_is_invalid_or_misbound(tmp_path, corruption):
+    deps, _ = dependencies(tmp_path)
+    transaction = LocalTailscaleTransaction(deps)
+    operation_id = "op-" + "1" * 32
+    expected_plan = plan()
+    assert transaction.install(expected_plan, operation_id=operation_id)["state"] == "ready"
+    assert transaction.verify(expected_plan)["code"] == "verification_ready"
+
+    receipt_path = deps.layout.ownership_receipt
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if corruption == "invalid_schema":
+        receipt["receipt_schema"] = "claudian-remote.ownership/unknown"
+    elif corruption == "wrong_operation":
+        receipt["operation_id"] = "op-" + "f" * 32
+    elif corruption == "wrong_plan":
+        receipt["plan_id"] = "plan-" + "f" * 64
+    elif corruption == "wrong_compatibility_set":
+        receipt["compatibility_set_id"] = "claudian-remote-0.2.0-beta.other"
+    elif corruption == "wrong_plugin_root":
+        receipt["plugin_root"] = str(tmp_path / "Other" / ".obsidian" / "plugins" / "claudian-remote")
+    elif corruption == "wrong_resource_digest":
+        next(item for item in receipt["resources"] if item.get("digest"))["digest"] = "0" * 64
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    assert transaction.verify(expected_plan) == {
+        "state": "blocked",
+        "code": "verification_failed",
+        "mutation_performed": False,
+    }
+
+
 def test_current_update_preserve_survives_activation_and_restart_without_repair(tmp_path):
     devices = {"iphone-existing"}
     revocations = []
@@ -421,6 +558,42 @@ def test_current_update_rotate_resumes_after_rotation_interruption_without_doubl
     ready = LocalTailscaleTransaction(deps).install(update, operation_id=operation_id)
     assert ready["state"] == "ready"
     assert revocations == [("iphone-old", "profile_changed")]
+
+
+@pytest.mark.parametrize("phase", ["before_staging", "before_activation", "after_activation"])
+def test_current_update_preserve_resumes_the_same_operation_across_shared_tail_interruptions(
+    tmp_path, phase
+):
+    devices = {"iphone-existing"}
+    legacy_calls = []
+    deps, _ = dependencies(
+        tmp_path,
+        pairing_devices=devices,
+        revoked=legacy_calls,
+    )
+    transaction = LocalTailscaleTransaction(deps)
+    assert transaction.install(plan(), operation_id="op-" + "1" * 32)["state"] == "ready"
+    update = current_update_plan(policy="preserve", suffix="4")
+    operation_id = "op-" + "4" * 32
+    deps.interruption_probe = lambda candidate: candidate == phase
+
+    with pytest.raises(LifecycleInterrupted, match=phase):
+        transaction.install(update, operation_id=operation_id)
+
+    deps.interruption_probe = lambda _candidate: False
+    resumed = LocalTailscaleTransaction(deps).install(
+        update, operation_id=operation_id
+    )
+
+    assert resumed["state"] == "ready"
+    assert devices == {"iphone-existing"}
+    assert legacy_calls == []
+    assert not (deps.layout.state / f"{operation_id}.legacy-plugin.json").exists()
+    journal = json.loads(
+        (deps.layout.state / f"{operation_id}.transaction.json").read_text()
+    )
+    assert journal["operation_id"] == operation_id
+    assert journal["phase"] == "ready"
 
 
 @pytest.mark.parametrize("phase", ["before_staging", "before_activation", "after_activation"])
@@ -1129,6 +1302,95 @@ def test_install_migrates_old_plugin_id_and_post_retirement_health_failure_finis
     assert recovery["recovery_action"] == "finish_forward"
     assert not failed_legacy.exists()
     assert json.loads(failed_enabled.read_text()) == ["claudian-remote"]
+
+
+def test_legacy_upgrade_retires_then_resumes_deliberate_pairing_under_original_operation(
+    tmp_path,
+):
+    retired = []
+    devices = set()
+    deps, _ = dependencies(
+        tmp_path,
+        pairing_ready=False,
+        pairing_devices=devices,
+        revoked=retired,
+    )
+    deps.pairing_probe = lambda: bool(devices)
+    vault = deps.vault_path("vault-a")
+    legacy = vault / ".obsidian/plugins/whale-agent-bridge"
+    legacy.mkdir(parents=True)
+    (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+    (legacy / "data.json").write_text(json.dumps({
+        "mobile_token": "legacy-secret",
+        "vault_id": "vault-a",
+        "connection_mode": "remote_vps",
+        "notifications_enabled": False,
+        "haptics_enabled": False,
+        "relay_url": "https://private.example.invalid",
+        "local_path": "/Users/example/private-vault",
+    }))
+    enabled = vault / ".obsidian/community-plugins.json"
+    enabled.parent.mkdir(parents=True, exist_ok=True)
+    enabled.write_text(json.dumps(["whale-agent-bridge"]))
+    operation_id = "op-" + "e" * 32
+    selected_plan = legacy_plan()
+
+    waiting = LocalTailscaleTransaction(deps).install(
+        selected_plan, operation_id=operation_id
+    )
+
+    assert waiting["state"] == "blocked"
+    assert waiting["code"] == "pairing_approval_required"
+    assert waiting["gate"]["resume_reference"] == operation_id
+    assert retired == ["legacy-secret"]
+    assert not legacy.exists()
+    assert json.loads(enabled.read_text()) == ["claudian-remote"]
+    migrated = json.loads(
+        (vault / ".obsidian/plugins/claudian-remote/data.json").read_text()
+    )
+    assert migrated == {
+        "schema_version": 2,
+        "vault_id": "vault-a",
+        "connection_mode": "local_tailscale",
+        "notifications_enabled": False,
+        "haptics_enabled": False,
+    }
+    migration_journal = json.loads(
+        (deps.layout.state / f"{operation_id}.legacy-plugin.json").read_text()
+    )
+    assert migration_journal["operation_id"] == operation_id
+    assert migration_journal["phase"] == "committed"
+    assert migration_journal["re_pair_required"] is True
+    assert "legacy-secret" not in json.dumps(migration_journal)
+    waiting_journal = json.loads(
+        (deps.layout.state / f"{operation_id}.transaction.json").read_text()
+    )
+    assert waiting_journal["operation_id"] == operation_id
+    assert waiting_journal["phase"] == "await_pairing"
+
+    devices.add("iphone-new")
+    ready = LocalTailscaleTransaction(deps).install(
+        selected_plan, operation_id=operation_id
+    )
+
+    assert ready["state"] == "ready"
+    assert ready["code"] == "installation_ready"
+    assert retired == ["legacy-secret"]
+    final_journal = json.loads(
+        (deps.layout.state / f"{operation_id}.transaction.json").read_text()
+    )
+    assert final_journal["operation_id"] == operation_id
+    assert final_journal["phase"] == "ready"
+    assert final_journal["completed_phases"] == [
+        "staging",
+        "legacy_plugin_migration",
+        "secure_provisioning",
+        "plugin_activation",
+        "launchd",
+        "tailscale_serve",
+        "verified",
+        "paired",
+    ]
 
 
 def test_install_blocks_legacy_and_current_enabled_before_release_or_plugin_mutation(tmp_path):

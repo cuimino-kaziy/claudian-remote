@@ -633,23 +633,24 @@ class PairingStore:
         endpoint_audience: str,
         reason: str,
     ) -> list[str]:
-        async with self._lock:
-            rows = self.connection.execute(
-                """SELECT credential_id FROM device_credentials
-                   WHERE device_id=? AND installation_id=? AND vault_id=?
-                     AND endpoint_audience=? AND revoked_at IS NULL""",
-                (device_id, installation_id, vault_id, endpoint_audience),
-            ).fetchall()
-            ids = [row["credential_id"] for row in rows]
-            now = self.clock()
-            for credential_id in ids:
-                self.connection.execute(
-                    """UPDATE device_credentials SET revoked_at=?, revoke_reason=?, generation=generation+1
-                       WHERE credential_id=? AND revoked_at IS NULL""",
-                    (now, str(reason or "revoked")[:64], credential_id),
-                )
-                self.authenticator.revoke_credential(credential_id)
-            return ids
+        async with self.authenticator.command_boundary():
+            async with self._lock:
+                rows = self.connection.execute(
+                    """SELECT credential_id FROM device_credentials
+                       WHERE device_id=? AND installation_id=? AND vault_id=?
+                         AND endpoint_audience=? AND revoked_at IS NULL""",
+                    (device_id, installation_id, vault_id, endpoint_audience),
+                ).fetchall()
+                ids = [row["credential_id"] for row in rows]
+                now = self.clock()
+                for credential_id in ids:
+                    self.connection.execute(
+                        """UPDATE device_credentials SET revoked_at=?, revoke_reason=?, generation=generation+1
+                           WHERE credential_id=? AND revoked_at IS NULL""",
+                        (now, str(reason or "revoked")[:64], credential_id),
+                    )
+                    self.authenticator.revoke_credential(credential_id)
+                return ids
 
     async def diagnostic_summary(self) -> Dict[str, Any]:
         async with self._lock:

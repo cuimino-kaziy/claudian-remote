@@ -10,7 +10,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Mapping
 
-from .inspect import SUPPORTED_CLAUDIAN_VERSION, content_id, validate_snapshot
+from .inspect import SUPPORTED_CLAUDIAN_VERSION, SUPPORTED_CLAUDIAN_VERSIONS, content_id, validate_snapshot
 from .model import PLAN_SCHEMA, SNAPSHOT_SCHEMA
 
 
@@ -132,7 +132,7 @@ def _recommended_action(blockers: list[str], journey: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class PlanBuilder:
-    compatibility_set_id: str = "claudian-remote-0.2.0-beta.4"
+    compatibility_set_id: str = "claudian-remote-0.2.0-beta.5"
     current_update_pairing_identity_policy: str = "preserve"
 
     def build(
@@ -175,7 +175,7 @@ class PlanBuilder:
         selected_vault = next(item for item in snapshot.get("vaults", []) if str(item.get("vault_id")) == vault_id)
         if "claudian_version" in selected_vault:
             hard_blockers = [reason for reason in hard_blockers if reason != "unsupported_claudian_version"]
-            if selected_vault.get("claudian_version") != SUPPORTED_CLAUDIAN_VERSION:
+            if selected_vault.get("claudian_version") not in SUPPORTED_CLAUDIAN_VERSIONS:
                 hard_blockers.append("unsupported_claudian_version")
         if "claudian_enabled" in selected_vault:
             hard_blockers = [reason for reason in hard_blockers if reason != "claudian_not_enabled"]
@@ -407,7 +407,17 @@ def validate_mutation_environment(
         )
     except PlanError as exc:
         raise EnvironmentDrift("environment_drift") from exc
-    if planned_journey != current_journey or planned_authority != current_authority:
+    current_installation = current_snapshot.get("installation", {})
+    own_fresh_activation = (
+        allow_plan_target
+        and planned_journey["journey"] == "fresh_install"
+        and current_journey["journey"] == "current_update"
+        and current_installation.get("installed") is True
+        and current_installation.get("compatibility_set_id") == plan.get("compatibility_set_id")
+        and current_installation.get("profile_mode") == plan.get("topology", {}).get("mode")
+        and bool(current_installation.get("profile_generation_id"))
+    )
+    if (planned_journey != current_journey and not own_fresh_activation) or planned_authority != current_authority:
         raise EnvironmentDrift("environment_drift")
     stable_pairs = (
         (planned_snapshot.get("macos", {}).get("platform"), current_snapshot.get("macos", {}).get("platform")),

@@ -72,15 +72,16 @@ Claudian Remote Relay ⇄ Companion ⇄ Obsidian / Claudian
 ./bin/claudian-remote-lifecycle inspect
 ```
 
-它只输出一行 JSON，结构版本是 `claudian-remote.lifecycle-result/v1`，不会修改系统。
+它只输出一行 JSON，结构版本是 `claudian-remote.lifecycle-result/v2`，不会修改系统。
 Agent 必须先读取 `state`、`code` 和 `data.snapshot`，再决定下一步。不要先询问能由
 检查结果发现的信息，也不要让用户粘贴密码、令牌、私钥、配对凭据或完整本地路径。
 
 ## 1. 对话规则
 
 1. 一次只问一个尚未解决的问题；已记录在 lifecycle checkpoint 的答案不得重复询问。
-2. Claudian 必须恰好为 `2.0.4`。不支持的版本只允许 inspect、status、diagnose、
+2. Claudian 必须为 `2.0.4` 或 `2.2.6`（推荐）。不支持的版本只允许 inspect、status、diagnose、
    rollback、uninstall 等安全操作，禁止安装、更新或 Remote 写操作。
+   2.2.6 的“立即插话”取决于当前提供方能力；Claude 不支持插话，但仍可普通发送和排队。
 3. 若检查到多个 Vault，只问“要为哪个 Vault 安装？”；不得猜测。
 4. 不询问用户是否有 Mac、iPhone、VPS 或 NAS。直接默认 `local_tailscale`；只有用户主动提出
    自有 VPS 时才解释 `remote_vps`，并明确当前内测尚未开放该自动部署路径。
@@ -187,8 +188,19 @@ operation 的 `resume`，lifecycle 会原地刷新门禁，不会创建新 opera
 | `pairing_admin_bootstrap_required` | 等待已签名 lifecycle 建立 OS 安全存储和 Companion 配置路由 | Companion secure-provisioning route probe |
 | `desktop_plugin_bootstrap_required` | 在 Obsidian 打开或重新加载已选 Vault，等待 Remote 插件加载 | 选定 Vault 的插件向 Companion Bridge 完成认证 |
 | `obsidian_close_for_migration_required` | 旧插件仍需迁移时，完全退出 Obsidian | Obsidian process closed probe |
+| `legacy_authority_authorization_required` | 用户只授权属于本安装、本 authority 的旧凭据退休，并确认受影响设备需重新配对 | legacy authority capability probe；退休影响确认始终为人工边界 |
 | `purge_confirmation_required` | 用户在安全界面确认清除 Remote 数据 | one-time confirmation probe |
 | `diagnostic_export_confirmation_required` | 用户核对字段预览后在 macOS 对话框确认本地导出 | one-time confirmation probe |
+
+门禁的 `operator_options` 区分两种路线：带 `requires_capability`（`browser_control` 或
+`computer_control`）的选项是可代理路线，不带该字段的 `manual` 选项是人工路线。当前 Agent 具备浏览器或
+应用控制能力时优先展示可代理路线；不具备能力时逐字展示 `manual` 选项里的官方 `url` 和精确导航步骤。
+无论哪条路线，密码、2FA、macOS 系统权限、VPN/网络扩展批准、证书透明度确认、旧凭据退休影响确认和设备
+短码核对都始终是人工边界，不得代理；具备能力的 Agent 也不得对普通导航索要不必要的二次确认。
+
+当 plan/status 返回的结果里已经没有 Tailscale 门禁（App、登录、扩展、CLI integration、HTTPS consent
+的 probe 都已通过）时，走快速路径：跳过这些已满足的说明，直接进入 staging、activation 和 pairing。
+CLI integration 从来不是必装前置，也不应为了快速路径要求用户单独安装。
 
 Agent 会话丢失后先运行：
 
@@ -204,7 +216,7 @@ Agent 会话丢失后先运行：
 |---|---|---|
 | `inspection_ready` | 支持的只读快照已产生 | 单 Vault 直接生成 Tailscale plan；多 Vault 只询问目标 Vault |
 | `unsupported_desktop_os` | 非本内测支持的 macOS | 停止；仅 diagnose |
-| `unsupported_claudian_version` | Claudian 不是 2.0.4 | 提示安装受支持版本后重新 inspect |
+| `unsupported_claudian_version` | Claudian 不是 2.0.4 或 2.2.6 | 提示安装受支持版本后重新 inspect |
 | `claudian_not_enabled` | Claudian 未启用 | 让用户在 Obsidian 启用后重新 inspect |
 | `vault_not_found` | 未发现 Vault | 让用户在 Obsidian 打开目标 Vault 后重新 inspect |
 | `vault_selection_required` | 多 Vault 有歧义 | 一次只问用户选择哪个 Vault，再 plan |
@@ -220,8 +232,13 @@ Agent 会话丢失后先运行：
 | `tailscale_update_required` | 已安装的 Tailscale 低于受支持版本 | 在官方 App 中更新后，用同一 operation_id resume |
 | `trusted_lan_not_release_eligible` | 本内测尚无真机抓包与网络切换证据，LAN 模式不可发布 | 不得启用或回退明文 LAN；改选 Tailscale 或 VPS |
 | `obsidian_close_for_migration_required` | 旧插件仍在且 Obsidian 正运行 | 完全退出 Obsidian，再用同一 operation_id resume |
-| `legacy_credential_revocation_unavailable` | 检测到旧插件共享凭据，但本构建没有可验证的所属服务撤销能力；尚未 staging | 停止且保留旧插件；通过原服务正式撤销旧凭据后，重新 inspect/plan 并创建新 operation，禁止直接删除或绕过 |
-| `legacy_credential_revocation_required` | 已尝试撤销旧凭据，但所属服务没有返回可验证结果；staging 已清理且旧凭据保留 | 停止；确认原服务已撤销后重新 inspect/plan，禁止 resume 或假定撤销成功 |
+| `legacy_credential_revocation_unavailable` | 该旧 lineage 没有受支持的可验证退休适配器，尚未 staging | 停止；保留旧插件与旧凭据，不改动旧安装；联系维护者确认 lineage |
+| `legacy_credential_revocation_required` | 退休尝试未返回可验证结果，staging 已清理且旧凭据保留 | 停止；不假定已撤销；用同一 operation 的 status 读取 typed 结果并只执行返回的 recovery action |
+| `legacy_authority_unsupported` | 旧 authority 布局无法识别或非受支持 lineage | 停止；不改动旧安装，联系维护者 |
+| `shared_credential_scope_unsupported` | 旧凭据的消费者无法证明只属于当前安装 | 提交前停止；不改动旧凭据 |
+| `legacy_authority_authorization_required` | 需要人工授权属于本安装的旧凭据退休 | 解释重配对影响，用同一 operation resume 并完成授权 |
+| `retirement_outcome_unknown` | 退休请求已派发但 authority 结果未知 | 保持锁定；只执行同一 operation 的只读对账或 manual recovery |
+| `post_retirement_finish_forward_required` | 退休已确认，需向前完成激活与重新配对 | 用同一 operation_id finish_forward；禁止回滚或另开安装 |
 | `verified_release_unavailable` | 缺少已验签发行目录或 bootstrap 回执 | 停止；重新获取同一私有发行资产 |
 | `manifest_signature_unverified` | bootstrap 验签回执无效 | 停止；不得安装或改用源码 |
 | `installation_ready` | 本地 Relay、Companion、插件与 Tailscale Serve 均通过验证 | 执行 verify，再进行真机配对验收 |
@@ -246,6 +263,23 @@ managed runtime、动态 LaunchAgent、Keychain 安全配置、Pairing Admin Com
 verify/resume/rollback/revoke-device/diagnose/export-diagnostics/uninstall/purge。
 `remote_vps` 与 `local_lan` 写操作仍必须返回 `operation_not_implemented` 或模式专用阻塞码，
 Agent 不得绕过或声称 ready。
+
+### 旧凭据退休的 typed 结果与恢复/取消边界
+
+Beta 5 不再循环追问“撤销旧凭据”。退休请求派发后，结果只收敛到三种 typed 状态之一，Agent 按
+`effect_summary.credential_effect` 和 `ambiguity_state` 读取，不按自然语言推测：
+
+- `not_applied`：authority 证明旧凭据未变更且 generation 未推进，可退回派发前的保留路径。
+- `retired`：authority 提供有效退休证据，跨过不可逆边界，只能 finish_forward 完成激活与重新配对。
+- `inconclusive`：authority 仍不可达或证据无效，operation 保持锁定，只提供 manual_recovery_required。
+
+恢复文案必须区分三处，不得混用：派发前的失败走 `rollback`（预边界回滚，旧安装保持可用）；派发后
+结果未知走 `reconcile_retirement_outcome`（同一 operation 的只读对账）；退休证据确认后走
+`finish_forward`（向前完成，绝不恢复已退休秘密）。
+
+取消只在退休派发前可用：用户拒绝或取消门禁会清理该 operation 拥有的暂存并关闭同一 operation，
+旧安装保持不变。派发后 `cancellation_available` 恒为 false，结果不再提供 cancel，也不得另开新安装；
+门禁过期时继续用同一 operation_id 执行 resume，lifecycle 原地刷新，不创建新 operation。
 
 ## 6. 终态
 

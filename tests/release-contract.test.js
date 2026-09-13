@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { generateKeyPairSync, sign } from "node:crypto";
-import { copyFileSync, mkdtempSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, copyFileSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -21,6 +22,23 @@ const root = resolve(import.meta.dirname, "..");
 const pluginManifest = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
 const versions = JSON.parse(readFileSync(join(root, "versions.json"), "utf8"));
 const supportMatrix = JSON.parse(readFileSync(join(root, "release/support-matrix.json"), "utf8"));
+const require = createRequire(import.meta.url);
+let buildDependenciesAvailable = true;
+try {
+  require.resolve("esbuild");
+} catch {
+  buildDependenciesAvailable = false;
+}
+const buildTest = buildDependenciesAvailable ? test : test.skip;
+
+function buildAssets(directory = mkdtempSync(join(tmpdir(), "claudian-release-assets-"))) {
+  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], {
+    cwd: root,
+    env: { ...process.env, CLAUDIAN_RELEASE_DIST: directory },
+    stdio: "pipe"
+  });
+  return directory;
+}
 
 function runtimeFixture() {
   return {
@@ -38,19 +56,25 @@ function fixture() {
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const fingerprint = publicKeyFingerprint(publicKeyPem);
-  const lockPath = "package-lock.json";
-  const lockDigest = sha256File(join(root, lockPath));
-  const assets = ["plugin", "companion", "relay", "installer"].map((component) => {
-    const name = `${component}.tgz`;
-    const bytes = Buffer.from(`immutable-${component}-asset`);
+  const assetRows = [
+    ["plugin", `claudian-remote-plugin-${pluginManifest.version}.tar.gz`, "package-lock.json"],
+    ["companion", `claudian-remote-companion-${pluginManifest.version}.tar.gz`, "gateway/requirements.lock"],
+    ["relay", `claudian-remote-relay-${pluginManifest.version}.tar.gz`, "gateway/requirements.lock"],
+    ["installer", `claudian-remote-lifecycle-${pluginManifest.version}.tar.gz`, "release/lifecycle-dependencies.lock.json"],
+    ["legacy_retirement_helper", `claudian-remote-legacy-retirement-helper-${pluginManifest.version}.py`, "gateway/requirements.lock"]
+  ];
+  const assets = assetRows.map(([component, name, lockPath]) => {
+    const bytes = component === "legacy_retirement_helper"
+      ? readFileSync(join(root, "gateway/relay/legacy_retirement.py"))
+      : Buffer.from(`immutable-${component}-asset`);
     writeFileSync(join(assetDir, name), bytes);
     return {
       name,
       component,
       sha256: sha256Bytes(bytes),
       size: bytes.length,
-      license: component === "relay" ? "AGPL-3.0-only" : "MIT",
-      dependency_locks: [{ path: lockPath, sha256: lockDigest }]
+      license: ["relay", "legacy_retirement_helper"].includes(component) ? "AGPL-3.0-only" : "MIT",
+      dependency_locks: [{ path: lockPath, sha256: sha256File(join(root, lockPath)) }]
     };
   });
   const manifest = {
@@ -61,14 +85,16 @@ function fixture() {
     distribution_channel: "private_beta",
     plugin_update_owner: "lifecycle_manager",
     compatibility_set: {
+      id: supportMatrix.components.compatibility_set_id,
       plugin: { id: "claudian-remote", version: pluginManifest.version, minimum_obsidian_version: pluginManifest.minAppVersion },
       companion: { version: pluginManifest.version },
       relay: { version: pluginManifest.version },
       installer: { version: pluginManifest.version },
       protocol: supportMatrix.protocol,
       configuration_schema: supportMatrix.components.configuration_schema,
-      claudian: { exact_version: "2.0.4" },
-      runtime: runtimeFixture()
+      claudian: { exact_version: "2.2.6", supported_versions: ["2.0.4", "2.2.6"] },
+      runtime: runtimeFixture(),
+      upgrade_contract: structuredClone(supportMatrix.upgrade_contract)
     },
     assets,
     signature: { algorithm: "ed25519", key_fingerprint: fingerprint, value: "" }
@@ -89,6 +115,69 @@ function fixture() {
 test("an exact signed compatibility set is accepted", () => {
   const { manifest, context } = fixture();
   assert.equal(validateReleaseContract(manifest, context), true);
+});
+
+test("beta 5 signed upgrade capabilities bind every supported journey boundary", () => {
+  assert.equal(pluginManifest.version, "0.2.0-beta.5");
+  assert.equal(supportMatrix.components.compatibility_set_id, "claudian-remote-0.2.0-beta.5");
+  assert.deepEqual(supportMatrix.upgrade_contract.journey_capabilities, [
+    "fresh_install", "current_update", "legacy_upgrade"
+  ]);
+  assert.deepEqual(supportMatrix.upgrade_contract.result_schema_versions, [
+    "claudian-remote.lifecycle-result/v2"
+  ]);
+  assert.deepEqual(supportMatrix.upgrade_contract.proof_schema_versions, [
+    "claudian-remote.legacy-retirement-proof/v1"
+  ]);
+  assert.deepEqual(
+    supportMatrix.upgrade_contract.current_update_pairing_rows.map((row) => row.pairing_identity_policy),
+    ["preserve", "rotate"]
+  );
+  assert.deepEqual(supportMatrix.upgrade_contract.supported_profiles, ["local_tailscale"]);
+  assert.equal(supportMatrix.upgrade_contract.final_topology_boundary.silent_fallback, false);
+
+  for (const mutate of [
+    (contract) => { contract.journey_capabilities.pop(); },
+    (contract) => { contract.result_schema_versions[0] = "claudian-remote.lifecycle-result/v1"; },
+    (contract) => { contract.proof_schema_versions[0] = "attacker/proof/v9"; },
+    (contract) => { contract.supported_legacy_lineages[1].version = "unknown-lineage"; },
+    (contract) => { contract.supported_profiles.push("local_lan"); },
+    (contract) => { contract.final_topology_boundary.mode = "remote_vps"; },
+    (contract) => { contract.current_update_pairing_rows[0].plugin = "0.2.0-beta.4"; },
+    (contract) => { contract.adapter_rows[0].profile_id = "unsupported-profile"; },
+    (contract) => { contract.helper_rows[0].sha256 = "0".repeat(64); },
+    (contract) => { contract.execution_constraints.runtime_exact_paths[0] = "python3"; },
+    (contract) => { contract.execution_constraints.import_prefixes[0] = "relative/imports"; },
+    (contract) => { contract.execution_constraints.unbound_network_dependency = "allowed"; },
+    (contract) => { contract.runtime_proof_private_key = "must-never-be-packaged"; },
+    (contract) => { contract.packaged_acceptance_rows[2].components.pop(); }
+  ]) {
+    const subject = fixture();
+    mutate(subject.manifest.compatibility_set.upgrade_contract);
+    assert.throws(
+      () => validateReleaseContract(subject.manifest, subject.context),
+      /upgrade capability|helper|private key|signature/
+    );
+  }
+});
+
+test("beta 4, missing, replaced, or helper-substituted assets fail closed", () => {
+  const missing = fixture();
+  missing.manifest.assets.pop();
+  assert.throws(() => validateReleaseContract(missing.manifest, missing.context), /asset|helper/);
+
+  const mixed = fixture();
+  mixed.manifest.assets[0].name = "claudian-remote-plugin-0.2.0-beta.4.tar.gz";
+  assert.throws(() => validateReleaseContract(mixed.manifest, mixed.context), /asset version|signature/);
+
+  const replaced = fixture();
+  replaced.manifest.assets[0].component = "companion";
+  assert.throws(() => validateReleaseContract(replaced.manifest, replaced.context), /asset|companion/);
+
+  const helper = fixture();
+  const helperAsset = helper.manifest.assets.find((asset) => asset.component === "legacy_retirement_helper");
+  writeFileSync(join(helper.context.assetDir, helperAsset.name), "substituted helper");
+  assert.throws(() => validateReleaseContract(helper.manifest, helper.context), /tampering|helper/);
 });
 
 test("tag, plugin, versions, and lock drift are rejected", () => {
@@ -113,6 +202,13 @@ test("manifest or asset tampering and unknown or revoked keys are rejected", () 
   writeFileSync(join(assetTamper.context.assetDir, assetTamper.manifest.assets[0].name), "changed");
   assert.throws(() => validateReleaseContract(assetTamper.manifest, assetTamper.context));
 
+  const privateKey = fixture();
+  privateKey.manifest.runtime_proof_private_key = "must-never-be-packaged";
+  assert.throws(
+    () => validateReleaseContract(privateKey.manifest, privateKey.context),
+    /private key material/
+  );
+
   const unknown = fixture();
   unknown.context.trustStore.keys = [];
   assert.throws(() => validateReleaseContract(unknown.manifest, unknown.context), /unknown signing key/);
@@ -125,7 +221,13 @@ test("manifest or asset tampering and unknown or revoked keys are rejected", () 
 test("unsupported Claudian and missing asset digests fail closed", () => {
   const unsupported = fixture();
   unsupported.manifest.compatibility_set.claudian.exact_version = "2.0.3";
-  assert.throws(() => validateReleaseContract(unsupported.manifest, unsupported.context), /Claudian 2\.0\.4/);
+  assert.throws(() => validateReleaseContract(unsupported.manifest, unsupported.context), /Claudian supported versions/);
+
+  for (const versions of [undefined, ["2.2.6"], ["2.0.4", "2.2.6", "2.2.7"]]) {
+    const changed = fixture();
+    changed.manifest.compatibility_set.claudian.supported_versions = versions;
+    assert.throws(() => validateReleaseContract(changed.manifest, changed.context), /Claudian supported versions/);
+  }
 
   const missingDigest = fixture();
   delete missingDigest.manifest.assets[0].sha256;
@@ -179,13 +281,17 @@ test("source boundary rejects local state, credentials, personal paths, and priv
   writeFileSync(join(directory, "source.txt"), [
     ["/Users", "seed-owner", "private"].join("/"),
     ["ghp", "seededcredential123456"].join("_"),
-    ["relay", "quelplan", "com"].join(".")
+    "https://RELAY.example.test/health"
   ].join("\n"));
-  const findings = scanSourceBoundary(directory);
+  const findings = scanSourceBoundary(directory, ["", " relay.example.test "]);
   assert.ok(findings.some((finding) => finding.includes("local-state filename")));
   assert.ok(findings.some((finding) => finding.includes("personal absolute path")));
   assert.ok(findings.some((finding) => finding.includes("credential-like value")));
   assert.ok(findings.some((finding) => finding.includes("private deployment identifier")));
+  assert.throws(() => execFileSync(process.execPath, [join(root, "release/packaging/check-source-boundary.mjs"), directory], {
+    env: { ...process.env, CLAUDIAN_PRIVATE_SOURCE_IDENTIFIERS: "\r\n relay.example.test \r\n" },
+    stdio: "pipe"
+  }), (error) => error.status === 1 && /private deployment identifier/.test(error.stderr.toString()));
 });
 
 test("source boundary excludes release virtual environments from publishable source", () => {
@@ -198,11 +304,21 @@ test("source boundary excludes release virtual environments from publishable sou
 
 test("release schema and support matrix pin the public contract", () => {
   const schema = JSON.parse(readFileSync(join(root, "release/release-manifest.schema.json"), "utf8"));
-  assert.equal(schema.$defs.compatibilitySet.properties.claudian.properties.exact_version.const, "2.0.4");
+  assert.equal(schema.$defs.compatibilitySet.properties.id.const, "claudian-remote-0.2.0-beta.5");
+  assert.equal(schema.$defs.compatibilitySet.properties.claudian.properties.exact_version.const, "2.2.6");
+  assert.deepEqual(schema.$defs.compatibilitySet.properties.claudian.properties.supported_versions.const, ["2.0.4", "2.2.6"]);
   assert.equal(pluginManifest.id, "claudian-remote");
   assert.equal(versions[pluginManifest.version], pluginManifest.minAppVersion);
   assert.equal(supportMatrix.distribution.allowed_combinations.length, 2);
   assert.equal(schema.$defs.runtimeDistribution.properties.delivery.const, "immutable_upstream_asset");
+  assert.equal(schema.$defs.helperRow.properties.delivery.const, "signed_kit_asset");
+  assert.equal(schema.$defs.executionConstraints.properties.runtime_paths_must_be_absolute.const, true);
+  assert.equal(schema.$defs.executionConstraints.properties.import_paths_must_be_absolute.const, true);
+  assert.equal(schema.$defs.executionConstraints.properties.runtime_proof_secret_material.const, "excluded");
+  assert.equal(
+    supportMatrix.upgrade_contract.helper_rows[0].sha256,
+    sha256File(join(root, supportMatrix.upgrade_contract.helper_rows[0].source_path))
+  );
   assert.deepEqual(
     supportMatrix.runtime.required_assets.map(({ platform, arch }) => `${platform}/${arch}`).sort(),
     ["darwin/arm64", "darwin/x86_64"]
@@ -225,7 +341,7 @@ test("release schema and support matrix pin the public contract", () => {
   );
 });
 
-test("built mobile bundle has no top-level Node or Electron import", () => {
+buildTest("built mobile bundle has no top-level Node or Electron import", () => {
   execFileSync(process.execPath, ["esbuild.config.mjs", "production"], { cwd: root, stdio: "pipe" });
   const bundle = readFileSync(join(root, "main.js"), "utf8");
   assert.equal(bundle.includes('require("electron")'), false);
@@ -233,7 +349,7 @@ test("built mobile bundle has no top-level Node or Electron import", () => {
   assert.equal(/(?:^|;)var [A-Za-z_$][\w$]*=require\("(?:fs|path|crypto|child_process|net|tls|http|https|os)"\)/.test(bundle), false);
 });
 
-test("beta plugin and companion assets have no Local REST transport dependency", () => {
+buildTest("beta plugin and companion assets have no Local REST transport dependency", () => {
   execFileSync(process.execPath, ["esbuild.config.mjs", "production"], { cwd: root, stdio: "pipe" });
   const bundle = readFileSync(join(root, "main.js"), "utf8");
   assert.equal(bundle.includes("obsidian-local-rest-api"), false);
@@ -245,9 +361,9 @@ test("beta plugin and companion assets have no Local REST transport dependency",
   assert.equal(config.includes("bridge_sse_path"), false);
 });
 
-test("packaged Companion contains only the loopback Bridge production runtime", () => {
-  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
-  const asset = join(root, "dist", `claudian-remote-companion-${pluginManifest.version}.tar.gz`);
+buildTest("packaged Companion contains only the loopback Bridge production runtime", () => {
+  const directory = buildAssets();
+  const asset = join(directory, `claudian-remote-companion-${pluginManifest.version}.tar.gz`);
   const listing = execFileSync("tar", ["-tzf", asset], { encoding: "utf8" });
   assert.equal(listing.includes("__pycache__"), false);
   assert.equal(listing.includes("companion.py"), false);
@@ -264,9 +380,15 @@ test("packaged Companion contains only the loopback Bridge production runtime", 
   ]) assert.equal(contents.includes(forbidden), false, `forbidden packaged dependency: ${forbidden}`);
 });
 
-test("packaged lifecycle asset contains the guide, Python package, entrypoint, and a content lock", () => {
-  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
-  const asset = join(root, "dist", `claudian-remote-lifecycle-${pluginManifest.version}.tar.gz`);
+buildTest("packaged lifecycle asset contains the guide, Python package, entrypoint, and a content lock", () => {
+  const directory = buildAssets();
+  const relayAsset = join(directory, `claudian-remote-relay-${pluginManifest.version}.tar.gz`);
+  assert.deepEqual(
+    execFileSync("tar", ["-xOzf", relayAsset, "./release/support-matrix.json"]),
+    readFileSync(join(root, "release/support-matrix.json")),
+    "Relay must carry its runtime policy at the path used by gateway.relay.config"
+  );
+  const asset = join(directory, `claudian-remote-lifecycle-${pluginManifest.version}.tar.gz`);
   const listing = execFileSync("tar", ["-tzf", asset], { encoding: "utf8" });
   for (const path of [
     "./CLAUDIAN_REMOTE_INSTALL.md",
@@ -301,49 +423,76 @@ test("packaged lifecycle asset contains the guide, Python package, entrypoint, a
   }
 });
 
-test("component archives are byte-for-byte reproducible", () => {
+buildTest("component archives are byte-for-byte reproducible", () => {
   const assetNames = ["plugin", "companion", "relay", "lifecycle"]
     .map((component) => `claudian-remote-${component}-${pluginManifest.version}.tar.gz`);
-  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
-  const first = Object.fromEntries(assetNames.map((name) => [name, sha256File(join(root, "dist", name))]));
-  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
-  const second = Object.fromEntries(assetNames.map((name) => [name, sha256File(join(root, "dist", name))]));
+  assetNames.push(`claudian-remote-legacy-retirement-helper-${pluginManifest.version}.py`);
+  const directory = buildAssets();
+  const first = Object.fromEntries(assetNames.map((name) => [name, sha256File(join(directory, name))]));
+  buildAssets(directory);
+  const second = Object.fromEntries(assetNames.map((name) => [name, sha256File(join(directory, name))]));
   assert.deepEqual(second, first);
 });
 
 test("tester-facing beta kit is self-contained and its launcher binds the extracted release directory", () => {
-  execFileSync("sh", ["release/packaging/build-assets.sh", "--assets-only"], { cwd: root, stdio: "pipe" });
   const directory = mkdtempSync(join(tmpdir(), "claudian-beta-kit-test-"));
-  const components = ["plugin", "companion", "relay", "lifecycle"];
-  const assets = components.map((name) => {
-    const sourceName = `claudian-remote-${name}-${pluginManifest.version}.tar.gz`;
-    copyFileSync(join(root, "dist", sourceName), join(directory, sourceName));
-    return {
-      name: sourceName,
-      component: name === "lifecycle" ? "installer" : name,
-      sha256: sha256File(join(directory, sourceName)),
-      size: statSync(join(directory, sourceName)).size
-    };
-  });
-  writeFileSync(join(directory, "release-manifest.json"), JSON.stringify({
-    release_version: pluginManifest.version,
-    assets,
-    signature: {
-      algorithm: "ed25519",
-      key_fingerprint: "fixture-fingerprint",
-      value: "fixture-signature"
-    }
-  }));
+  const installerRoot = join(directory, "installer-root");
+  mkdirSync(join(installerRoot, "bin"), { recursive: true });
+  copyFileSync(join(root, "CLAUDIAN_REMOTE_INSTALL.md"), join(installerRoot, "CLAUDIAN_REMOTE_INSTALL.md"));
+  const launcherPath = join(installerRoot, "bin/claudian-remote-lifecycle");
+  writeFileSync(launcherPath, `#!/bin/sh
+release_root=/absolute/release
+bundle_root=/absolute/bundle
+: "\${CLAUDIAN_REMOTE_RELEASE_DIR:-\${bundle_root}}"
+exec python3 -m installer --release-dir "\${release_root}"
+`);
+  chmodSync(launcherPath, 0o755);
+  const installerName = `claudian-remote-lifecycle-${pluginManifest.version}.tar.gz`;
+  execFileSync("sh", [
+    join(root, "release/packaging/deterministic-tar.sh"),
+    installerRoot,
+    join(directory, installerName)
+  ], { stdio: "pipe" });
+  for (const component of ["plugin", "companion", "relay"]) {
+    writeFileSync(
+      join(directory, `claudian-remote-${component}-${pluginManifest.version}.tar.gz`),
+      `deterministic-${component}-fixture\n`
+    );
+  }
+  copyFileSync(
+    join(root, supportMatrix.upgrade_contract.helper_rows[0].source_path),
+    join(directory, supportMatrix.upgrade_contract.helper_rows[0].name)
+  );
+  execFileSync(process.execPath, [
+    "release/packaging/prepare-manifest.mjs",
+    `v${pluginManifest.version}`,
+    directory
+  ], { cwd: root, stdio: "pipe" });
+  const { publicKey, privateKey } = generateKeyPairSync("ed25519");
+  const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
+  const fingerprint = publicKeyFingerprint(publicKeyPem);
+  const manifest = JSON.parse(readFileSync(join(directory, "release-manifest.unsigned.json"), "utf8"));
+  manifest.signature.key_fingerprint = fingerprint;
+  manifest.signature.value = sign(
+    null,
+    Buffer.from(canonicalJson(unsignedManifest(manifest))),
+    privateKey
+  ).toString("base64");
+  writeFileSync(join(directory, "release-manifest.json"), JSON.stringify(manifest));
+  const assets = manifest.assets;
 
-  const kit = prepareInstallKit(directory);
+  const validationOverrides = {
+    trustStore: { keys: [{ fingerprint, status: "trusted", public_key_pem: publicKeyPem }] }
+  };
+  const kit = prepareInstallKit(directory, validationOverrides);
   const firstDigest = sha256File(kit);
   const bootstrapPath = join(directory, `CLAUDIAN_REMOTE_TRUSTED_BOOTSTRAP-${pluginManifest.version}.md`);
   const bootstrap = readFileSync(bootstrapPath, "utf8");
   assert.match(bootstrap, new RegExp(firstDigest));
-  assert.match(bootstrap, /fixture-fingerprint/);
+  assert.match(bootstrap, new RegExp(fingerprint));
   assert.match(bootstrap, /可信通道单独发送/);
   assert.match(bootstrap, /校验成功前，不得解压/);
-  const rebuiltKit = prepareInstallKit(directory);
+  const rebuiltKit = prepareInstallKit(directory, validationOverrides);
   assert.equal(sha256File(rebuiltKit), firstDigest);
   const listing = execFileSync("tar", ["-tzf", kit], { encoding: "utf8" });
   assert.equal(listing.includes("./CLAUDIAN_REMOTE_INSTALL.md"), true);
@@ -352,6 +501,7 @@ test("tester-facing beta kit is self-contained and its launcher binds the extrac
   for (const asset of assets) {
     assert.equal(listing.includes(`./assets/${asset.name}`), true, `missing kit asset: ${asset.name}`);
   }
+  assert.equal(listing.includes("private-key"), false);
   const launcher = execFileSync("tar", ["-xOzf", kit, "./bin/claudian-remote-lifecycle"], { encoding: "utf8" });
   assert.match(launcher, /--release-dir "\$\{release_root\}"/);
   assert.match(launcher, /CLAUDIAN_REMOTE_RELEASE_DIR:-\$\{bundle_root\}/);

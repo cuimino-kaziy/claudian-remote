@@ -70,11 +70,25 @@ class MacOSKeychain:
         account = self._validate(reference)
         if not value:
             raise KeychainError("empty_credential")
+        if not isinstance(value, str) or any(not " " <= char <= "~" for char in value):
+            raise KeychainError("invalid_credential")
+        if not REFERENCE_RE.fullmatch(self.service):
+            raise KeychainError("invalid_keychain_service")
+        # Interactive security reads the complete command from stdin; a bare
+        # trailing -w can succeed while storing an empty password.
+        arguments = ["add-generic-password", "-U", "-s", self.service, "-a", account, "-w", value]
+        command = " ".join('"' + part.replace("\\", "\\\\").replace('"', '\\"') + '"' for part in arguments)
         result = self._run(
-            ["add-generic-password", "-U", "-s", self.service, "-a", account, "-w"],
-            input_text=value + "\n",
+            ["-i"],
+            input_text=command + "\n",
         )
         if result.returncode != 0:
+            raise KeychainError("unable_to_store_credential")
+        try:
+            stored = self.get(account)
+        except KeychainError:
+            raise KeychainError("unable_to_store_credential") from None
+        if stored != value:
             raise KeychainError("unable_to_store_credential")
 
     def delete(self, reference: str) -> None:

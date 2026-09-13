@@ -93,7 +93,7 @@ export class HistoryDrawer {
       const archive = button("claudian-remote-history-action", "归档对话", () => this.onArchive(item.conversation_id));
       archive.textContent = "归档";
       archive.disabled = !controls.historyArchive;
-      archive.title = controls.historyArchive ? "归档对话" : "Claudian 2.0.4 暂不支持归档";
+      archive.title = controls.historyArchive ? "归档对话" : "当前 Claudian 暂不支持归档";
       actions.append(rename, archive);
       wrapper.append(row, actions);
       this.list.append(wrapper);

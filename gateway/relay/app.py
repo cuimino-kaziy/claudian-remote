@@ -848,20 +848,33 @@ async def submit_command(request: web.Request) -> web.Response:
     except (json.JSONDecodeError, TypeError, ValueError):
         return _error("invalid_json", 400)
 
-    if request.app[REJECT_COMMANDS]["value"]:
-        return _error("relay_shutting_down", 503)
-    if mobile_compatibility.get("writable") is not True:
-        return web.json_response(
-            {
-                "ok": False,
-                "type": "command.rejected",
-                "delivery_id": command["delivery_id"],
-                "status": "compatibility_mismatch",
-                "remediation": mobile_compatibility.get("remediation") or "Update required components",
-            },
-            status=409,
-        )
-    routed = await request.app[HUB].presence.route_command(principal.pairing_id, command)
+    async with request.app[AUTH].command_boundary():
+        try:
+            request.app[AUTH].assert_active(
+                principal.credential_id,
+                generation=principal.generation,
+                role="mobile",
+                installation_id=principal.installation_id,
+                vault_id=principal.vault_id,
+                device_id=principal.device_id,
+                endpoint_audience=principal.endpoint_audience,
+            )
+        except AuthError as exc:
+            return _error(exc.code, 403 if exc.code == "wrong_role" else 401)
+        if request.app[REJECT_COMMANDS]["value"]:
+            return _error("relay_shutting_down", 503)
+        if mobile_compatibility.get("writable") is not True:
+            return web.json_response(
+                {
+                    "ok": False,
+                    "type": "command.rejected",
+                    "delivery_id": command["delivery_id"],
+                    "status": "compatibility_mismatch",
+                    "remediation": mobile_compatibility.get("remediation") or "Update required components",
+                },
+                status=409,
+            )
+        routed = await request.app[HUB].presence.route_command(principal.pairing_id, command)
     status = routed.get("status")
     if status == "routed":
         return web.json_response(
@@ -934,6 +947,7 @@ async def mobile_websocket(request: web.Request) -> web.StreamResponse:
     client.compatibility = mobile_compatibility
     client.device_id = grant.device_id
     client.credential_id = grant.credential_id
+    client.credential_generation = grant.generation
     writer = asyncio.create_task(client.writer(), name=f"mobile-writer-{client.connection_id}")
     try:
         client.enqueue_nowait({
@@ -1013,11 +1027,21 @@ async def _mobile_receive(app: web.Application, client: WebSocketClient, ws: web
                             "remediation": client.compatibility.get("remediation") or "Update required components",
                         })
                         continue
-                    if app[REJECT_COMMANDS]["value"]:
-                        client.enqueue_nowait({"type": "command.rejected", "status": "relay_shutting_down"})
-                        continue
                     command = validate_command(frame.get("command") or {}, now=datetime.now(timezone.utc))
-                    routed = await app[HUB].presence.route_command(client.pairing_id, dict(command))
+                    async with app[AUTH].command_boundary():
+                        app[AUTH].assert_active(
+                            client.credential_id,
+                            generation=client.credential_generation,
+                            role="mobile",
+                            installation_id=app[CONFIG].installation_id,
+                            vault_id=app[CONFIG].vault_id,
+                            device_id=client.device_id,
+                            endpoint_audience=app[CONFIG].endpoint_audience,
+                        )
+                        if app[REJECT_COMMANDS]["value"]:
+                            client.enqueue_nowait({"type": "command.rejected", "status": "relay_shutting_down"})
+                            continue
+                        routed = await app[HUB].presence.route_command(client.pairing_id, dict(command))
                     response_type = "relay.accepted" if routed.get("status") == "routed" else "command.rejected"
                     client.enqueue_nowait(
                         {"type": response_type, "delivery_id": command["delivery_id"], **routed}
@@ -1381,6 +1405,7 @@ async def _startup(app: web.Application) -> None:
             raise RuntimeError(str(exc)) from exc
         retirement = LegacyRetirementStore(
             Path(config.legacy_retirement_database_path),
+            profile_id=config.legacy_retirement_profile_id,
             authority_instance_id=config.legacy_retirement_authority_instance_id,
             protocol_version="legacy-retirement/v1",
             runtime_key_id=config.legacy_retirement_runtime_key_id,

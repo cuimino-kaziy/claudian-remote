@@ -1,12 +1,14 @@
 import json
+import subprocess
 
 import pytest
 
+from installer.claudian_remote_lifecycle import keychain as bootstrap_keychain
+from gateway.mac_companion import config as companion_keychain
 from gateway.mac_companion.config import (
     CompanionRuntimeConfig,
     InMemoryKeychain,
     KeychainError,
-    MacOSKeychain,
     load_secret_fields,
 )
 
@@ -53,25 +55,69 @@ def test_plaintext_credentials_are_rejected_from_public_config():
         load_secret_fields({"relay_token": "forbidden", "relay_token_ref": "relay"}, InMemoryKeychain({"relay": "safe"}))
 
 
-def test_keychain_write_uses_stdin_and_never_places_credential_in_argv():
+@pytest.mark.parametrize("backend", [bootstrap_keychain, companion_keychain])
+@pytest.mark.parametrize("credential", ["CANARY-KEYCHAIN-SECRET", '''spaces ' " \\ $HOME `literal`'''])
+def test_keychain_write_uses_stdin_and_never_places_credential_in_argv(monkeypatch, backend, credential):
+    monkeypatch.setattr(backend.sys, "platform", "darwin")
     calls = []
-
-    class Result:
-        returncode = 0
-        stdout = ""
-        stderr = ""
 
     def runner(argv, **kwargs):
         calls.append((argv, kwargs))
-        return Result()
+        return subprocess.CompletedProcess(argv, 0, credential + "\n", "")
 
-    store = MacOSKeychain(runner=runner)
-    store.set("installation:bridge", "CANARY-KEYCHAIN-SECRET")
+    store = backend.MacOSKeychain(runner=runner)
+    store.set("installation:bridge", credential)
 
     argv, kwargs = calls[0]
-    assert "CANARY-KEYCHAIN-SECRET" not in " ".join(argv)
-    assert kwargs["input"] == "CANARY-KEYCHAIN-SECRET\n"
-    assert argv[-1] == "-w"
+    assert argv == ["/usr/bin/security", "-i"]
+    escaped = credential.replace("\\", "\\\\").replace('"', '\\"')
+    assert kwargs["input"] == (
+        '"add-generic-password" "-U" "-s" "com.claudian.remote" '
+        '"-a" "installation:bridge" "-w" "' + escaped + '"\n'
+    )
+    assert kwargs["input"].count("\n") == 1
+    assert len(calls) == 2
+    assert calls[1][0] == [
+        "/usr/bin/security", "find-generic-password", "-s", "com.claudian.remote",
+        "-a", "installation:bridge", "-w",
+    ]
+    assert all(credential not in " ".join(argv) for argv, _ in calls)
+    assert all(not options.get("shell") for _, options in calls)
+
+
+@pytest.mark.parametrize("backend", [bootstrap_keychain, companion_keychain])
+def test_keychain_write_rejects_command_injection_and_non_ascii_before_running(backend):
+    def runner(*_args, **_kwargs):
+        pytest.fail("invalid input must never reach security")
+
+    store = backend.MacOSKeychain(runner=runner)
+    invalid_characters = [chr(code) for code in range(32)] + ["\x7f", "é", "密"]
+    for character in invalid_characters:
+        with pytest.raises(backend.KeychainError, match="invalid[_ ]credential"):
+            store.set("installation:bridge", "CANARY" + character)
+        with pytest.raises(backend.KeychainError, match="invalid[_ ]keychain[_ ]service"):
+            backend.MacOSKeychain(runner=runner, service="service" + character).set(
+                "installation:bridge", "CANARY"
+            )
+        with pytest.raises(backend.KeychainError, match="invalid[_ ]secret[_ ]reference"):
+            store.set("installation:bridge" + character, "CANARY")
+
+
+@pytest.mark.parametrize("backend", [bootstrap_keychain, companion_keychain])
+@pytest.mark.parametrize("write_code,read_code,stored", [(1, 0, "CANARY"), (0, 0, "wrong"), (0, 0, ""), (0, 44, "")])
+def test_keychain_write_requires_exact_readback(monkeypatch, backend, write_code, read_code, stored):
+    monkeypatch.setattr(backend.sys, "platform", "darwin")
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        if argv[-1] == "-i":
+            return subprocess.CompletedProcess(argv, write_code, "", "CANARY")
+        return subprocess.CompletedProcess(argv, read_code, stored + "\n", "CANARY")
+
+    with pytest.raises(backend.KeychainError, match="^unable[_ ]to[_ ]store[_ ]credential$"):
+        backend.MacOSKeychain(runner=runner).set("installation:bridge", "CANARY")
+    assert len(calls) == (1 if write_code else 2)
 
 
 def test_production_runtime_config_is_loopback_bridge_only(tmp_path):
@@ -83,7 +129,7 @@ def test_production_runtime_config_is_loopback_bridge_only(tmp_path):
         "bridge_credential_ref": "bridge",
         "bridge_credential_id": "bridge-a",
         "bridge_host": "127.0.0.1",
-        "bridge_port": 27124,
+        "bridge_port": 27125,
     }), encoding="utf-8")
     config = CompanionRuntimeConfig.from_file(path, InMemoryKeychain({
         "relay": "relay-secret", "bridge": "bridge-secret"

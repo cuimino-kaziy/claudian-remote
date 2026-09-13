@@ -84,7 +84,16 @@ export class MobilePairingController {
   }
 
   async request(url, options) {
-    return decodeResponse(await this.requestImpl({ url, ...options }));
+    let timer;
+    try {
+      const timeout = new Promise((_, reject) => {
+        timer = globalThis.setTimeout(() => reject(new Error("pairing_request_timeout")), 15000);
+      });
+      const response = await Promise.race([this.requestImpl({ url, ...options, throw: false }), timeout]);
+      return await decodeResponse(response);
+    } finally {
+      globalThis.clearTimeout(timer);
+    }
   }
 
   async redeem({ claim_id = null, claim_token = null, short_code = null, ...profileHint } = {}) {

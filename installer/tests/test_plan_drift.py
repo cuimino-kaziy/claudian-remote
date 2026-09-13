@@ -69,7 +69,7 @@ def test_identical_snapshot_yields_identical_canonical_plan():
     assert first["target_compatibility_set"] == {
         "compatibility_set_id": first["compatibility_set_id"],
         "final_topology": "local_tailscale",
-        "required_claudian_version": "2.0.4",
+        "required_claudian_version": "2.2.6",
     }
     assert first["pairing_identity_policy"] == "not_applicable"
     assert first["recovery_policy"] == "rollback_pre_boundary"

@@ -1,4 +1,5 @@
 import { canonicalJson, safeText } from "./stream-normalizer.js";
+import { canSubmitToClaudian, claudianManifest } from "./protocol/compatibility.js";
 
 function outcome(status, command, extra = {}) {
   return { delivery_id: command?.delivery_id || null, status, ...extra };
@@ -25,7 +26,7 @@ export function historyCapabilities(claudian, tab) {
     history_select: typeof conversation?.switchTo === "function",
     history_new: typeof claudian?.createConversation === "function" && typeof conversation?.switchTo === "function",
     history_rename: typeof claudian?.renameConversation === "function",
-    // Claudian 2.0.4 has permanent delete but no archive API. Never map
+    // Supported Claudian versions have permanent delete but no archive API. Never map
     // archive to delete or to updateConversation: its persisted metadata
     // allowlist does not retain an archived marker.
     history_archive: typeof claudian?.archiveConversation === "function"
@@ -53,6 +54,7 @@ export class DesktopAdapter {
     this.receipts = new Map();
     this.pendingApprovals = new Map();
     this.approvalRestorers = new Map();
+    this.steersInFlight = new WeakSet();
   }
 
   bindTransport({ mac_session_id: sessionId, mac_connection_generation: generation }) {
@@ -82,10 +84,14 @@ export class DesktopAdapter {
     const adapter = this;
     const wrapped = async function remoteApproval(toolName, toolInput, description, approvalOptions) {
       const approvalId = `approval-${adapter.clock()}-${Math.random().toString(36).slice(2, 8)}`;
-      const rawOptions = Array.isArray(approvalOptions?.decisionOptions) ? approvalOptions.decisionOptions : [
+      const defaultOptions = claudianManifest(adapter.claudian).version === "2.2.6" ? [
+        { label: "Allow once", value: "allow", decision: "allow" },
+        { label: "Deny", value: "deny", decision: "deny" }
+      ] : [
         { label: "Allow", value: "allow", decision: { type: "approve", scope: "turn" } },
         { label: "Deny", value: "deny", decision: "cancel" }
       ];
+      const rawOptions = Array.isArray(approvalOptions?.decisionOptions) ? approvalOptions.decisionOptions : defaultOptions;
       const options = rawOptions.slice(0, 16).map((item, index) => ({
         id: String(item.value || `option-${index}`), label: safeText(item.label || `Option ${index + 1}`), decision: item.decision
       }));
@@ -94,11 +100,12 @@ export class DesktopAdapter {
       const remote = new Promise((resolve) => { remoteResolve = resolve; });
       adapter.pendingApprovals.set(approvalId, {
         resolve(value) {
-          if (settled) return;
+          const selected = options.find((item) => item.id === value);
+          if (settled || !selected) return false;
           settled = true;
           adapter.pendingApprovals.delete(approvalId);
-          const selected = options.find((item) => item.id === value);
-          remoteResolve(selected?.decision ?? (value === "deny" ? "cancel" : { type: "select-option", value }));
+          remoteResolve(selected.decision ?? { type: "select-option", value });
+          return true;
         }
       });
       const conversationId = currentConversationId(tab);
@@ -163,6 +170,66 @@ export class DesktopAdapter {
     return null;
   }
 
+  async steerWithNativeReceipt(command, tab, input) {
+    const coordinator = input.getExecutionCoordinator?.();
+    const clone = input.cloneQueuedMessage;
+    if (typeof coordinator?.steer !== "function" || typeof clone !== "function") return outcome("capability_missing", command, { capability: "turn_steer" });
+    if (this.steersInFlight.has(input)) return outcome("rejected", command, { error_code: "claudian_steer_busy" });
+    this.steersInFlight.add(input);
+    const conversationId = currentConversationId(tab);
+    const original = coordinator.steer;
+    let message;
+    let pending;
+    let accepted = false;
+    const wrapped = async function (submission, ...args) {
+      const candidate = input.pendingSteersByConversation?.get(conversationId);
+      const matches = message && candidate?.message === message
+        && candidate.coordinator === this && candidate.inputRecordId === submission?.inputRecordId;
+      // Keep the object itself: native correlation may release its map entry
+      // before steerQueuedMessage's void-returning promise settles.
+      if (matches) pending = candidate;
+      const result = await original.call(this, submission, ...args);
+      if (matches && result === true) accepted = true;
+      return result;
+    };
+    try {
+      let queued = tab.state?.queuedMessage;
+      if (command.payload.text) {
+        const sending = input.sendMessage({ content: command.payload.text });
+        queued = tab.state?.queuedMessage;
+        await sending;
+      }
+      if (!queued || tab.state?.queuedMessage !== queued) {
+        return outcome("unknown", command, { error_code: "claudian_steer_unconfirmed" });
+      }
+      if (!tab.state?.isStreaming || !canSubmitToClaudian(this.claudian, tab) || input.canSteerQueuedMessage?.() === false) {
+        return outcome("rejected", command, { error_code: "claudian_steer_busy" });
+      }
+      coordinator.steer = wrapped;
+      // Native 2.2.6 clones this call's queue synchronously, before its first
+      // await. Observe that object only; concurrent desktop Steer is unrelated.
+      const captureClone = function (...args) {
+        const cloned = clone.apply(this, args);
+        message ??= cloned;
+        return cloned;
+      };
+      let steering;
+      input.cloneQueuedMessage = captureClone;
+      try { steering = input.steerQueuedMessage(); }
+      finally { if (input.cloneQueuedMessage === captureClone) input.cloneQueuedMessage = clone; }
+      await steering;
+    } catch {
+      // Native disposition below decides whether a failure was definitely
+      // unsent. Never requeue here: post-handoff failures can already be sent.
+    } finally {
+      if (coordinator.steer === wrapped) coordinator.steer = original;
+      this.steersInFlight.delete(input);
+    }
+    if (accepted || pending?.providerDisposition === "accepted-awaiting-correlation") return outcome("executed", command);
+    if (pending?.providerDisposition === "definitely-unsent") return outcome("rejected", command, { error_code: "claudian_steer_unsent" });
+    return outcome("unknown", command, { error_code: "claudian_steer_unconfirmed" });
+  }
+
   async execute(command) {
     const prior = this.receipts.get(command.delivery_id);
     if (prior) {
@@ -178,6 +245,10 @@ export class DesktopAdapter {
     let result;
     switch (command.command_type) {
       case "message.submit": {
+        if (!canSubmitToClaudian(this.claudian, tab)) {
+          result = outcome("rejected", command, { error_code: "claudian_input_busy" });
+          break;
+        }
         const queued = Boolean(tab.state?.isStreaming);
         const attachmentLines = (Array.isArray(command.payload.attachment_refs) ? command.payload.attachment_refs : [])
           .map((item) => String(item?.vault_path || ""))
@@ -202,6 +273,12 @@ export class DesktopAdapter {
         const capabilities = input.getActiveCapabilities?.() || {};
         if (!capabilities.supportsTurnSteer || typeof input.steerQueuedMessage !== "function") {
           result = outcome("capability_missing", command, { capability: "turn_steer" });
+        } else if (!tab.state?.isStreaming) {
+          result = outcome("already_resolved", command);
+        } else if (!canSubmitToClaudian(this.claudian, tab) || input.canSteerQueuedMessage?.() === false) {
+          result = outcome("rejected", command, { error_code: "claudian_steer_busy" });
+        } else if (claudianManifest(this.claudian).version === "2.2.6") {
+          result = await this.steerWithNativeReceipt(command, tab, input);
         } else {
           if (command.payload.text) await input.sendMessage({ content: command.payload.text });
           await input.steerQueuedMessage();
@@ -212,7 +289,9 @@ export class DesktopAdapter {
       case "approval.respond": {
         const approval = this.pendingApprovals.get(command.target.approval_id || command.payload.approval_id);
         if (!approval) result = outcome("already_resolved", command);
-        else { approval.resolve(command.payload.value); result = outcome("executed", command); }
+        else result = approval.resolve(command.payload.value)
+          ? outcome("executed", command)
+          : outcome("rejected", command, { error_code: "invalid_approval_option" });
         break;
       }
       case "history.list":

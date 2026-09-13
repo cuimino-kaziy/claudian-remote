@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import shutil
 from pathlib import Path
 from typing import Any, Callable, Mapping
@@ -20,10 +21,18 @@ class OwnershipUninstaller:
         *,
         stop_owned_services: Callable[[], None],
         revoke_credentials: Callable[[], None],
+        expected_plan_id: str | None = None,
+        expected_compatibility_set_id: str | None = None,
+        expected_plugin_root: Path | None = None,
+        require_operation_binding: bool = False,
     ) -> None:
         self.layout = layout
         self.stop_owned_services = stop_owned_services
         self.revoke_credentials = revoke_credentials
+        self.expected_plan_id = expected_plan_id
+        self.expected_compatibility_set_id = expected_compatibility_set_id
+        self.expected_plugin_root = expected_plugin_root
+        self.require_operation_binding = require_operation_binding
         self._receipt_plugin_root: Path | None = None
 
     def _load_receipt(self) -> Mapping[str, Any] | None:
@@ -37,6 +46,17 @@ class OwnershipUninstaller:
             raise ValueError("ownership_receipt_invalid")
         if value.get("status") == "uninstalled":
             return None
+        if (
+            self.expected_plan_id is not None
+            and value.get("plan_id") != self.expected_plan_id
+        ):
+            raise ValueError("ownership_receipt_invalid")
+        if (
+            self.expected_compatibility_set_id is not None
+            and value.get("compatibility_set_id")
+            != self.expected_compatibility_set_id
+        ):
+            raise ValueError("ownership_receipt_invalid")
         plugin_root = Path(str(value.get("plugin_root") or ""))
         if not plugin_root.is_absolute() or tuple(plugin_root.parts[-3:]) != (
             ".obsidian",
@@ -44,6 +64,29 @@ class OwnershipUninstaller:
             "claudian-remote",
         ):
             raise ValueError("ownership_receipt_scope_invalid")
+        if self.expected_plugin_root is not None and plugin_root != self.expected_plugin_root:
+            raise ValueError("ownership_receipt_scope_invalid")
+        if self.require_operation_binding:
+            operation_id = str(value.get("operation_id") or "")
+            if re.fullmatch(r"op-[0-9a-f]{32}", operation_id) is None:
+                raise ValueError("ownership_receipt_invalid")
+            try:
+                journal = json.loads(
+                    (self.layout.state / f"{operation_id}.transaction.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+            except (OSError, json.JSONDecodeError) as exc:
+                raise ValueError("ownership_receipt_invalid") from exc
+            if (
+                not isinstance(journal, Mapping)
+                or journal.get("transaction_schema")
+                != "claudian-remote.local-transaction/v1"
+                or journal.get("operation_id") != operation_id
+                or journal.get("plan_id") != self.expected_plan_id
+                or journal.get("phase") != "ready"
+            ):
+                raise ValueError("ownership_receipt_invalid")
         self._receipt_plugin_root = plugin_root
         return value
 
@@ -98,28 +141,59 @@ class OwnershipUninstaller:
             return self._receipt_plugin_root is not None and root == self._receipt_plugin_root
         return False
 
-    def preflight(self) -> dict[str, Any]:
+    def preflight(
+        self,
+        *,
+        require_present: bool = False,
+        required_resource_ids: frozenset[str] = frozenset(),
+    ) -> dict[str, Any]:
         receipt = self._load_receipt()
         if receipt is None:
+            if require_present:
+                # A missing receipt must never satisfy readiness. It is not
+                # evidence of a clean uninstall; an interrupted installation
+                # after activation but before receipt recording must follow the
+                # safe recovery/install path and recreate the receipt. Only the
+                # ordinary uninstall flow (require_present=False) keeps the
+                # idempotent already_uninstalled result.
+                return {
+                    "state": "blocked",
+                    "code": "ownership_receipt_missing",
+                    "resources": [],
+                }
             return {"state": "ready", "code": "already_uninstalled", "resources": []}
         resources = receipt.get("resources")
         if not isinstance(resources, list):
             raise ValueError("ownership_receipt_invalid")
         checked: list[tuple[str, Path, str]] = []
         conflicts: list[str] = []
+        missing: list[str] = []
+        observed: set[str] = set()
         for resource in resources:
             if not isinstance(resource, Mapping) or resource.get("owned") is not True:
                 raise ValueError("ownership_receipt_invalid")
             resource_id = str(resource.get("resource_id") or "")
+            observed.add(resource_id)
             path = Path(str(resource.get("path") or ""))
             if not self._allowed_path(resource_id, path):
                 raise ValueError("ownership_receipt_scope_invalid")
             if not path.exists() and not path.is_symlink():
+                if require_present:
+                    missing.append(resource_id)
                 continue
             policy = str(resource.get("removal_policy") or "remove")
             if policy != "remove_if_empty_after_shipped_files" and tree_digest(path) != str(resource.get("digest") or ""):
                 conflicts.append(resource_id)
             checked.append((resource_id, path, policy))
+        if require_present:
+            missing.extend(sorted(required_resource_ids - observed))
+        if missing:
+            return {
+                "state": "blocked",
+                "code": "owned_resource_missing",
+                "missing_resource_ids": sorted(set(missing)),
+                "resources": [],
+            }
         if conflicts:
             return {
                 "state": "blocked",

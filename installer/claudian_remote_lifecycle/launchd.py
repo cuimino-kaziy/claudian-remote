@@ -147,7 +147,6 @@ class LaunchAgentManager:
             },
             "RunAtLoad": True,
             "KeepAlive": False if role == "availability" else {"SuccessfulExit": False},
-            "ProcessType": "Background",
             "StandardOutPath": str(self.layout.logs / f"{role}.out.log"),
             "StandardErrorPath": str(self.layout.logs / f"{role}.err.log"),
             "Umask": 0o077,

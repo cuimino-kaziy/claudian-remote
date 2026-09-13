@@ -22,6 +22,17 @@ EXPECTED_FIXTURE_IDS = {
     "recovery-required",
 }
 SYNTHETIC_RUNTIME_CREDENTIAL = "synthetic-runtime-canary"
+FROZEN_BETA4_RELEASE_METADATA = {
+    "release_version": "0.2.0-beta.4",
+    "compatibility_set_id": "claudian-remote-0.2.0-beta.4",
+    "components": {
+        "plugin": "0.2.0-beta.4",
+        "companion": "0.2.0-beta.4",
+        "relay": "0.2.0-beta.4",
+        "installer": "0.2.0-beta.4",
+    },
+    "claudian_exact_version": "2.0.4",
+}
 
 
 class CountingTailscale(FakeTailscale):
@@ -70,21 +81,12 @@ def materialize_vault(entry, vault):
 
 
 def test_fixture_bundle_matches_the_frozen_beta4_release_metadata(fixture_bundle):
-    package = json.loads((FIXTURE_PATH.parents[4] / "package.json").read_text(encoding="utf-8"))
-    support = json.loads(
-        (FIXTURE_PATH.parents[4] / "release" / "support-matrix.json").read_text(encoding="utf-8")
-    )
     baseline = fixture_bundle["baseline"]
 
     assert fixture_bundle["fixture_schema"] == "claudian-remote.beta4-entry-states/v1"
-    assert package["version"] == baseline["release_version"]
-    assert support["release_version"] == baseline["release_version"]
-    assert support["components"]["compatibility_set_id"] == baseline["compatibility_set_id"]
     assert {
-        component: support["components"][component]
-        for component in baseline["components"]
-    } == baseline["components"]
-    assert support["claudian"]["exact_version"] == baseline["claudian_exact_version"]
+        field: baseline[field] for field in FROZEN_BETA4_RELEASE_METADATA
+    } == FROZEN_BETA4_RELEASE_METADATA
     assert baseline["topology"] == "local_tailscale"
     assert baseline["checkpoint_schema"] == CHECKPOINT_SCHEMA_V1
 

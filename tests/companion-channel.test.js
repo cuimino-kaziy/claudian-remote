@@ -52,7 +52,7 @@ function fixture() {
 test("fixed-subprotocol challenge auth never puts credentials in URL or subprotocol", async () => {
   let socket;
   const channel = new CompanionChannel({
-    endpoint: "ws://127.0.0.1:27124/bridge",
+    endpoint: "ws://127.0.0.1:27125/bridge",
     credentialProvider: async () => ({ credential_id: "bridge-a", secret: "CANARY-BRIDGE-SECRET" }),
     router: fixture().router,
     webSocketFactory: (url, protocol) => (socket = new FakeSocket(url, protocol)),
@@ -61,7 +61,7 @@ test("fixed-subprotocol challenge auth never puts credentials in URL or subproto
   channel.connect();
   socket.receive({ type: "auth.challenge", nonce: "nonce-a" });
   await new Promise((resolve) => setTimeout(resolve, 0));
-  assert.equal(socket.url, "ws://127.0.0.1:27124/bridge");
+  assert.equal(socket.url, "ws://127.0.0.1:27125/bridge");
   assert.equal(socket.protocol, BRIDGE_SUBPROTOCOL);
   assert.equal(JSON.stringify([socket.url, socket.protocol]).includes("CANARY"), false);
   assert.deepEqual(socket.sent[0], {
@@ -103,7 +103,7 @@ test("unauthenticated channel neither publishes events nor handles requests", as
   let socket;
   const subject = fixture();
   const channel = new CompanionChannel({
-    endpoint: "ws://127.0.0.1:27124/bridge",
+    endpoint: "ws://127.0.0.1:27125/bridge",
     credentialProvider: async () => ({ credential_id: "bridge-a", secret: "secret" }),
     router: subject.router,
     webSocketFactory: (url, protocol) => (socket = new FakeSocket(url, protocol)),

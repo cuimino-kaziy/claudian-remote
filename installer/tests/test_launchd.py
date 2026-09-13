@@ -31,6 +31,7 @@ def test_launch_agents_use_managed_dynamic_paths_and_are_idempotent(tmp_path):
         assert args[0] == str(python)
         assert str(Path.home()) not in path.read_text()
         assert value["WorkingDirectory"] == str(layout.current / "installer")
+        assert value.get("ProcessType", "Standard") == "Standard"
         assert value["EnvironmentVariables"] == {
             "PYTHONPATH": ":".join((
                 str(layout.current / "installer"),

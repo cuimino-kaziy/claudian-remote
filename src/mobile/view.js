@@ -229,7 +229,7 @@ export class ClaudianRemoteMobileView extends ItemView {
 
   async archiveHistory(conversationId) {
     const archived = await this.send("history.archive", { conversation_id: conversationId });
-    if (!archived) new Notice("Claudian 2.0.4 暂不支持归档；没有删除任何对话");
+    if (!archived) new Notice("当前 Claudian 暂不支持归档；没有删除任何对话");
   }
 
   async sendMessage(text, steer) {

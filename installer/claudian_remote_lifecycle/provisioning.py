@@ -252,6 +252,8 @@ class PairingAdminProvisioner:
             "pairing_admin_credential_ref": refs["pairing_admin"],
             "v2_state_path": str(self.layout.state / "companion-v2.json"),
             "upload_temp_dir": str(self.layout.state / "upload-temp"),
+            "upload_connect_timeout_seconds": 10,
+            "upload_read_idle_timeout_seconds": 30,
         }
         # `tokens` is the Relay's historical name for role descriptors. Each
         # descriptor contains only a Keychain `token_ref`, never token bytes,

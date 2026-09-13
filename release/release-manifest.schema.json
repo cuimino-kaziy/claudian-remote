@@ -15,7 +15,8 @@
     "compatibility_set": {"$ref": "#/$defs/compatibilitySet"},
     "assets": {
       "type": "array",
-      "minItems": 4,
+      "minItems": 5,
+      "maxItems": 5,
       "items": {"$ref": "#/$defs/asset"}
     },
     "signature": {"$ref": "#/$defs/signature"}
@@ -32,8 +33,9 @@
     "compatibilitySet": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["plugin", "companion", "relay", "installer", "protocol", "configuration_schema", "claudian", "runtime"],
+      "required": ["id", "plugin", "companion", "relay", "installer", "protocol", "configuration_schema", "claudian", "runtime", "upgrade_contract"],
       "properties": {
+        "id": {"const": "claudian-remote-0.2.0-beta.5"},
         "plugin": {
           "type": "object",
           "additionalProperties": false,
@@ -58,8 +60,9 @@
           }
         },
         "configuration_schema": {"type": "integer", "minimum": 1},
-        "claudian": {"type": "object", "additionalProperties": false, "required": ["exact_version"], "properties": {"exact_version": {"const": "2.0.4"}}},
-        "runtime": {"$ref": "#/$defs/runtimeDistribution"}
+        "claudian": {"type": "object", "additionalProperties": false, "required": ["exact_version", "supported_versions"], "properties": {"exact_version": {"const": "2.2.6"}, "supported_versions": {"const": ["2.0.4", "2.2.6"]}}},
+        "runtime": {"$ref": "#/$defs/runtimeDistribution"},
+        "upgrade_contract": {"$ref": "#/$defs/upgradeContract"}
       }
     },
     "runtimeArtifact": {
@@ -99,6 +102,142 @@
         }
       }
     },
+    "upgradeContract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contract_schema", "journey_capabilities", "result_schema_versions", "proof_schema_versions", "supported_legacy_lineages", "supported_profiles", "final_topology_boundary", "current_update_pairing_rows", "adapter_rows", "helper_rows", "execution_constraints", "packaged_acceptance_rows"],
+      "properties": {
+        "contract_schema": {"const": "claudian-remote.upgrade-capabilities/v1"},
+        "journey_capabilities": {
+          "type": "array",
+          "prefixItems": [
+            {"const": "fresh_install"},
+            {"const": "current_update"},
+            {"const": "legacy_upgrade"}
+          ],
+          "items": false,
+          "minItems": 3,
+          "maxItems": 3
+        },
+        "result_schema_versions": {"const": ["claudian-remote.lifecycle-result/v2"]},
+        "proof_schema_versions": {"const": ["claudian-remote.legacy-retirement-proof/v1"]},
+        "supported_legacy_lineages": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/legacyLineage"}
+        },
+        "supported_profiles": {"const": ["local_tailscale"]},
+        "final_topology_boundary": {"$ref": "#/$defs/finalTopologyBoundary"},
+        "current_update_pairing_rows": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/currentUpdatePairingRow"}
+        },
+        "adapter_rows": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "items": {"$ref": "#/$defs/adapterRow"}
+        },
+        "helper_rows": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/helperRow"}
+        },
+        "execution_constraints": {"$ref": "#/$defs/executionConstraints"},
+        "packaged_acceptance_rows": {
+          "type": "array",
+          "minItems": 3,
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/packagedAcceptanceRow"}
+        }
+      }
+    },
+    "legacyLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["plugin_id", "version", "journey"],
+      "properties": {
+        "plugin_id": {"enum": ["claudian-remote", "whale-agent-bridge"]},
+        "version": {"enum": ["0.2.0-beta.4", "recognized-dogfood-lineage"]},
+        "journey": {"enum": ["current_update", "legacy_upgrade"]}
+      }
+    },
+    "finalTopologyBoundary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode", "relay_location", "exposure", "silent_fallback"],
+      "properties": {
+        "mode": {"const": "local_tailscale"},
+        "relay_location": {"const": "mac_loopback"},
+        "exposure": {"const": "tailscale_serve"},
+        "silent_fallback": {"const": false}
+      }
+    },
+    "currentUpdatePairingRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pairing_identity_policy", "plugin", "companion", "installer"],
+      "properties": {
+        "pairing_identity_policy": {"enum": ["preserve", "rotate"]},
+        "plugin": {"const": "0.2.0-beta.5"},
+        "companion": {"const": "0.2.0-beta.5"},
+        "installer": {"const": "0.2.0-beta.5"}
+      }
+    },
+    "adapterRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["profile_id", "adapter"],
+      "properties": {
+        "profile_id": {"enum": ["dogfood-local-v1", "dogfood-vps-v1"]},
+        "adapter": {"enum": ["local_managed_relay", "legacy_vps_relay"]}
+      }
+    },
+    "helperRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["component", "name", "source_path", "delivery", "sha256"],
+      "properties": {
+        "component": {"const": "legacy_retirement_helper"},
+        "name": {"const": "claudian-remote-legacy-retirement-helper-0.2.0-beta.5.py"},
+        "source_path": {"const": "gateway/relay/legacy_retirement.py"},
+        "delivery": {"const": "signed_kit_asset"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "executionConstraints": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["runtime_paths_must_be_absolute", "runtime_exact_paths", "runtime_prefixes", "import_paths_must_be_absolute", "import_prefixes", "developer_checkout_dependency", "unbound_network_dependency", "runtime_proof_secret_material"],
+      "properties": {
+        "runtime_paths_must_be_absolute": {"const": true},
+        "runtime_exact_paths": {"const": ["/usr/bin/python3", "/usr/local/bin/python3"]},
+        "runtime_prefixes": {"const": ["/opt/claudian-remote/runtime"]},
+        "import_paths_must_be_absolute": {"const": true},
+        "import_prefixes": {"const": ["/opt/claudian-remote", "/var/lib/claudian-remote/operations"]},
+        "developer_checkout_dependency": {"const": "forbidden"},
+        "unbound_network_dependency": {"const": "forbidden"},
+        "runtime_proof_secret_material": {"const": "excluded"}
+      }
+    },
+    "packagedAcceptanceRow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["journey", "components"],
+      "properties": {
+        "journey": {"enum": ["fresh_install", "current_update", "legacy_upgrade"]},
+        "components": {
+          "type": "array",
+          "minItems": 4,
+          "maxItems": 5,
+          "items": {"enum": ["plugin", "companion", "relay", "installer", "legacy_retirement_helper"]}
+        }
+      }
+    },
     "lock": {
       "type": "object",
       "additionalProperties": false,
@@ -111,7 +250,7 @@
       "required": ["name", "component", "sha256", "size", "license", "dependency_locks"],
       "properties": {
         "name": {"type": "string", "minLength": 1},
-        "component": {"enum": ["plugin", "companion", "relay", "installer"]},
+        "component": {"enum": ["plugin", "companion", "relay", "installer", "legacy_retirement_helper"]},
         "sha256": {"$ref": "#/$defs/sha256"},
         "size": {"type": "integer", "minimum": 1},
         "license": {"enum": ["MIT", "AGPL-3.0-only"]},

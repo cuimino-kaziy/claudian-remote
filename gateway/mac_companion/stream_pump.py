@@ -575,6 +575,8 @@ class AsyncMacCompanion:
                     self.config.relay_token,
                     Path(self.config.upload_temp_dir),
                     stream_bytes=self.config.upload_stream_bytes,
+                    connect_timeout_seconds=self.config.upload_connect_timeout_seconds,
+                    read_idle_timeout_seconds=self.config.upload_read_idle_timeout_seconds,
                 ).start()
                 while not self.stop_event.is_set():
                     socket: Optional[RelayWebSocket] = None

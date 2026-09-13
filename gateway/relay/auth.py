@@ -7,6 +7,7 @@ import hashlib
 import secrets
 import threading
 import time
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional, Protocol
 
@@ -50,6 +51,7 @@ class TokenAuthenticator:
     def __init__(self, tokens: Iterable[Principal]) -> None:
         self._records: Dict[str, CredentialRecord] = {}
         self._lock = threading.RLock()
+        self._command_boundary = asyncio.Lock()
         for item in tokens:
             token = str(getattr(item, "token", ""))
             if not token:
@@ -72,6 +74,12 @@ class TokenAuthenticator:
                     generation=int(getattr(item, "generation", 1)),
                 )
             )
+
+    @asynccontextmanager
+    async def command_boundary(self):
+        """Serialize command authorization/dispatch with device revocation."""
+        async with self._command_boundary:
+            yield
 
     @staticmethod
     def digest(token: str) -> str:

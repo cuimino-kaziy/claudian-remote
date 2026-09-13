@@ -83,6 +83,100 @@ test("paused upload can resume only inside the original Mac connection generatio
   await assert.rejects(() => controller.resume(), /session_changed/);
 });
 
+test("upload creation has a deadline and a later upload can start", async () => {
+  let stall = true;
+  const controller = new AttachmentController({
+    baseUrl: "https://relay.example",
+    tokenProvider: () => "token",
+    getSession: () => ({ mac_session_id: "mac", mac_connection_generation: 1 }),
+    requestTimeoutMs: 10,
+    fetchImpl: async (url) => {
+      if (stall && url.endsWith("/api/v2/uploads")) return new Promise(() => {});
+      if (url.endsWith("/api/v2/uploads")) return response(201, { upload_id: "upload-after-timeout", next_offset: 0, next_index: 0 });
+      if (url.endsWith("/finalize")) return response(200, { ok: true });
+      throw new Error(`unexpected ${url}`);
+    }
+  });
+
+  await assert.rejects(() => controller.upload(namedBlob(new Uint8Array())), /upload_create_timeout/);
+  assert.equal(controller.snapshot()[0].status, "failed");
+  stall = false;
+  await controller.upload(namedBlob(new Uint8Array()));
+  assert.equal(controller.snapshot()[0].status, "importing");
+});
+
+test("chunk request timeout pauses and resumes the same upload", async () => {
+  let stall = true;
+  const controller = new AttachmentController({
+    baseUrl: "https://relay.example",
+    tokenProvider: () => "token",
+    getSession: () => ({ mac_session_id: "mac", mac_connection_generation: 1 }),
+    requestTimeoutMs: 10,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/api/v2/uploads")) return response(201, { upload_id: "upload-chunk-timeout", next_offset: 0, next_index: 0 });
+      if (url.includes("/chunks/") && stall) return new Promise(() => {});
+      if (url.includes("/chunks/")) return response(200, { next_offset: options.body.byteLength, next_index: 1 });
+      if (url.endsWith("/finalize")) return response(200, { ok: true });
+      throw new Error(`unexpected ${url}`);
+    }
+  });
+
+  await assert.rejects(() => controller.upload(namedBlob(new Uint8Array([1, 2, 3]))), /upload_chunk_timeout/);
+  assert.equal(controller.snapshot()[0].status, "paused");
+  stall = false;
+  await controller.resume();
+  assert.equal(controller.snapshot()[0].status, "importing");
+});
+
+test("finalize request timeout pauses and resumes the same upload", async () => {
+  let stall = true;
+  const controller = new AttachmentController({
+    baseUrl: "https://relay.example",
+    tokenProvider: () => "token",
+    getSession: () => ({ mac_session_id: "mac", mac_connection_generation: 1 }),
+    requestTimeoutMs: 10,
+    fetchImpl: async (url) => {
+      if (url.endsWith("/api/v2/uploads")) return response(201, { upload_id: "upload-finalize-timeout", next_offset: 0, next_index: 0 });
+      if (url.endsWith("/finalize") && stall) return new Promise(() => {});
+      if (url.endsWith("/finalize")) return response(200, { ok: true });
+      throw new Error(`unexpected ${url}`);
+    }
+  });
+
+  await assert.rejects(() => controller.upload(namedBlob(new Uint8Array())), /upload_finalize_timeout/);
+  assert.equal(controller.snapshot()[0].status, "paused");
+  stall = false;
+  await controller.resume();
+  assert.equal(controller.snapshot()[0].status, "importing");
+});
+
+test("delete request deadline never blocks cancellation cleanup", async () => {
+  let deleteSignal;
+  const controller = new AttachmentController({
+    baseUrl: "https://relay.example",
+    tokenProvider: () => "token",
+    getSession: () => ({ mac_session_id: "mac", mac_connection_generation: 1 }),
+    requestTimeoutMs: 10,
+    fetchImpl: async (url, options) => {
+      if (url.endsWith("/api/v2/uploads")) return response(201, { upload_id: "upload-delete-timeout", next_offset: 0, next_index: 0 });
+      if (url.includes("/chunks/")) throw new Error("network_lost");
+      if (options.method === "DELETE") {
+        deleteSignal = options.signal;
+        return new Promise(() => {});
+      }
+      throw new Error(`unexpected ${url}`);
+    }
+  });
+  await assert.rejects(() => controller.upload(namedBlob(new Uint8Array([1]))), /network_lost/);
+
+  await Promise.race([
+    controller.cancel(),
+    new Promise((_, reject) => setTimeout(() => reject(new Error("cancel_deadline_missing")), 100))
+  ]);
+  assert.equal(deleteSignal?.aborted, true);
+  assert.deepEqual(controller.snapshot(), []);
+});
+
 test("cancel during hashing stops before an upload request can start", async () => {
   const read = deferred();
   const calls = [];

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from installer.claudian_remote_lifecycle.checkpoint import CheckpointStore
 from installer.claudian_remote_lifecycle.inspect import Inspector
 from installer.claudian_remote_lifecycle.model import (
@@ -16,7 +18,9 @@ from installer.claudian_remote_lifecycle.model import (
 )
 from installer.claudian_remote_lifecycle.operation_arbitration import (
     OperationArbitrator,
+    _read_transaction_companion,
 )
+from installer.claudian_remote_lifecycle import transaction as transaction_module
 from installer.claudian_remote_lifecycle.plan import PlanBuilder, PlanStore
 from installer.claudian_remote_lifecycle.provisioning import SecureInputFile
 from installer.claudian_remote_lifecycle.human_gates import HumanGateController
@@ -26,6 +30,12 @@ from installer.claudian_remote_lifecycle.legacy_authority import (
 )
 from installer.tests.test_compatibility_decode import _artifact_set
 from installer.tests.test_inspect import FakeProbe
+from installer.tests.test_runtime_transaction import (
+    current_update_plan,
+    dependencies,
+    legacy_plan,
+    plan as runtime_plan,
+)
 
 
 def _rewrite(path, value):
@@ -408,6 +418,49 @@ def test_consistent_rolled_back_operation_is_terminal_without_deleting_sources(t
     assert {name: path.read_bytes() for name, path in paths.items()} == before
 
 
+@pytest.mark.parametrize("migration", [False, True])
+def test_v1_arbitration_reads_explicit_runtime_journal_directory(tmp_path, migration):
+    lifecycle, journals = tmp_path / "lifecycle", tmp_path / "state"
+    paths, values = _artifact_set(lifecycle, migration=migration)
+    journals.mkdir()
+    for name in ("local_transaction_path", "legacy_migration_path"):
+        if name in paths:
+            paths[name] = paths[name].rename(journals / paths[name].name)
+    before = {name: path.read_bytes() for name, path in paths.items()}
+
+    result = OperationArbitrator(lifecycle, journal_dir=journals).inspect()
+
+    assert result.operation_id == values["checkpoint"]["operation_id"]
+    assert result.recommended_action == ("manual_recovery_required" if migration else "rollback")
+    assert {name: path.read_bytes() for name, path in paths.items()} == before
+
+
+@pytest.mark.parametrize("invalid", ["duplicate", "orphan", "symlink"])
+def test_split_journal_directory_rejects_ambiguous_or_unsafe_artifacts(tmp_path, invalid):
+    lifecycle, journals = tmp_path / "lifecycle", tmp_path / "state"
+    paths, _values = _artifact_set(lifecycle, migration=False)
+    journals.mkdir()
+    source = paths["local_transaction_path"]
+    if invalid == "duplicate":
+        (journals / source.name).write_bytes(source.read_bytes())
+    elif invalid == "orphan":
+        (journals / ("op-" + "c" * 32 + ".transaction.json")).write_bytes(source.read_bytes())
+    else:
+        (journals / source.name).symlink_to(source)
+
+    result = OperationArbitrator(lifecycle, journal_dir=journals).inspect()
+
+    assert result.reason_code == "prior_operation_artifact_invalid"
+
+
+def test_journal_without_lifecycle_directory_is_not_clear(tmp_path):
+    journals = tmp_path / "state"
+    journals.mkdir()
+    (journals / ("op-" + "a" * 32 + ".transaction.json")).write_text("{}")
+    result = OperationArbitrator(tmp_path / "lifecycle", journal_dir=journals).inspect()
+    assert result.reason_code == "prior_operation_artifact_invalid"
+
+
 def test_multiple_unfinished_operations_fail_closed_without_mtime_selection(tmp_path):
     first_paths, first_values = _artifact_set(tmp_path / "first", migration=False)
     second_paths, second_values = _artifact_set(tmp_path / "second", migration=False)
@@ -428,6 +481,14 @@ def test_multiple_unfinished_operations_fail_closed_without_mtime_selection(tmp_
     assert result.state == "blocked"
     assert result.reason_code == "multiple_unfinished_operations"
     assert result.recommended_action == "manual_recovery_required"
+
+    recovery = OperationArbitrator(state).inspect(operation_id=second_operation)
+    assert recovery.operation_id == second_operation
+    assert recovery.recommended_action == "rollback"
+    assert recovery.prior_operation_terminal is False
+    orphan = state / ("op-" + "c" * 32 + ".transaction.json")
+    orphan.write_text("{}")
+    assert OperationArbitrator(state).inspect(operation_id=second_operation).reason_code == "prior_operation_artifact_invalid"
 
 
 def test_orphan_or_invalid_v1_artifact_blocks_new_operations(tmp_path):
@@ -465,7 +526,6 @@ def test_ready_v2_operation_is_terminal_and_keeps_evidence(tmp_path):
     path = CheckpointStore(tmp_path).path_for(checkpoint["operation_id"])
     completed = (
         "staging",
-        "legacy_plugin_migration",
         "secure_provisioning",
         "plugin_activation",
         "launchd",
@@ -907,6 +967,65 @@ def test_valid_v2_transaction_bridge_keeps_original_resume_owner(tmp_path):
     assert result.recommended_action == "resume"
 
 
+@pytest.mark.parametrize("journey", ["fresh_install", "legacy_upgrade", "current_update"])
+@pytest.mark.parametrize(
+    "final_phase",
+    ["ready", "await_plugin_bootstrap", "await_pairing", "rolled_back", "recovery_required"],
+)
+def test_transaction_reader_accepts_actual_writer_progress(
+    tmp_path, monkeypatch, journey, final_phase,
+):
+    deps, _ = dependencies(tmp_path)
+    transaction = transaction_module.LocalTailscaleTransaction(deps)
+    plan = {**runtime_plan(), "journey": journey}
+    if journey == "current_update":
+        assert transaction.install(runtime_plan(), operation_id="op-" + "1" * 32)["state"] == "ready"
+        plan = current_update_plan()
+    elif journey == "legacy_upgrade":
+        plan = legacy_plan()
+        legacy = deps.vault_path(plan["vault_id"]) / ".obsidian/plugins/whale-agent-bridge"
+        legacy.mkdir(parents=True)
+        (legacy / "manifest.json").write_text(json.dumps({"id": "whale-agent-bridge"}))
+
+    deps.bridge_ready_probe = lambda: final_phase != "await_plugin_bootstrap"
+    deps.pairing_probe = lambda: final_phase != "await_pairing"
+    if journey == "current_update" and final_phase == "await_pairing":
+        deps.active_pairing_device_ids = lambda: set()
+    deps.health_probe = lambda: final_phase not in {"rolled_back", "recovery_required"}
+    if final_phase == "recovery_required":
+        def fail_cleanup():
+            raise RuntimeError("fixture_cleanup_failed")
+        deps.launchd.remove_local_agents = fail_cleanup
+    operation_id = "op-" + "2" * 32
+    snapshots = []
+    original_write = transaction_module.write_private_json
+
+    def capture(path, value):
+        original_write(path, value)
+        if path.name == f"{operation_id}.transaction.json":
+            snapshots.append(json.loads(path.read_text()))
+
+    monkeypatch.setattr(transaction_module, "write_private_json", capture)
+    transaction.install(plan, operation_id=operation_id)
+    assert snapshots[-1]["phase"] == final_phase
+    assert {"activation_started", "plugin_activated", "after_activation"} <= {
+        value["phase"] for value in snapshots
+    }
+    captured = tmp_path / "captured.transaction.json"
+    for value in snapshots:
+        _rewrite(captured, value)
+        before = captured.read_bytes()
+        assert _read_transaction_companion(
+            captured, operation_id=operation_id, plan_id=plan["plan_id"], journey=journey,
+        ) == value
+        assert captured.read_bytes() == before
+    wrong_journey = "fresh_install" if journey == "legacy_upgrade" else "legacy_upgrade"
+    with pytest.raises(ValueError, match="invalid_transaction_companion_progress"):
+        _read_transaction_companion(
+            captured, operation_id=operation_id, plan_id=plan["plan_id"], journey=wrong_journey,
+        )
+
+
 def test_v2_recovery_required_transaction_projects_owned_rollback(tmp_path):
     _plan, checkpoint = _create_v2_operation(tmp_path)
     _write_transaction(
@@ -982,3 +1101,36 @@ def test_fresh_v2_rejects_legacy_migration_companion(tmp_path):
 
     assert result.state == "blocked"
     assert result.reason_code == "prior_operation_artifact_invalid"
+
+
+@pytest.mark.parametrize("fault", [None, "wrong_code", "no_activation", "wrong_plan"])
+def test_known_fresh_pairing_drift_checkpoint_keeps_only_its_verified_resume_owner(tmp_path, fault):
+    plan, checkpoint = _create_v2_operation(tmp_path)
+    completed = ["staging", "secure_provisioning", "plugin_activation", "launchd", "tailscale_serve", "verified"]
+    _write_transaction(tmp_path, checkpoint, phase="await_pairing", completed=completed,
+        activation_started=True, plugin_activated=True)
+    store = CheckpointStore(tmp_path)
+    store.update(checkpoint["operation_id"], state="blocked", phase="preparation", completed_phases=completed,
+        active_gate=None, recovery_policy="not_applicable", cancellation_available=False, next_actions=[],
+        effect_summary={"credential_effect": "not_applicable", "effect_codes": ["environment_drift"],
+            "local_effect": "unchanged", "mutation_performed": False, "owned_resource_count": 0,
+            "remote_effect": "not_applicable"})
+    if fault == "wrong_code":
+        broken = store.read(checkpoint["operation_id"])
+        broken["effect_summary"]["effect_codes"] = ["unknown_error"]
+        store.write(broken)
+    elif fault:
+        journal = tmp_path / f'{checkpoint["operation_id"]}.transaction.json'
+        value = json.loads(journal.read_text())
+        if fault == "no_activation": value["activation_started"] = False
+        if fault == "wrong_plan": value["plan_id"] = "plan-" + "f" * 64
+        _rewrite(journal, value)
+    before = (tmp_path / f'{checkpoint["operation_id"]}.json').read_bytes()
+    result = OperationArbitrator(tmp_path).inspect()
+    assert (tmp_path / f'{checkpoint["operation_id"]}.json').read_bytes() == before
+    if fault:
+        assert result.state == "blocked"
+    else:
+        assert result.recommended_action == "resume"
+        assert result.operation_id == checkpoint["operation_id"]
+        assert result.checkpoint["effect_summary"]["mutation_performed"] is True

@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 
+LEGACY_RETIREMENT_PROFILE_IDS = ("dogfood-local-v1", "dogfood-vps-v1")
 _SAFE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,191}")
 _PROTOCOL_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,95}")
 _OPERATION_ID = re.compile(r"op-[0-9a-f]{32}")
@@ -210,8 +211,12 @@ class LegacyRetirementStore:
         runtime_key: bytes,
         restart_epoch: int,
         clock: Callable[[], int],
+        profile_id: str = "dogfood-local-v1",
     ) -> None:
         self.path = Path(path)
+        if profile_id not in LEGACY_RETIREMENT_PROFILE_IDS:
+            raise ValueError("legacy_retirement_profile_invalid")
+        self.profile_id = profile_id
         self.authority_instance_id = _safe_id(
             authority_instance_id, "legacy_authority_instance_invalid"
         )
@@ -378,7 +383,7 @@ class LegacyRetirementStore:
         return {
             "authority": {
                 "authority_schema": "claudian-remote.legacy-authority/v1",
-                "profile_id": "dogfood-local-v1",
+                "profile_id": self.profile_id,
                 "protocol_version": self.protocol_version,
                 "authority_instance_id": self.authority_instance_id,
                 "authority_origin": authority_origin,

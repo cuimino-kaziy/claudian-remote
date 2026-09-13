@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import math
 import os
 import shutil
 import uuid
@@ -43,13 +44,32 @@ class UploadReceiver:
         temp_root: Path,
         *,
         stream_bytes: int = STREAM_BYTES,
+        connect_timeout_seconds: float = 10.0,
+        read_idle_timeout_seconds: float = 30.0,
     ) -> None:
         self.session = session
         self.relay_base_url = relay_base_url.rstrip("/")
         self.relay_token = relay_token
         self.temp_root = Path(temp_root).expanduser()
         self.stream_bytes = min(max(4096, int(stream_bytes)), STREAM_BYTES)
+        connect_timeout = float(connect_timeout_seconds)
+        read_idle_timeout = float(read_idle_timeout_seconds)
+        if (
+            not math.isfinite(connect_timeout)
+            or not math.isfinite(read_idle_timeout)
+            or connect_timeout <= 0
+            or read_idle_timeout <= 0
+        ):
+            raise ValueError("invalid_upload_download_timeout")
+        self.request_timeout = aiohttp.ClientTimeout(
+            total=None,
+            connect=min(connect_timeout, 300.0),
+            sock_connect=min(connect_timeout, 300.0),
+            sock_read=min(read_idle_timeout, 300.0),
+        )
         self._paths: Dict[str, Path] = {}
+        self._active: set[str] = set()
+        self._cancelled: set[str] = set()
         self._lock = asyncio.Lock()
 
     async def start(self) -> "UploadReceiver":
@@ -81,74 +101,99 @@ class UploadReceiver:
         part = self.temp_root / f"{upload_id}.part"
         ready = self.temp_root / f"{upload_id}.blob"
         async with self._lock:
-            await asyncio.to_thread(part.unlink, missing_ok=True)
-            await asyncio.to_thread(ready.unlink, missing_ok=True)
-            descriptor = await asyncio.to_thread(os.open, part, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            handle = os.fdopen(descriptor, "wb", buffering=0)
-            hasher = hashlib.sha256()
-            received = 0
-            url = self.relay_base_url + "/api/v2/uploads/" + quote(upload_id, safe="") + "/content"
-            headers = {
-                "Authorization": "Bearer " + self.relay_token,
-                "Upload-Session-ID": mac_session_id,
-                "Upload-Connection-Generation": str(mac_connection_generation),
-                "Accept": "application/octet-stream",
-            }
+            if upload_id in self._active:
+                raise UploadReceiveError("upload_download_in_progress")
+            self._active.add(upload_id)
+            self._cancelled.discard(upload_id)
+            previous = self._paths.pop(upload_id, None)
             try:
-                async with self.session.get(url, headers=headers, timeout=None) as response:
-                    if response.status != 200:
-                        raise UploadReceiveError("upload_download_rejected")
-                    if response.content_length is not None and response.content_length != total:
-                        raise UploadReceiveError("upload_download_size_mismatch")
-                    async for chunk in response.content.iter_chunked(self.stream_bytes):
-                        if not is_current():
-                            raise UploadReceiveError("stale_upload_connection")
-                        received += len(chunk)
-                        if received > total:
-                            raise UploadReceiveError("upload_download_size_mismatch")
-                        hasher.update(chunk)
-                        if chunk:
-                            await asyncio.to_thread(handle.write, chunk)
-                if received != total:
+                if previous is not None:
+                    await asyncio.to_thread(previous.unlink, missing_ok=True)
+                await asyncio.to_thread(part.unlink, missing_ok=True)
+                await asyncio.to_thread(ready.unlink, missing_ok=True)
+                descriptor = await asyncio.to_thread(
+                    os.open, part, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                )
+            except Exception:
+                self._active.discard(upload_id)
+                raise
+        handle = os.fdopen(descriptor, "wb", buffering=0)
+        hasher = hashlib.sha256()
+        received = 0
+        url = self.relay_base_url + "/api/v2/uploads/" + quote(upload_id, safe="") + "/content"
+        headers = {
+            "Authorization": "Bearer " + self.relay_token,
+            "Upload-Session-ID": mac_session_id,
+            "Upload-Connection-Generation": str(mac_connection_generation),
+            "Accept": "application/octet-stream",
+        }
+        try:
+            async with self.session.get(url, headers=headers, timeout=self.request_timeout) as response:
+                if response.status != 200:
+                    raise UploadReceiveError("upload_download_rejected")
+                if response.content_length is not None and response.content_length != total:
                     raise UploadReceiveError("upload_download_size_mismatch")
-                if hasher.hexdigest() != digest:
-                    raise UploadReceiveError("upload_download_hash_mismatch")
-                await asyncio.to_thread(os.fsync, handle.fileno())
-                await asyncio.to_thread(handle.close)
-                handle = None
+                async for chunk in response.content.iter_chunked(self.stream_bytes):
+                    if not is_current():
+                        raise UploadReceiveError("stale_upload_connection")
+                    received += len(chunk)
+                    if received > total:
+                        raise UploadReceiveError("upload_download_size_mismatch")
+                    hasher.update(chunk)
+                    if chunk:
+                        await asyncio.to_thread(handle.write, chunk)
+            if received != total:
+                raise UploadReceiveError("upload_download_size_mismatch")
+            if hasher.hexdigest() != digest:
+                raise UploadReceiveError("upload_download_hash_mismatch")
+            await asyncio.to_thread(os.fsync, handle.fileno())
+            await asyncio.to_thread(handle.close)
+            handle = None
+            async with self._lock:
+                if upload_id in self._cancelled:
+                    raise UploadReceiveError("upload_download_cancelled")
                 await asyncio.to_thread(os.replace, part, ready)
                 await asyncio.to_thread(os.chmod, ready, 0o600)
                 self._paths[upload_id] = ready
-                return DownloadedUpload(
-                    upload_id=upload_id,
-                    path=ready,
-                    display_name=str(upload.get("display_name") or "upload")[:255],
-                    content_type=str(upload.get("content_type") or "application/octet-stream")[:255],
-                    total_bytes=total,
-                    sha256=digest,
-                )
-            except asyncio.CancelledError:
-                raise
-            except UploadReceiveError:
-                raise
-            except Exception as exc:
-                raise UploadReceiveError("upload_download_failed") from exc
-            finally:
-                if handle is not None:
-                    await asyncio.to_thread(handle.close)
-                if upload_id not in self._paths:
+            return DownloadedUpload(
+                upload_id=upload_id,
+                path=ready,
+                display_name=str(upload.get("display_name") or "upload")[:255],
+                content_type=str(upload.get("content_type") or "application/octet-stream")[:255],
+                total_bytes=total,
+                sha256=digest,
+            )
+        except asyncio.CancelledError:
+            raise
+        except UploadReceiveError:
+            raise
+        except (asyncio.TimeoutError, aiohttp.ServerTimeoutError) as exc:
+            raise UploadReceiveError("upload_download_timeout") from exc
+        except Exception as exc:
+            raise UploadReceiveError("upload_download_failed") from exc
+        finally:
+            if handle is not None:
+                await asyncio.to_thread(handle.close)
+            async with self._lock:
+                self._active.discard(upload_id)
+                self._cancelled.discard(upload_id)
+                if self._paths.get(upload_id) != ready:
                     await asyncio.to_thread(part.unlink, missing_ok=True)
                     await asyncio.to_thread(ready.unlink, missing_ok=True)
 
     async def cleanup(self, upload_id: str) -> None:
         async with self._lock:
+            if upload_id in self._active:
+                self._cancelled.add(upload_id)
             path = self._paths.pop(upload_id, None)
             if path is not None:
                 await asyncio.to_thread(path.unlink, missing_ok=True)
             await asyncio.to_thread((self.temp_root / f"{upload_id}.part").unlink, missing_ok=True)
+            await asyncio.to_thread((self.temp_root / f"{upload_id}.blob").unlink, missing_ok=True)
 
     async def cleanup_all(self) -> None:
         async with self._lock:
+            self._cancelled.update(self._active)
             self._paths.clear()
             await asyncio.to_thread(self._remove_contents)
 

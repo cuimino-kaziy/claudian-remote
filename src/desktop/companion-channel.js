@@ -1,5 +1,5 @@
 export const BRIDGE_SUBPROTOCOL = "claudian.remote.bridge.v1";
-export const DEFAULT_BRIDGE_ENDPOINT = "ws://127.0.0.1:27124/bridge";
+export const DEFAULT_BRIDGE_ENDPOINT = "ws://127.0.0.1:27125/bridge";
 const MAX_PENDING_MANAGEMENT = 16;
 
 const encoder = new TextEncoder();

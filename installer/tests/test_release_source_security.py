@@ -17,54 +17,105 @@ from installer.claudian_remote_lifecycle.runtime import (
 )
 
 
+ROOT = Path(__file__).resolve().parents[2]
+SUPPORT_MATRIX = json.loads(
+    (ROOT / "release" / "support-matrix.json").read_text(encoding="utf-8")
+)
+
+
 def runtime_distribution(*, delivery="immutable_upstream_asset"):
-    targets = []
-    for arch in ("arm64", "x86_64"):
-        targets.append({
-            "platform": "darwin",
-            "arch": arch,
-            "python": {
-                "version": "3.12.11",
-                "url": f"https://downloads.example/python-{arch}.tar.gz",
-                "sha256": "a" * 64,
-            },
-            "uv": {
-                "version": "0.10.12",
-                "url": f"https://downloads.example/uv-{arch}.tar.gz",
-                "sha256": "b" * 64,
-            },
-        })
+    runtime = SUPPORT_MATRIX["runtime"]
     return {
-        "python": "3.12.11",
-        "uv": "0.10.12",
+        "python": runtime["python"],
+        "uv": runtime["uv"],
         "delivery": delivery,
-        "assets": targets,
+        "assets": json.loads(json.dumps(runtime["required_assets"])),
     }
 
 
-def write_release(tmp_path: Path, *, name="plugin.tar.gz", component="plugin", version="0.2.0-beta.1"):
+def write_release(
+    tmp_path: Path,
+    *,
+    name=None,
+    component="plugin",
+    version="0.2.0-beta.5",
+):
     release = tmp_path / "release"
     assets = release / "assets"
     assets.mkdir(parents=True)
-    payload = b"signed asset"
-    if "/" not in name and name not in {".", ".."}:
-        (assets / name).write_bytes(payload)
+    rows = [
+        ("plugin", f"claudian-remote-plugin-{version}.tar.gz", "package-lock.json"),
+        ("companion", f"claudian-remote-companion-{version}.tar.gz", "gateway/requirements.lock"),
+        ("relay", f"claudian-remote-relay-{version}.tar.gz", "gateway/requirements.lock"),
+        ("installer", f"claudian-remote-lifecycle-{version}.tar.gz", "release/lifecycle-dependencies.lock.json"),
+        (
+            "legacy_retirement_helper",
+            f"claudian-remote-legacy-retirement-helper-{version}.py",
+            "gateway/requirements.lock",
+        ),
+    ]
+    if name is not None:
+        rows[0] = (component, name, rows[0][2])
+    manifest_assets = []
+    for row_component, row_name, lock_path in rows:
+        payload = (
+            (ROOT / "gateway" / "relay" / "legacy_retirement.py").read_bytes()
+            if row_component == "legacy_retirement_helper"
+            else f"signed {row_component} asset".encode()
+        )
+        if "/" not in row_name and row_name not in {".", ".."}:
+            (assets / row_name).write_bytes(payload)
+        manifest_assets.append(
+            {
+                "name": row_name,
+                "component": row_component,
+                "size": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "license": (
+                    "AGPL-3.0-only"
+                    if row_component
+                    in {"relay", "legacy_retirement_helper"}
+                    else "MIT"
+                ),
+                "dependency_locks": [
+                    {
+                        "path": lock_path,
+                        "sha256": hashlib.sha256(
+                            (ROOT / lock_path).read_bytes()
+                        ).hexdigest(),
+                    }
+                ],
+            }
+        )
     fingerprint = "f" * 64
     manifest = {
         "schema_version": 1,
         "release_version": version,
+        "release_tag": f"v{version}",
+        "source_ref": f"refs/tags/v{version}",
         "distribution_channel": "private_beta",
         "plugin_update_owner": "lifecycle_manager",
         "compatibility_set": {
-            "plugin": {"id": "claudian-remote"},
+            "id": f"claudian-remote-{version}",
+            "plugin": {
+                "id": "claudian-remote",
+                "version": version,
+                "minimum_obsidian_version": "1.12.3",
+            },
+            "companion": {"version": version},
+            "relay": {"version": version},
+            "installer": {"version": version},
+            "protocol": json.loads(json.dumps(SUPPORT_MATRIX["protocol"])),
+            "configuration_schema": SUPPORT_MATRIX["components"][
+                "configuration_schema"
+            ],
+            "claudian": {"exact_version": "2.2.6", "supported_versions": ["2.0.4", "2.2.6"]},
             "runtime": runtime_distribution(),
+            "upgrade_contract": json.loads(
+                json.dumps(SUPPORT_MATRIX["upgrade_contract"])
+            ),
         },
-        "assets": [{
-            "name": name,
-            "component": component,
-            "size": len(payload),
-            "sha256": hashlib.sha256(payload).hexdigest(),
-        }],
+        "assets": manifest_assets,
         "signature": {
             "algorithm": "ed25519",
             "key_fingerprint": fingerprint,
@@ -167,6 +218,125 @@ def test_manifest_signature_is_verified_by_lifecycle_not_a_forgeable_receipt(tmp
         source(release, trust, signature_valid=False).verify(plan)
 
 
+def test_installer_accepts_only_the_exact_beta5_signed_upgrade_contract(tmp_path):
+    release, trust, plan = write_release(tmp_path)
+
+    verified = source(release, trust).verify(plan)
+
+    assert verified == {"verified": True, "release_version": "0.2.0-beta.5"}
+
+
+def test_installer_rejects_private_key_material_anywhere_in_manifest(tmp_path):
+    release, trust, plan = write_release(tmp_path)
+    manifest_path = release / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["runtime_proof_private_key"] = "must-never-be-packaged"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReleaseValidationError, match="release_private_key_forbidden"):
+        source(release, trust).verify(plan)
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda contract: contract["journey_capabilities"].pop(),
+        lambda contract: contract["result_schema_versions"].__setitem__(
+            0, "claudian-remote.lifecycle-result/v1"
+        ),
+        lambda contract: contract["proof_schema_versions"].__setitem__(
+            0, "attacker/proof/v9"
+        ),
+        lambda contract: contract["supported_legacy_lineages"][1].update(
+            {"version": "unknown-lineage"}
+        ),
+        lambda contract: contract["supported_profiles"].append("local_lan"),
+        lambda contract: contract["final_topology_boundary"].update(
+            {"mode": "remote_vps"}
+        ),
+        lambda contract: contract["current_update_pairing_rows"][0].update(
+            {"companion": "0.2.0-beta.4"}
+        ),
+        lambda contract: contract["adapter_rows"][0].update(
+            {"profile_id": "unsupported-profile"}
+        ),
+        lambda contract: contract["helper_rows"][0].update(
+            {"sha256": "0" * 64}
+        ),
+        lambda contract: contract["execution_constraints"].update(
+            {"runtime_exact_paths": ["python3"]}
+        ),
+        lambda contract: contract["execution_constraints"].update(
+            {"import_prefixes": ["relative/imports"]}
+        ),
+        lambda contract: contract["execution_constraints"].update(
+            {"developer_checkout_dependency": "allowed"}
+        ),
+        lambda contract: contract.update(
+            {"runtime_proof_private_key": "must-never-be-packaged"}
+        ),
+        lambda contract: contract["packaged_acceptance_rows"][2][
+            "components"
+        ].pop(),
+    ],
+)
+def test_installer_rejects_changed_upgrade_capability_rows(tmp_path, mutate):
+    release, trust, plan = write_release(tmp_path)
+    manifest_path = release / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    mutate(manifest["compatibility_set"]["upgrade_contract"])
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(
+        ReleaseValidationError,
+        match="upgrade_contract|release_private_key_forbidden",
+    ):
+        source(release, trust).verify(plan)
+
+
+def test_installer_rejects_missing_mixed_or_substituted_beta5_assets(tmp_path):
+    missing_release, missing_trust, missing_plan = write_release(tmp_path / "missing")
+    manifest_path = missing_release / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["assets"].pop()
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ReleaseValidationError, match="release_asset_set_invalid"):
+        source(missing_release, missing_trust).verify(missing_plan)
+
+    mixed_release, mixed_trust, mixed_plan = write_release(tmp_path / "mixed")
+    manifest_path = mixed_release / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["assets"][0]["name"] = "claudian-remote-plugin-0.2.0-beta.4.tar.gz"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ReleaseValidationError, match="release_asset_descriptor_invalid"):
+        source(mixed_release, mixed_trust).verify(mixed_plan)
+
+    helper_release, helper_trust, helper_plan = write_release(tmp_path / "helper")
+    helper_path = (
+        helper_release
+        / "assets"
+        / "claudian-remote-legacy-retirement-helper-0.2.0-beta.5.py"
+    )
+    helper_path.write_text("substituted helper", encoding="utf-8")
+    with pytest.raises(ReleaseValidationError, match="release_asset_digest_mismatch"):
+        source(helper_release, helper_trust).verify(helper_plan)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("sha256", "A" * 64), ("size", 1.5)],
+)
+def test_installer_rejects_bad_asset_hash_or_size_metadata(tmp_path, field, value):
+    release, trust, plan = write_release(tmp_path)
+    manifest_path = release / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["assets"][0][field] = value
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReleaseValidationError, match="release_asset_descriptor_invalid"):
+        source(release, trust).verify(plan)
+
+
 @pytest.mark.parametrize(
     ("name", "component"),
     [
@@ -199,6 +369,18 @@ def test_installer_rejects_legacy_runtime_delivery_even_when_manifest_signature_
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ReleaseValidationError, match="runtime_distribution_invalid"):
+        source(release, trust).verify(plan)
+
+
+@pytest.mark.parametrize("versions", [None, ["2.2.6"], ["2.0.4", "2.2.6", "2.2.7"]])
+def test_installer_rejects_changed_claudian_allowlist(tmp_path, versions):
+    release, trust, plan = write_release(tmp_path)
+    manifest_path = release / "release-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["compatibility_set"]["claudian"]["supported_versions"] = versions
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ReleaseValidationError, match="release_contract_mismatch"):
         source(release, trust).verify(plan)
 
 

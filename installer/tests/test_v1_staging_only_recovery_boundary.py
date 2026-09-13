@@ -107,6 +107,28 @@ def test_exact_beta4_staging_only_probe_accepts_already_missing_partial(tmp_path
     ) is True
 
 
+def test_rollback_does_not_write_back_journal_changed_after_effect_probe(tmp_path, monkeypatch):
+    transaction, deps, _launchctl, selected_plan, _partial, _vault = _make_exact_beta4_host(tmp_path)
+    path = deps.layout.state / f"{OPERATION_ID}.transaction.json"
+    original = transaction.verify_supported_v1_staging_only_recovery
+    injected = None
+
+    def swap_after_probe(*args, **kwargs):
+        nonlocal injected
+        result = original(*args, **kwargs)
+        if kwargs.get("_require_staging_absent"):
+            journal = json.loads(path.read_text())
+            journal["unexpected"] = True
+            _write_json(path, journal)
+            injected = path.read_bytes()
+        return result
+
+    monkeypatch.setattr(transaction, "verify_supported_v1_staging_only_recovery", swap_after_probe)
+    outcome = transaction.rollback_supported_v1_staging_only(selected_plan, operation_id=OPERATION_ID)
+    assert outcome["code"] == "rollback_closure_unverified"
+    assert path.read_bytes() == injected
+
+
 def test_probe_rejects_any_legacy_migration_journal(tmp_path):
     transaction, deps, _launchctl, selected_plan, _partial, _vault = (
         _make_exact_beta4_host(tmp_path)

@@ -25,7 +25,7 @@ from aiohttp import WSMsgType, web
 
 BRIDGE_SUBPROTOCOL = "claudian.remote.bridge.v1"
 BRIDGE_HOST = "127.0.0.1"
-BRIDGE_PORT = 27124
+BRIDGE_PORT = 27125
 MAX_BRIDGE_FRAME_BYTES = 1024 * 1024
 MAX_INFLIGHT_MANAGEMENT = 8
 SAFE_ERROR_CODE = re.compile(r"^[a-z][a-z0-9_]{2,63}$")

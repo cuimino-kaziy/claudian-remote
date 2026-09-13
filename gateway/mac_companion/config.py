@@ -9,6 +9,7 @@ Keychain.
 from __future__ import annotations
 
 import re
+import math
 import subprocess
 import sys
 import json
@@ -93,13 +94,25 @@ class MacOSKeychain:
         account = self._validate(reference)
         if not value:
             raise KeychainError("empty credential")
-        # A trailing -w prompts security to read the password from stdin, so the
-        # credential never appears in argv or a process listing.
+        if not isinstance(value, str) or any(not " " <= char <= "~" for char in value):
+            raise KeychainError("invalid credential")
+        if not REFERENCE_RE.fullmatch(self.service):
+            raise KeychainError("invalid keychain service")
+        # Interactive security reads the complete command from stdin; a bare
+        # trailing -w can succeed while storing an empty password.
+        arguments = ["add-generic-password", "-U", "-s", self.service, "-a", account, "-w", value]
+        command = " ".join('"' + part.replace("\\", "\\\\").replace('"', '\\"') + '"' for part in arguments)
         result = self._run(
-            ["add-generic-password", "-U", "-s", self.service, "-a", account, "-w"],
-            input_text=value + "\n",
+            ["-i"],
+            input_text=command + "\n",
         )
         if result.returncode != 0:
+            raise KeychainError("unable to store credential")
+        try:
+            stored = self.get(account)
+        except KeychainError:
+            raise KeychainError("unable to store credential") from None
+        if stored != value:
             raise KeychainError("unable to store credential")
 
     def delete(self, reference: str) -> None:
@@ -141,7 +154,7 @@ class CompanionRuntimeConfig:
     bridge_bootstrap_ack_path: str = ""
     bootstrap_generation: str = ""
     bridge_host: str = "127.0.0.1"
-    bridge_port: int = 27124
+    bridge_port: int = 27125
     relay_ws_url: str = ""
     payload_secret: str = ""
     pairing_admin_credential: str = ""
@@ -154,6 +167,8 @@ class CompanionRuntimeConfig:
     bridge_import_path: str = "upload.import"
     upload_temp_dir: str = ""
     upload_stream_bytes: int = 64 * 1024
+    upload_connect_timeout_seconds: float = 10.0
+    upload_read_idle_timeout_seconds: float = 30.0
     outbound_max_events: int = 256
     outbound_max_bytes: int = 2 * 1024 * 1024
     relay_heartbeat_seconds: float = 20.0
@@ -188,7 +203,7 @@ class CompanionRuntimeConfig:
             bridge_bootstrap_ack_path=str(data.get("bridge_bootstrap_ack_path") or ""),
             bootstrap_generation=str(data.get("bootstrap_generation") or ""),
             bridge_host=str(data.get("bridge_host") or "127.0.0.1"),
-            bridge_port=int(data.get("bridge_port") or 27124),
+            bridge_port=int(data.get("bridge_port") or 27125),
             relay_ws_url=str(data.get("relay_ws_url") or ""),
             payload_secret=values["payload_secret"],
             pairing_admin_credential=values.get("pairing_admin_credential", ""),
@@ -196,6 +211,8 @@ class CompanionRuntimeConfig:
             v2_state_path=str(data.get("v2_state_path") or path.with_name("companion_state_v2.json")),
             upload_temp_dir=str(data.get("upload_temp_dir") or path.with_name("upload_temp")),
             upload_stream_bytes=min(64 * 1024, max(4096, int(data.get("upload_stream_bytes") or 64 * 1024))),
+            upload_connect_timeout_seconds=float(data.get("upload_connect_timeout_seconds") or 10),
+            upload_read_idle_timeout_seconds=float(data.get("upload_read_idle_timeout_seconds") or 30),
             outbound_max_events=max(16, int(data.get("outbound_max_events") or 256)),
             outbound_max_bytes=max(64 * 1024, int(data.get("outbound_max_bytes") or 2 * 1024 * 1024)),
             relay_heartbeat_seconds=float(data.get("relay_heartbeat_seconds") or 20),
@@ -206,7 +223,7 @@ class CompanionRuntimeConfig:
     def validate(self) -> None:
         if not self.relay_base_url or not self.relay_token or not self.pairing_id or not self.bridge_credential:
             raise KeychainError("missing companion runtime configuration")
-        if self.bridge_host != "127.0.0.1" or self.bridge_port != 27124:
+        if self.bridge_host != "127.0.0.1" or self.bridge_port != 27125:
             raise KeychainError("invalid loopback Bridge configuration")
         if self.connection_mode and (
             not self.bridge_bootstrap_ack_path
@@ -222,6 +239,14 @@ class CompanionRuntimeConfig:
             or self.endpoint_audience != f"claudian-remote:{self.connection_mode}:{self.installation_id}"
         ):
             raise KeychainError("connection_profile_binding_mismatch")
+        if any(
+            not math.isfinite(value) or value <= 0 or value > 300
+            for value in (
+                self.upload_connect_timeout_seconds,
+                self.upload_read_idle_timeout_seconds,
+            )
+        ):
+            raise KeychainError("invalid_upload_download_timeout")
 
     def resolved_relay_ws_url(self) -> str:
         if self.relay_ws_url:

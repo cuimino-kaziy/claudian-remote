@@ -32,7 +32,7 @@ def test_bootstrap_is_confirmed_single_use_and_issues_revocable_identity():
 
 def test_loopback_and_fixed_port_are_fail_closed():
     with pytest.raises(BridgeServerError, match="bridge_non_loopback_forbidden"):
-        CompanionBridgeServer(host="0.0.0.0", port=27124, identities=BridgeIdentityStore())
+        CompanionBridgeServer(host="0.0.0.0", port=27125, identities=BridgeIdentityStore())
     with pytest.raises(BridgeServerError, match="bridge_fixed_port_required"):
         CompanionBridgeServer(host="127.0.0.1", port=0, identities=BridgeIdentityStore())
 
@@ -43,7 +43,7 @@ async def test_port_conflict_has_one_stable_error_and_never_selects_another_port
         raise OSError("address in use")
 
     monkeypatch.setattr("gateway.mac_companion.bridge_server.web.TCPSite.start", conflict)
-    server = CompanionBridgeServer(host="127.0.0.1", port=27124, identities=BridgeIdentityStore())
+    server = CompanionBridgeServer(host="127.0.0.1", port=27125, identities=BridgeIdentityStore())
     with pytest.raises(BridgeServerError, match="bridge_port_conflict"):
         await server.start()
 
@@ -52,7 +52,7 @@ async def test_port_conflict_has_one_stable_error_and_never_selects_another_port
 async def test_authenticated_loopback_websocket_is_command_and_event_adapter(aiohttp_client):
     identities = BridgeIdentityStore()
     identity = identities.issue("bridge-a", "bridge-secret")
-    server = CompanionBridgeServer(host="127.0.0.1", port=27124, identities=identities)
+    server = CompanionBridgeServer(host="127.0.0.1", port=27125, identities=identities)
     client = await aiohttp_client(server.create_app())
     ws = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
     challenge = await ws.receive_json()
@@ -89,7 +89,7 @@ async def test_authenticated_callback_runs_only_after_valid_bridge_authenticatio
     authenticated = []
     server = CompanionBridgeServer(
         host="127.0.0.1",
-        port=27124,
+        port=27125,
         identities=identities,
         authenticated_handler=authenticated.append,
     )
@@ -125,7 +125,7 @@ async def test_unanswered_bridge_request_times_out_and_releases_pending_state(ai
     identity = identities.issue("bridge-a", "bridge-secret")
     server = CompanionBridgeServer(
         host="127.0.0.1",
-        port=27124,
+        port=27125,
         identities=identities,
         request_timeout_seconds=0.02,
     )
@@ -152,7 +152,7 @@ async def test_unanswered_bridge_request_times_out_and_releases_pending_state(ai
 async def test_event_queue_overflow_emits_resync_marker_instead_of_hiding_loss(aiohttp_client):
     identities = BridgeIdentityStore()
     identity = identities.issue("bridge-a", "bridge-secret")
-    server = CompanionBridgeServer(host="127.0.0.1", port=27124, identities=identities)
+    server = CompanionBridgeServer(host="127.0.0.1", port=27125, identities=identities)
     server._events = asyncio.Queue(maxsize=1)
     client = await aiohttp_client(server.create_app())
     ws = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
@@ -188,7 +188,7 @@ async def test_slow_management_does_not_block_event_ingestion(aiohttp_client):
 
     server = CompanionBridgeServer(
         host="127.0.0.1",
-        port=27124,
+        port=27125,
         identities=identities,
         management_handler=management,
     )
@@ -224,7 +224,7 @@ async def test_missing_invalid_and_revoked_credentials_reveal_nothing(aiohttp_cl
     identities = BridgeIdentityStore()
     identity = identities.issue("bridge-a", "bridge-secret")
     identities.revoke(identity.credential_id)
-    server = CompanionBridgeServer(host="127.0.0.1", port=27124, identities=identities)
+    server = CompanionBridgeServer(host="127.0.0.1", port=27125, identities=identities)
     client = await aiohttp_client(server.create_app())
     ws = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
     challenge = await ws.receive_json()
@@ -240,7 +240,7 @@ async def test_missing_invalid_and_revoked_credentials_reveal_nothing(aiohttp_cl
 async def test_plugin_restart_requests_one_keyframe_when_transport_is_already_bound(aiohttp_client):
     identities = BridgeIdentityStore()
     identity = identities.issue("bridge-a", "bridge-secret")
-    server = CompanionBridgeServer(host="127.0.0.1", port=27124, identities=identities)
+    server = CompanionBridgeServer(host="127.0.0.1", port=27125, identities=identities)
     client = await aiohttp_client(server.create_app())
 
     async def connect():

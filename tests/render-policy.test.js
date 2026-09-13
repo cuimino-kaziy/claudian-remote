@@ -259,3 +259,34 @@ test("rendered Markdown strips passive request attributes before insertion but p
   assert.equal(safeLink.textContent, "explicit link");
   assert.equal(relativeLink.getAttribute("href"), "notes/today.md");
 });
+
+test("passive media syntax is neutralized before Obsidian can render or preload it", async (t) => {
+  const requests = [];
+  let renderedMarkdown = "";
+  let rendered = 0;
+  const { StreamingMarkdownRenderer } = await rendererHarness(async (_app, markdown, wrapper) => {
+    renderedMarkdown = markdown;
+    if (/(^|[^\\])!\[[^\]]*\]\s*(?:\(|\[)/m.test(markdown)) requests.push("markdown-image");
+    if (/<\s*(?:img|source|audio|video|iframe|embed|object)\b/i.test(markdown)) requests.push("raw-html-media");
+    wrapper.textContent = markdown;
+  });
+  const container = new FakeElement();
+  const renderer = new StreamingMarkdownRenderer({ app: {}, onRendered: () => { rendered += 1; } });
+  t.after(() => renderer.dispose());
+
+  renderer.schedule(container, [
+    "![tracking pixel](https://tracker.test/pixel)",
+    "![reference image][remote]",
+    "<img src=\"https://tracker.test/raw\" srcset=\"https://tracker.test/raw-2x 2x\">",
+    "<video poster=\"https://media.test/poster\"><source src=\"https://media.test/movie\"></video>",
+    "<iframe src=\"https://frame.test/embed\"></iframe>",
+    "<object data=\"https://object.test/content\"></object>",
+    "[explicit link](https://example.test/open-after-click)",
+    "[remote]: https://tracker.test/reference"
+  ].join("\n"), { final: true });
+  await waitFor(() => rendered === 1);
+
+  assert.deepEqual(requests, []);
+  assert.match(renderedMarkdown, /\[explicit link\]\(https:\/\/example\.test\/open-after-click\)/);
+  assert.doesNotMatch(renderedMarkdown, /<\s*(?:img|source|audio|video|iframe|embed|object)\b/i);
+});

@@ -1,6 +1,7 @@
 import { IncrementalSha256, sha256Hex } from "./sha256-stream.js";
 
 const CHUNK_BYTES = 1024 * 1024;
+const REQUEST_TIMEOUT_MS = 30_000;
 
 function sameSession(a, b) {
   return a?.mac_session_id === b?.mac_session_id && a?.mac_connection_generation === b?.mac_connection_generation;
@@ -11,14 +12,63 @@ function abortError(signal, fallback = "upload_cancelled") {
 }
 
 export class AttachmentController {
-  constructor({ baseUrl, tokenProvider, getSession, fetchImpl = globalThis.fetch, onChange = () => {}, chunkBytes = CHUNK_BYTES }) {
+  constructor({
+    baseUrl,
+    tokenProvider,
+    getSession,
+    fetchImpl = globalThis.fetch,
+    onChange = () => {},
+    chunkBytes = CHUNK_BYTES,
+    requestTimeoutMs = REQUEST_TIMEOUT_MS,
+    timers = globalThis
+  }) {
     this.baseUrl = String(baseUrl || "").replace(/\/+$/, "");
     this.tokenProvider = tokenProvider;
     this.getSession = getSession;
     this.fetchImpl = fetchImpl;
     this.onChange = onChange;
     this.chunkBytes = Math.min(CHUNK_BYTES, Math.max(64 * 1024, chunkBytes));
+    const timeout = Number(requestTimeoutMs);
+    if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("invalid_upload_request_timeout");
+    this.requestTimeoutMs = Math.min(timeout, 120_000);
+    this.timers = timers;
     this.current = null;
+  }
+
+  async request(operation, url, options, { signal = null, parseJson = true } = {}) {
+    const controller = new AbortController();
+    const timeoutError = new Error(`upload_${operation}_timeout`);
+    let requestTimer = null;
+    let detachAbort = () => {};
+    const cancellation = signal ? new Promise((_, reject) => {
+      const onAbort = () => {
+        const error = abortError(signal);
+        controller.abort(error);
+        reject(error);
+      };
+      if (signal.aborted) onAbort();
+      else {
+        signal.addEventListener("abort", onAbort, { once: true });
+        detachAbort = () => signal.removeEventListener("abort", onAbort);
+      }
+    }) : new Promise(() => {});
+    const deadline = new Promise((_, reject) => {
+      requestTimer = this.timers.setTimeout(() => {
+        controller.abort(timeoutError);
+        reject(timeoutError);
+      }, this.requestTimeoutMs);
+    });
+    const request = (async () => {
+      const response = await this.fetchImpl(url, { ...options, signal: controller.signal });
+      const body = parseJson ? await response.json() : null;
+      return { response, body };
+    })();
+    try {
+      return await Promise.race([request, deadline, cancellation]);
+    } finally {
+      this.timers.clearTimeout(requestTimer);
+      detachAbort();
+    }
   }
 
   headers(extra = {}) {
@@ -91,7 +141,7 @@ export class AttachmentController {
       if (!sameSession(session, this.session())) throw new Error("session_changed");
       item.status = "starting";
       this.changed();
-      const response = await this.fetchImpl(`${this.baseUrl}/api/v2/uploads`, {
+      const { response, body } = await this.request("create", `${this.baseUrl}/api/v2/uploads`, {
         method: "POST",
         headers: this.headers({ "Content-Type": "application/json" }),
         body: JSON.stringify({
@@ -101,10 +151,8 @@ export class AttachmentController {
           sha256: item.totalSha256,
           mac_session_id: session.mac_session_id,
           mac_connection_generation: session.mac_connection_generation
-        }),
-        signal: item.abortController.signal
-      });
-      const body = await response.json();
+        })
+      }, { signal: item.abortController.signal });
       this.assertActive(item);
       if (!response.ok) throw new Error(body.error || `upload_begin_${response.status}`);
       item.uploadId = body.upload_id;
@@ -134,7 +182,7 @@ export class AttachmentController {
       const buffer = await item.file.slice(item.offset, end).arrayBuffer();
       this.assertActive(item);
       const bytes = new Uint8Array(buffer);
-      const response = await this.fetchImpl(`${this.baseUrl}/api/v2/uploads/${item.uploadId}/chunks/${item.index}`, {
+      const { response, body } = await this.request("chunk", `${this.baseUrl}/api/v2/uploads/${item.uploadId}/chunks/${item.index}`, {
         method: "PUT",
         headers: this.headers({
           "Content-Type": "application/octet-stream",
@@ -143,10 +191,8 @@ export class AttachmentController {
           "X-Mac-Session-ID": item.session.mac_session_id,
           "X-Mac-Connection-Generation": String(item.session.mac_connection_generation)
         }),
-        body: bytes,
-        signal: item.abortController.signal
-      });
-      const body = await response.json();
+        body: bytes
+      }, { signal: item.abortController.signal });
       this.assertActive(item);
       if (!response.ok) throw new Error(body.error || `upload_chunk_${response.status}`);
       item.offset = Number(body.next_offset ?? body.received_bytes);
@@ -155,13 +201,11 @@ export class AttachmentController {
     }
     item.status = "finalizing";
     this.changed();
-    const response = await this.fetchImpl(`${this.baseUrl}/api/v2/uploads/${item.uploadId}/finalize`, {
+    const { response, body } = await this.request("finalize", `${this.baseUrl}/api/v2/uploads/${item.uploadId}/finalize`, {
       method: "POST",
       headers: this.headers({ "Content-Type": "application/json" }),
-      body: JSON.stringify({ ...item.session, sha256: item.totalSha256 }),
-      signal: item.abortController.signal
-    });
-    const body = await response.json();
+      body: JSON.stringify({ ...item.session, sha256: item.totalSha256 })
+    }, { signal: item.abortController.signal });
     this.assertActive(item);
     if (!response.ok) throw new Error(body.error || `upload_finalize_${response.status}`);
     item.status = "importing";
@@ -244,13 +288,13 @@ export class AttachmentController {
     this.changed();
     if (!item.uploadId || item.status === "ready") return;
     try {
-      await this.fetchImpl(`${this.baseUrl}/api/v2/uploads/${item.uploadId}`, {
+      await this.request("delete", `${this.baseUrl}/api/v2/uploads/${item.uploadId}`, {
         method: "DELETE",
         headers: this.headers({
           "X-Mac-Session-ID": item.session.mac_session_id,
           "X-Mac-Connection-Generation": String(item.session.mac_connection_generation)
         })
-      });
+      }, { parseJson: false });
     } catch { /* TTL cleanup remains the final safety net. */ }
   }
 

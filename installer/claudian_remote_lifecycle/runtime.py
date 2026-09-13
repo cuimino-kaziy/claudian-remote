@@ -34,6 +34,14 @@ class ReleaseValidationError(ValueError):
 
 REQUIRED_RUNTIME_VERSIONS = {"python": "3.12.11", "uv": "0.10.12"}
 REQUIRED_RUNTIME_TARGETS = {("darwin", "arm64"), ("darwin", "x86_64")}
+REQUIRED_RELEASE_VERSION = "0.2.0-beta.5"
+RELEASE_COMPONENTS = (
+    "plugin",
+    "companion",
+    "relay",
+    "installer",
+    "legacy_retirement_helper",
+)
 SHA256_PATTERN = re.compile(r"[a-f0-9]{64}")
 
 
@@ -48,6 +56,20 @@ def _canonical_json(value: Any) -> str:
     if isinstance(value, list):
         return "[" + ",".join(_canonical_json(item) for item in value) + "]"
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _contains_private_key_material(value: Any) -> bool:
+    if isinstance(value, Mapping):
+        for key, item in value.items():
+            normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
+            if "privatekey" in normalized or _contains_private_key_material(item):
+                return True
+        return False
+    if isinstance(value, list):
+        return any(_contains_private_key_material(item) for item in value)
+    return isinstance(value, str) and bool(
+        re.search(r"-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----", value)
+    )
 
 
 def _default_key_fingerprint(public_key_pem: str) -> str:
@@ -366,6 +388,234 @@ def _validate_runtime_distribution(manifest: Mapping[str, Any]) -> None:
         raise ReleaseValidationError("runtime_distribution_invalid")
 
 
+def _expected_asset_name(component: str, version: str) -> str:
+    if component == "installer":
+        return f"claudian-remote-lifecycle-{version}.tar.gz"
+    if component == "legacy_retirement_helper":
+        return f"claudian-remote-legacy-retirement-helper-{version}.py"
+    return f"claudian-remote-{component}-{version}.tar.gz"
+
+
+def _validate_upgrade_contract(
+    manifest_contract: Any,
+    matrix_contract: Any,
+    *,
+    release_version: str,
+) -> Mapping[str, Any]:
+    if (
+        not isinstance(manifest_contract, Mapping)
+        or not isinstance(matrix_contract, Mapping)
+        or _canonical_json(manifest_contract) != _canonical_json(matrix_contract)
+    ):
+        raise ReleaseValidationError("upgrade_contract_mismatch")
+    value = dict(manifest_contract)
+    expected_pairing = [
+        {
+            "pairing_identity_policy": policy,
+            "plugin": release_version,
+            "companion": release_version,
+            "installer": release_version,
+        }
+        for policy in ("preserve", "rotate")
+    ]
+    expected = {
+        "contract_schema": "claudian-remote.upgrade-capabilities/v1",
+        "journey_capabilities": [
+            "fresh_install",
+            "current_update",
+            "legacy_upgrade",
+        ],
+        "result_schema_versions": ["claudian-remote.lifecycle-result/v2"],
+        "proof_schema_versions": [
+            "claudian-remote.legacy-retirement-proof/v1"
+        ],
+        "supported_legacy_lineages": [
+            {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.4",
+                "journey": "current_update",
+            },
+            {
+                "plugin_id": "whale-agent-bridge",
+                "version": "recognized-dogfood-lineage",
+                "journey": "legacy_upgrade",
+            },
+        ],
+        "supported_profiles": ["local_tailscale"],
+        "final_topology_boundary": {
+            "mode": "local_tailscale",
+            "relay_location": "mac_loopback",
+            "exposure": "tailscale_serve",
+            "silent_fallback": False,
+        },
+        "current_update_pairing_rows": expected_pairing,
+        "adapter_rows": [
+            {
+                "profile_id": "dogfood-local-v1",
+                "adapter": "local_managed_relay",
+            },
+            {
+                "profile_id": "dogfood-vps-v1",
+                "adapter": "legacy_vps_relay",
+            },
+        ],
+        "execution_constraints": {
+            "runtime_paths_must_be_absolute": True,
+            "runtime_exact_paths": ["/usr/bin/python3", "/usr/local/bin/python3"],
+            "runtime_prefixes": ["/opt/claudian-remote/runtime"],
+            "import_paths_must_be_absolute": True,
+            "import_prefixes": [
+                "/opt/claudian-remote",
+                "/var/lib/claudian-remote/operations",
+            ],
+            "developer_checkout_dependency": "forbidden",
+            "unbound_network_dependency": "forbidden",
+            "runtime_proof_secret_material": "excluded",
+        },
+        "packaged_acceptance_rows": [
+            {
+                "journey": "fresh_install",
+                "components": ["plugin", "companion", "relay", "installer"],
+            },
+            {
+                "journey": "current_update",
+                "components": ["plugin", "companion", "relay", "installer"],
+            },
+            {
+                "journey": "legacy_upgrade",
+                "components": list(RELEASE_COMPONENTS),
+            },
+        ],
+    }
+    helper_rows = value.get("helper_rows")
+    if not isinstance(helper_rows, list) or len(helper_rows) != 1:
+        raise ReleaseValidationError("upgrade_helper_binding_invalid")
+    helper = helper_rows[0]
+    if not isinstance(helper, Mapping):
+        raise ReleaseValidationError("upgrade_helper_binding_invalid")
+    expected_helper = {
+        "component": "legacy_retirement_helper",
+        "name": _expected_asset_name(
+            "legacy_retirement_helper", release_version
+        ),
+        "source_path": "gateway/relay/legacy_retirement.py",
+        "delivery": "signed_kit_asset",
+        "sha256": helper.get("sha256"),
+    }
+    if (
+        not SHA256_PATTERN.fullmatch(str(helper.get("sha256") or ""))
+        or dict(helper) != expected_helper
+    ):
+        raise ReleaseValidationError("upgrade_helper_binding_invalid")
+    expected["helper_rows"] = [expected_helper]
+    if value != expected:
+        raise ReleaseValidationError("upgrade_contract_unsupported")
+    return helper
+
+
+def _validate_release_metadata(
+    manifest: Mapping[str, Any],
+    matrix: Mapping[str, Any],
+) -> None:
+    version = str(manifest.get("release_version") or "")
+    if (
+        manifest.get("schema_version") != 1
+        or version != REQUIRED_RELEASE_VERSION
+        or matrix.get("release_version") != version
+        or manifest.get("release_tag") != f"v{version}"
+        or manifest.get("source_ref") != f"refs/tags/v{version}"
+        or manifest.get("distribution_channel") != "private_beta"
+        or manifest.get("plugin_update_owner") != "lifecycle_manager"
+    ):
+        raise ReleaseValidationError("release_contract_mismatch")
+    compatibility = manifest.get("compatibility_set")
+    components = matrix.get("components")
+    if not isinstance(compatibility, Mapping) or not isinstance(components, Mapping):
+        raise ReleaseValidationError("release_contract_mismatch")
+    plugin = compatibility.get("plugin")
+    if (
+        compatibility.get("id") != f"claudian-remote-{version}"
+        or compatibility.get("id") != components.get("compatibility_set_id")
+        or not isinstance(plugin, Mapping)
+        or plugin.get("id") != "claudian-remote"
+        or plugin.get("version") != components.get("plugin")
+        or plugin.get("minimum_obsidian_version")
+        != matrix.get("plugin", {}).get("minimum_obsidian_version")
+        or compatibility.get("protocol") != matrix.get("protocol")
+        or compatibility.get("configuration_schema")
+        != components.get("configuration_schema")
+        or compatibility.get("claudian")
+        != {"exact_version": "2.2.6", "supported_versions": ["2.0.4", "2.2.6"]}
+        or matrix.get("claudian", {}).get("exact_version") != "2.2.6"
+        or matrix.get("claudian", {}).get("supported_versions") != ["2.0.4", "2.2.6"]
+    ):
+        raise ReleaseValidationError("release_contract_mismatch")
+    for component in ("companion", "relay", "installer"):
+        if compatibility.get(component) != {"version": components.get(component)}:
+            raise ReleaseValidationError("release_contract_mismatch")
+    _validate_runtime_distribution(manifest)
+    expected_runtime = {
+        "python": matrix.get("runtime", {}).get("python"),
+        "uv": matrix.get("runtime", {}).get("uv"),
+        "delivery": matrix.get("runtime", {}).get("delivery"),
+        "assets": matrix.get("runtime", {}).get("required_assets"),
+    }
+    if compatibility.get("runtime") != expected_runtime:
+        raise ReleaseValidationError("runtime_distribution_invalid")
+    helper = _validate_upgrade_contract(
+        compatibility.get("upgrade_contract"),
+        matrix.get("upgrade_contract"),
+        release_version=version,
+    )
+    assets = manifest.get("assets")
+    if not isinstance(assets, list) or len(assets) != len(RELEASE_COMPONENTS):
+        raise ReleaseValidationError("release_asset_set_invalid")
+    by_component: dict[str, Mapping[str, Any]] = {}
+    for asset in assets:
+        if not isinstance(asset, Mapping):
+            raise ReleaseValidationError("release_asset_descriptor_invalid")
+        component = str(asset.get("component") or "")
+        if component not in RELEASE_COMPONENTS:
+            raise ReleaseValidationError("release_asset_descriptor_invalid")
+        if component in by_component:
+            raise ReleaseValidationError("release_asset_set_invalid")
+        by_component[component] = asset
+        expected_lock = (
+            "package-lock.json"
+            if component == "plugin"
+            else "release/lifecycle-dependencies.lock.json"
+            if component == "installer"
+            else "gateway/requirements.lock"
+        )
+        locks = asset.get("dependency_locks")
+        size = asset.get("size")
+        if (
+            asset.get("name") != _expected_asset_name(component, version)
+            or not SHA256_PATTERN.fullmatch(str(asset.get("sha256") or ""))
+            or isinstance(size, bool)
+            or not isinstance(size, int)
+            or size < 1
+            or asset.get("license")
+            != (
+                "AGPL-3.0-only"
+                if component in {"relay", "legacy_retirement_helper"}
+                else "MIT"
+            )
+            or not isinstance(locks, list)
+            or len(locks) != 1
+            or not isinstance(locks[0], Mapping)
+            or locks[0].get("path") != expected_lock
+            or not SHA256_PATTERN.fullmatch(str(locks[0].get("sha256") or ""))
+        ):
+            raise ReleaseValidationError("release_asset_descriptor_invalid")
+    helper_asset = by_component.get("legacy_retirement_helper", {})
+    if (
+        helper_asset.get("name") != helper.get("name")
+        or helper_asset.get("sha256") != helper.get("sha256")
+    ):
+        raise ReleaseValidationError("upgrade_helper_binding_invalid")
+
+
 class BootstrapVerifiedReleaseSource:
     """Verify a signed manifest and consume only its exact release assets.
 
@@ -382,6 +632,7 @@ class BootstrapVerifiedReleaseSource:
         architecture: str | None = None,
         runner: Callable[..., subprocess.CompletedProcess[Any]] | None = None,
         trust_root: Path | Mapping[str, Any] | None = None,
+        support_matrix: Path | Mapping[str, Any] | None = None,
         key_fingerprint: Callable[[str], str] | None = None,
         signature_verifier: Callable[[str, bytes, bytes], bool] | None = None,
     ) -> None:
@@ -390,6 +641,7 @@ class BootstrapVerifiedReleaseSource:
         self.architecture = architecture or platform.machine()
         self.runner = runner or subprocess.run
         self.trust_root = trust_root or Path(__file__).resolve().parents[2] / "release" / "trust-root.json"
+        self.support_matrix = support_matrix or Path(__file__).resolve().parents[2] / "release" / "support-matrix.json"
         self.key_fingerprint = key_fingerprint or _default_key_fingerprint
         self.signature_verifier = signature_verifier or _default_signature_verifier
         self._manifest: dict[str, Any] | None = None
@@ -403,6 +655,19 @@ class BootstrapVerifiedReleaseSource:
             raise ReleaseValidationError("release_trust_root_unavailable") from exc
         if not isinstance(value, Mapping):
             raise ReleaseValidationError("release_trust_root_unavailable")
+        return value
+
+    def _load_support_matrix(self) -> Mapping[str, Any]:
+        if isinstance(self.support_matrix, Mapping):
+            return self.support_matrix
+        try:
+            value = json.loads(
+                Path(self.support_matrix).read_text(encoding="utf-8")
+            )
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ReleaseValidationError("release_support_matrix_unavailable") from exc
+        if not isinstance(value, Mapping):
+            raise ReleaseValidationError("release_support_matrix_unavailable")
         return value
 
     @staticmethod
@@ -425,6 +690,8 @@ class BootstrapVerifiedReleaseSource:
             raise ReleaseValidationError("verified_release_unavailable") from exc
         if not isinstance(manifest, Mapping):
             raise ReleaseValidationError("release_contract_mismatch")
+        if _contains_private_key_material(manifest):
+            raise ReleaseValidationError("release_private_key_forbidden")
         signature = manifest.get("signature")
         if not isinstance(signature, Mapping) or signature.get("algorithm") != "ed25519":
             raise ReleaseValidationError("manifest_signature_unverified")
@@ -450,20 +717,11 @@ class BootstrapVerifiedReleaseSource:
         payload = _canonical_json(unsigned).encode("utf-8")
         if not encoded_signature or not self.signature_verifier(public_key, payload, encoded_signature):
             raise ReleaseValidationError("manifest_signature_unverified")
-        compatibility = manifest.get("compatibility_set")
-        plugin = compatibility.get("plugin") if isinstance(compatibility, Mapping) else None
-        if (
-            manifest.get("distribution_channel") != "private_beta"
-            or manifest.get("plugin_update_owner") != "lifecycle_manager"
-            or not isinstance(plugin, Mapping)
-            or plugin.get("id") != "claudian-remote"
-        ):
-            raise ReleaseValidationError("release_contract_mismatch")
-        _validate_runtime_distribution(manifest)
         expected = str(plan.get("compatibility_set_id") or "")
         actual_version = str(manifest.get("release_version") or "")
         if expected != f"claudian-remote-{actual_version}":
             raise ReleaseValidationError("release_plan_mismatch")
+        _validate_release_metadata(manifest, self._load_support_matrix())
         assets = manifest.get("assets")
         if not isinstance(assets, list):
             raise ReleaseValidationError("release_contract_mismatch")
@@ -477,13 +735,16 @@ class BootstrapVerifiedReleaseSource:
                 or Path(name).is_absolute()
                 or Path(name).name != name
                 or name in {".", ".."}
-                or component not in {"plugin", "companion", "relay", "installer"}
+                or component not in RELEASE_COMPONENTS
             ):
                 raise ReleaseValidationError("release_asset_descriptor_invalid")
             path = self.directory / "assets" / name
-            if not path.is_file() or path.stat().st_size != int(asset.get("size") or -1):
+            if not path.is_file():
                 raise ReleaseValidationError("release_asset_missing")
-            if sha256_file(path) != str(asset.get("sha256") or ""):
+            if (
+                path.stat().st_size != int(asset.get("size") or -1)
+                or sha256_file(path) != str(asset.get("sha256") or "")
+            ):
                 raise ReleaseValidationError("release_asset_digest_mismatch")
         self._manifest = manifest
         return {"verified": True, "release_version": actual_version}
@@ -662,10 +923,21 @@ class BootstrapVerifiedReleaseSource:
         verified = self.verify(plan)
         destination.mkdir(parents=True, exist_ok=False)
         components: dict[str, Path] = {}
+        retirement_helper: Path | None = None
         for asset in self._manifest.get("assets", []):  # type: ignore[union-attr]
             component = str(asset["component"])
-            if component not in {"plugin", "companion", "relay", "installer"}:
+            if component not in RELEASE_COMPONENTS:
                 raise ReleaseValidationError("release_asset_descriptor_invalid")
+            if component == "legacy_retirement_helper":
+                target = destination / component
+                target.mkdir()
+                retirement_helper = target / "legacy_retirement.py"
+                shutil.copyfile(
+                    self.directory / "assets" / str(asset["name"]),
+                    retirement_helper,
+                )
+                os.chmod(retirement_helper, 0o500)
+                continue
             target = destination / component
             target.mkdir()
             _safe_extract(self.directory / "assets" / str(asset["name"]), target)
@@ -684,6 +956,8 @@ class BootstrapVerifiedReleaseSource:
             components=components,
             runtime_root=runtime_root,
         )
+        if retirement_helper is None:
+            raise ReleaseValidationError("upgrade_helper_asset_missing")
         return StagedRelease(destination, plugin, managed_python, uv, str(verified["release_version"]))
 
 

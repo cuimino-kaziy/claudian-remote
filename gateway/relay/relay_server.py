@@ -16,12 +16,14 @@ from urllib.parse import parse_qs, urlparse
 try:
     from .crypto import redact_text
     from .config import DEFAULT_LIMITS
+    from .legacy_retirement import LEGACY_RETIREMENT_PROFILE_IDS
 except ImportError:  # pragma: no cover - script execution fallback
     from crypto import redact_text
     from config import DEFAULT_LIMITS
+    from legacy_retirement import LEGACY_RETIREMENT_PROFILE_IDS
 
 
-VERSION = "0.2.0-beta.4"
+VERSION = "0.2.0-beta.5"
 ROLES = {"mac", "mobile"}
 ALLOWED_EVENT_TYPES = {
     "mac": {"message.receipt", "conversation.snapshot", "conversation.event"},
@@ -85,6 +87,7 @@ class RelayConfig:
     upload_reserve_min_bytes: int = 1024 * 1024 * 1024
     upload_reserve_fraction: float = 0.10
     legacy_retirement_enabled: bool = False
+    legacy_retirement_profile_id: str = "dogfood-local-v1"
     legacy_retirement_database_path: str = ""
     legacy_retirement_authority_instance_id: str = ""
     legacy_retirement_runtime_key_id: str = ""
@@ -93,6 +96,8 @@ class RelayConfig:
     legacy_retirement_mac_id: str = ""
 
     def __post_init__(self) -> None:
+        if self.legacy_retirement_profile_id not in LEGACY_RETIREMENT_PROFILE_IDS:
+            raise ValueError("legacy_retirement_profile_invalid")
         if self.host not in {"127.0.0.1", "::1", "localhost"}:
             raise ValueError("relay_must_bind_loopback")
         if self.fallback_base_url:
@@ -218,6 +223,9 @@ class RelayConfig:
             upload_reserve_fraction=max(0.0, min(0.90, float(data.get("upload_reserve_fraction", 0.10)))),
             legacy_retirement_enabled=bool(
                 data.get("legacy_retirement_enabled", False)
+            ),
+            legacy_retirement_profile_id=data.get(
+                "legacy_retirement_profile_id", "dogfood-local-v1"
             ),
             legacy_retirement_database_path=str(
                 data.get("legacy_retirement_database_path") or ""

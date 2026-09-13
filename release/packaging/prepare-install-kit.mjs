@@ -11,6 +11,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
+import { validateReleaseContract } from "./release-contract.mjs";
 
 function safeAssetName(value) {
   const name = String(value ?? "");
@@ -57,8 +58,9 @@ test "$(shasum -a 256 '${kitName}' | awk '{print $1}')" = '${kitDigest}'
   return path;
 }
 
-export function prepareInstallKit(distDirectory) {
+export function prepareInstallKit(distDirectory, { trustStore = null } = {}) {
   const dist = resolve(distDirectory);
+  const repositoryRoot = resolve(import.meta.dirname, "../..");
   const manifestPath = join(dist, "release-manifest.json");
   const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
   const signature = manifest?.signature ?? {};
@@ -73,6 +75,16 @@ export function prepareInstallKit(distDirectory) {
   if (!installer || assets.filter((asset) => asset.component === "installer").length !== 1) {
     throw new Error("exactly one lifecycle installer asset is required");
   }
+  validateReleaseContract(manifest, {
+    expectedTag: manifest.release_tag,
+    pluginManifest: JSON.parse(readFileSync(join(repositoryRoot, "manifest.json"), "utf8")),
+    versions: JSON.parse(readFileSync(join(repositoryRoot, "versions.json"), "utf8")),
+    supportMatrix: JSON.parse(readFileSync(join(repositoryRoot, "release/support-matrix.json"), "utf8")),
+    trustStore: trustStore
+      ?? JSON.parse(readFileSync(join(repositoryRoot, "release/trust-root.json"), "utf8")),
+    rootDir: repositoryRoot,
+    assetDir: dist
+  });
   for (const asset of assets) {
     const path = join(dist, asset.name);
     if (!statSync(path).isFile()) throw new Error(`release asset missing: ${asset.name}`);

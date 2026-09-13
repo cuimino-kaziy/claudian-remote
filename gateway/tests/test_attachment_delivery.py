@@ -10,7 +10,11 @@ import pytest
 from aiohttp import web
 
 from gateway.mac_companion.stream_pump import AsyncMacCompanion
-from gateway.mac_companion.upload_receiver import DownloadedUpload, UploadReceiver
+from gateway.mac_companion.upload_receiver import (
+    DownloadedUpload,
+    UploadReceiveError,
+    UploadReceiver,
+)
 from gateway.relay.app import STORE, UPLOADS, create_app
 from gateway.tests.test_relay_aiohttp import (
     connect_mac,
@@ -208,6 +212,119 @@ async def test_upload_receiver_streams_verifies_and_cleans_local_blob(aiohttp_se
         assert seen == {"session": "session-a", "generation": "7"}
         await receiver.cleanup(upload_id)
         assert not downloaded.path.exists()
+
+
+@pytest.mark.asyncio
+async def test_upload_receiver_does_not_hold_cleanup_lock_while_network_stream_stalls(
+    aiohttp_server, tmp_path
+):
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+
+    async def stalled_content(request):
+        response = web.StreamResponse(status=200, headers={"Content-Length": "4"})
+        await response.prepare(request)
+        stream_started.set()
+        await release_stream.wait()
+        return response
+
+    app = web.Application()
+    app.router.add_get("/api/v2/uploads/{upload_id}/content", stalled_content)
+    server = await aiohttp_server(app)
+    async with aiohttp.ClientSession() as session:
+        receiver = await UploadReceiver(
+            session, str(server.make_url("/")).rstrip("/"), "mac-secret", tmp_path / "receiver"
+        ).start()
+        upload_id = str(uuid.uuid4())
+        download = asyncio.create_task(
+            receiver.download(
+                {
+                    "upload_id": upload_id,
+                    "display_name": "stalled.bin",
+                    "content_type": "application/octet-stream",
+                    "total_bytes": 4,
+                    "sha256": digest(b"late"),
+                },
+                mac_session_id="session-a",
+                mac_connection_generation=7,
+                is_current=lambda: True,
+            )
+        )
+        await asyncio.wait_for(stream_started.wait(), timeout=1)
+        try:
+            await asyncio.wait_for(receiver.cleanup("unrelated-upload"), timeout=0.05)
+        finally:
+            release_stream.set()
+            download.cancel()
+            await asyncio.gather(download, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_upload_receiver_read_idle_timeout_cleans_partial_and_allows_next_download(
+    aiohttp_server, tmp_path
+):
+    stalled_id = str(uuid.uuid4())
+    fast_id = str(uuid.uuid4())
+    stream_started = asyncio.Event()
+    release_stream = asyncio.Event()
+    fast_data = b"next"
+
+    async def content(request):
+        if request.match_info["upload_id"] == stalled_id:
+            response = web.StreamResponse(status=200, headers={"Content-Length": "4"})
+            await response.prepare(request)
+            stream_started.set()
+            await release_stream.wait()
+            return response
+        return web.Response(body=fast_data, content_type="application/octet-stream")
+
+    app = web.Application()
+    app.router.add_get("/api/v2/uploads/{upload_id}/content", content)
+    server = await aiohttp_server(app)
+    async with aiohttp.ClientSession() as session:
+        receiver = await UploadReceiver(
+            session,
+            str(server.make_url("/")).rstrip("/"),
+            "mac-secret",
+            tmp_path / "receiver",
+            connect_timeout_seconds=0.2,
+            read_idle_timeout_seconds=0.02,
+        ).start()
+        stalled = asyncio.create_task(
+            receiver.download(
+                {
+                    "upload_id": stalled_id,
+                    "display_name": "stalled.bin",
+                    "content_type": "application/octet-stream",
+                    "total_bytes": 4,
+                    "sha256": digest(b"late"),
+                },
+                mac_session_id="session-a",
+                mac_connection_generation=7,
+                is_current=lambda: True,
+            )
+        )
+        await asyncio.wait_for(stream_started.wait(), timeout=1)
+        try:
+            with pytest.raises(UploadReceiveError, match="upload_download_timeout"):
+                await asyncio.wait_for(stalled, timeout=1)
+        finally:
+            release_stream.set()
+        assert not list((tmp_path / "receiver").iterdir())
+
+        downloaded = await receiver.download(
+            {
+                "upload_id": fast_id,
+                "display_name": "next.bin",
+                "content_type": "application/octet-stream",
+                "total_bytes": len(fast_data),
+                "sha256": digest(fast_data),
+            },
+            mac_session_id="session-a",
+            mac_connection_generation=7,
+            is_current=lambda: True,
+        )
+        assert downloaded.path.read_bytes() == fast_data
 
 
 class FakeUploadReceiver:

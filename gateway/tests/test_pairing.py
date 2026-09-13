@@ -245,7 +245,7 @@ async def test_revoke_invalidates_current_and_future_authentication(pairing):
 
 
 @pytest.mark.asyncio
-async def test_wrong_profile_rejection_and_repair_never_reuses_identity(pairing):
+async def test_legacy_repair_rejects_old_identity_and_binds_replacement_role_and_vault(pairing):
     store, auth, _ = pairing
     first = await create(store)
     pending = await redeem(store, first)
@@ -257,13 +257,21 @@ async def test_wrong_profile_rejection_and_repair_never_reuses_identity(pairing)
         endpoint_audience="claudian-remote:local_tailscale:installation-a",
     )
     issued = await store.complete(first.claim_id, pending.redemption_handle, device_id="iphone-a")
+    assert auth.authenticate(
+        f"Bearer {issued.credential}",
+        "mobile",
+        installation_id="installation-a",
+        vault_id="vault-a",
+    ).credential_id == issued.credential_id
     await store.revoke_device(
         device_id="iphone-a",
         installation_id="installation-a",
         vault_id="vault-a",
         endpoint_audience="claudian-remote:local_tailscale:installation-a",
-        reason="mode_changed",
+        reason="legacy_migration",
     )
+    with pytest.raises(AuthError, match="revoked"):
+        auth.authenticate(f"Bearer {issued.credential}", "mobile")
 
     second = await create(store)
     with pytest.raises(PairingError, match="wrong_audience"):
@@ -290,6 +298,25 @@ async def test_wrong_profile_rejection_and_repair_never_reuses_identity(pairing)
     assert reissued.credential_id != issued.credential_id
     assert reissued.credential != issued.credential
     assert auth.credential_count(role="mobile", active_only=True) == 1
+    assert auth.authenticate(
+        f"Bearer {reissued.credential}",
+        "mobile",
+        installation_id="installation-a",
+        vault_id="vault-a",
+    ).credential_id == reissued.credential_id
+    with pytest.raises(AuthError, match="wrong_role"):
+        auth.authenticate(f"Bearer {reissued.credential}", "pairing_admin")
+    with pytest.raises(AuthError, match="wrong_vault"):
+        auth.authenticate(
+            f"Bearer {reissued.credential}",
+            "mobile",
+            installation_id="installation-a",
+            vault_id="vault-b",
+        )
+    # Terminal claim digests are scrubbed immediately, so a later presentation
+    # is rejected as an invalid claim rather than revealing terminal history.
+    with pytest.raises(PairingError, match="claim_invalid"):
+        await redeem(store, second)
 
 
 @pytest.mark.asyncio

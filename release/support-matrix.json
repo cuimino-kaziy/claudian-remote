@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release_version": "0.2.0-beta.4",
+  "release_version": "0.2.0-beta.5",
   "beta_scope": {
     "invited_users_min": 5,
     "invited_users_max": 10,
@@ -17,25 +17,21 @@
     "minimum_obsidian_version": "1.12.3"
   },
   "claudian": {
-    "exact_version": "2.0.4",
+    "exact_version": "2.2.6",
+    "supported_versions": ["2.0.4", "2.2.6"],
     "unsupported_mode": "read_only",
     "manifest_schema": 1,
-    "required_capabilities": [
-      "semantic_stream",
-      "completion_barrier",
-      "stop",
-      "steer",
-      "approval",
-      "history_list",
-      "history_select"
-    ]
+    "required_capabilities_by_version": {
+      "2.0.4": ["semantic_stream", "completion_barrier", "stop", "steer", "approval", "history_list", "history_select"],
+      "2.2.6": ["semantic_stream", "completion_barrier", "stop", "native_execution_events", "approval", "history_list", "history_select"]
+    }
   },
   "components": {
-    "compatibility_set_id": "claudian-remote-0.2.0-beta.4",
-    "plugin": "0.2.0-beta.4",
-    "companion": "0.2.0-beta.4",
-    "relay": "0.2.0-beta.4",
-    "installer": "0.2.0-beta.4",
+    "compatibility_set_id": "claudian-remote-0.2.0-beta.5",
+    "plugin": "0.2.0-beta.5",
+    "companion": "0.2.0-beta.5",
+    "relay": "0.2.0-beta.5",
+    "installer": "0.2.0-beta.5",
     "configuration_schema": 1
   },
   "protocol": {
@@ -87,6 +83,106 @@
       {
         "distribution_channel": "community",
         "plugin_update_owner": "obsidian"
+      }
+    ]
+  },
+  "upgrade_contract": {
+    "contract_schema": "claudian-remote.upgrade-capabilities/v1",
+    "journey_capabilities": [
+      "fresh_install",
+      "current_update",
+      "legacy_upgrade"
+    ],
+    "result_schema_versions": [
+      "claudian-remote.lifecycle-result/v2"
+    ],
+    "proof_schema_versions": [
+      "claudian-remote.legacy-retirement-proof/v1"
+    ],
+    "supported_legacy_lineages": [
+      {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.4",
+        "journey": "current_update"
+      },
+      {
+        "plugin_id": "whale-agent-bridge",
+        "version": "recognized-dogfood-lineage",
+        "journey": "legacy_upgrade"
+      }
+    ],
+    "supported_profiles": [
+      "local_tailscale"
+    ],
+    "final_topology_boundary": {
+      "mode": "local_tailscale",
+      "relay_location": "mac_loopback",
+      "exposure": "tailscale_serve",
+      "silent_fallback": false
+    },
+    "current_update_pairing_rows": [
+      {
+        "pairing_identity_policy": "preserve",
+        "plugin": "0.2.0-beta.5",
+        "companion": "0.2.0-beta.5",
+        "installer": "0.2.0-beta.5"
+      },
+      {
+        "pairing_identity_policy": "rotate",
+        "plugin": "0.2.0-beta.5",
+        "companion": "0.2.0-beta.5",
+        "installer": "0.2.0-beta.5"
+      }
+    ],
+    "adapter_rows": [
+      {
+        "profile_id": "dogfood-local-v1",
+        "adapter": "local_managed_relay"
+      },
+      {
+        "profile_id": "dogfood-vps-v1",
+        "adapter": "legacy_vps_relay"
+      }
+    ],
+    "helper_rows": [
+      {
+        "component": "legacy_retirement_helper",
+        "name": "claudian-remote-legacy-retirement-helper-0.2.0-beta.5.py",
+        "source_path": "gateway/relay/legacy_retirement.py",
+        "delivery": "signed_kit_asset",
+        "sha256": "ec6a3abbdc7c98812e5ee885b7e58d7b8f3fbcf81614cea321eaf8d5123d0b66"
+      }
+    ],
+    "execution_constraints": {
+      "runtime_paths_must_be_absolute": true,
+      "runtime_exact_paths": [
+        "/usr/bin/python3",
+        "/usr/local/bin/python3"
+      ],
+      "runtime_prefixes": [
+        "/opt/claudian-remote/runtime"
+      ],
+      "import_paths_must_be_absolute": true,
+      "import_prefixes": [
+        "/opt/claudian-remote",
+        "/var/lib/claudian-remote/operations"
+      ],
+      "developer_checkout_dependency": "forbidden",
+      "unbound_network_dependency": "forbidden",
+      "runtime_proof_secret_material": "excluded"
+    },
+    "packaged_acceptance_rows": [
+      {
+        "journey": "fresh_install",
+        "components": ["plugin", "companion", "relay", "installer"]
+      },
+      {
+        "journey": "current_update",
+        "components": ["plugin", "companion", "relay", "installer"]
+      },
+      {
+        "journey": "legacy_upgrade",
+        "components": ["plugin", "companion", "relay", "installer", "legacy_retirement_helper"]
       }
     ]
   },

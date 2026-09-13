@@ -3,7 +3,7 @@ set -eu
 
 release_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 release_version=$(node -p "require('${release_root}/package.json').version")
-release_dist="${release_root}/dist"
+release_dist="${CLAUDIAN_RELEASE_DIST:-${release_root}/dist}"
 release_tmp=$(mktemp -d "${TMPDIR:-/tmp}/claudian-remote-release.XXXXXX")
 trap 'rm -rf "${release_tmp}"' EXIT HUP INT TERM
 
@@ -17,7 +17,7 @@ fi
 
 mkdir -p "${release_dist}" "${release_tmp}/plugin" \
   "${release_tmp}/companion/gateway/mac_companion/launchd" "${release_tmp}/companion/gateway/protocol" \
-  "${release_tmp}/relay/gateway/relay" "${release_tmp}/relay/gateway/protocol" \
+  "${release_tmp}/relay/gateway/relay" "${release_tmp}/relay/gateway/protocol" "${release_tmp}/relay/release" \
   "${release_tmp}/installer/bin" "${release_tmp}/installer/installer/claudian_remote_lifecycle" \
   "${release_tmp}/installer/release"
 
@@ -42,6 +42,7 @@ cp -R gateway/relay/edge gateway/relay/systemd "${release_tmp}/relay/gateway/rel
 cp gateway/protocol/*.py gateway/protocol/*.md "${release_tmp}/relay/gateway/protocol/"
 cp -R gateway/protocol/fixtures "${release_tmp}/relay/gateway/protocol/"
 cp gateway/requirements.lock "${release_tmp}/relay/gateway/"
+cp release/support-matrix.json "${release_tmp}/relay/release/"
 cp CLAUDIAN_REMOTE_INSTALL.md LICENSE "${release_tmp}/installer/"
 cp installer/__init__.py "${release_tmp}/installer/installer/"
 cp installer/claudian_remote_lifecycle/*.py "${release_tmp}/installer/installer/claudian_remote_lifecycle/"
@@ -56,6 +57,8 @@ sh release/packaging/deterministic-tar.sh "${release_tmp}/plugin" "${release_dis
 sh release/packaging/deterministic-tar.sh "${release_tmp}/companion" "${release_dist}/claudian-remote-companion-${release_version}.tar.gz"
 sh release/packaging/deterministic-tar.sh "${release_tmp}/relay" "${release_dist}/claudian-remote-relay-${release_version}.tar.gz"
 sh release/packaging/deterministic-tar.sh "${release_tmp}/installer" "${release_dist}/claudian-remote-lifecycle-${release_version}.tar.gz"
+cp gateway/relay/legacy_retirement.py \
+  "${release_dist}/claudian-remote-legacy-retirement-helper-${release_version}.py"
 
 if [ "${assets_only}" = false ]; then
   node release/packaging/prepare-manifest.mjs "${CLAUDIAN_RELEASE_TAG:-v${release_version}}" "${release_dist}"

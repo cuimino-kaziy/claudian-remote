@@ -6,8 +6,9 @@ import pytest
 from aiohttp import WSMsgType
 
 from gateway.protocol.compatibility import COMPATIBILITY_SET
-from gateway.relay.app import create_app
+from gateway.relay.app import HUB, PAIRING, create_app
 from gateway.relay.relay_server import RelayConfig, RelayToken
+from gateway.tests.test_relay_aiohttp import command, connect_mac, receive_type
 
 
 def config(tmp_path):
@@ -112,6 +113,71 @@ async def mobile_socket(client, credential):
     )
     assert (await socket.receive_json())["type"] == "authenticated"
     return socket
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("transport", ["http", "websocket"])
+async def test_device_revocation_and_command_dispatch_share_one_atomic_boundary(
+    aiohttp_client, tmp_path, transport
+):
+    client = await aiohttp_client(create_app(config(tmp_path)))
+    _, completed = await pair(client)
+    mac = await connect_mac(client)
+    mobile = None
+    entered_dispatch = asyncio.Event()
+    release_dispatch = asyncio.Event()
+    presence = client.server.app[HUB].presence
+    route_command = presence.route_command
+
+    async def paused_route(pairing_id, incoming):
+        entered_dispatch.set()
+        await release_dispatch.wait()
+        return await route_command(pairing_id, incoming)
+
+    presence.route_command = paused_route
+    if transport == "http":
+        command_result = asyncio.create_task(
+            client.post(
+                "/api/v2/commands",
+                headers={"Authorization": f"Bearer {completed['credential']}"},
+                json={"compatibility": COMPATIBILITY_SET, "command": command()},
+            )
+        )
+    else:
+        mobile = await mobile_socket(client, completed["credential"])
+        await mobile.send_json({"type": "command", "command": command()})
+        command_result = asyncio.create_task(receive_type(mobile, "relay.accepted"))
+
+    await asyncio.wait_for(entered_dispatch.wait(), timeout=1)
+    revocation = asyncio.create_task(
+        client.server.app[PAIRING].revoke_device(
+            device_id="iphone-a",
+            installation_id="installation-a",
+            vault_id="vault-a",
+            endpoint_audience="claudian-remote:local_tailscale:installation-a",
+            reason="device_lost",
+        )
+    )
+    await asyncio.sleep(0)
+    assert not revocation.done(), "revocation completed while an authenticated command was still dispatching"
+
+    release_dispatch.set()
+    result = await asyncio.wait_for(command_result, timeout=1)
+    if transport == "http":
+        assert result.status == 202
+    else:
+        assert result["status"] == "routed"
+    assert completed["credential_id"] in await asyncio.wait_for(revocation, timeout=1)
+
+    blocked = await client.post(
+        "/api/v2/commands",
+        headers={"Authorization": f"Bearer {completed['credential']}"},
+        json={"compatibility": COMPATIBILITY_SET, "command": command(delivery="after-revoke")},
+    )
+    assert blocked.status == 401
+    if mobile is not None:
+        await mobile.close()
+    await mac.close()
 
 
 @pytest.mark.asyncio

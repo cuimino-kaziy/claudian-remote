@@ -1,13 +1,88 @@
 import { createHash, createPublicKey, verify } from "node:crypto";
 import { readFileSync, statSync } from "node:fs";
-import { resolve } from "node:path";
+import { basename, resolve } from "node:path";
 
 export const FINAL_PLUGIN_ID = "claudian-remote";
 export const LEGACY_PLUGIN_ID = "whale-agent-bridge";
-export const REQUIRED_CLAUDIAN_VERSION = "2.0.4";
+export const REQUIRED_CLAUDIAN_VERSION = "2.2.6";
+export const SUPPORTED_CLAUDIAN_VERSIONS = Object.freeze(["2.0.4", "2.2.6"]);
+export const REQUIRED_RELEASE_VERSION = "0.2.0-beta.5";
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMPONENTS = ["plugin", "companion", "relay", "installer"];
+const ASSET_COMPONENTS = [...COMPONENTS, "legacy_retirement_helper"];
 const RUNTIME_TARGETS = ["darwin/arm64", "darwin/x86_64"];
+
+function expectedAssetName(component, version) {
+  if (component === "installer") return `claudian-remote-lifecycle-${version}.tar.gz`;
+  if (component === "legacy_retirement_helper") {
+    return `claudian-remote-legacy-retirement-helper-${version}.py`;
+  }
+  return `claudian-remote-${component}-${version}.tar.gz`;
+}
+
+function expectedUpgradeContract(version, helperDigest) {
+  return {
+    contract_schema: "claudian-remote.upgrade-capabilities/v1",
+    journey_capabilities: ["fresh_install", "current_update", "legacy_upgrade"],
+    result_schema_versions: ["claudian-remote.lifecycle-result/v2"],
+    proof_schema_versions: ["claudian-remote.legacy-retirement-proof/v1"],
+    supported_legacy_lineages: [
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.4", journey: "current_update" },
+      { plugin_id: LEGACY_PLUGIN_ID, version: "recognized-dogfood-lineage", journey: "legacy_upgrade" }
+    ],
+    supported_profiles: ["local_tailscale"],
+    final_topology_boundary: {
+      mode: "local_tailscale",
+      relay_location: "mac_loopback",
+      exposure: "tailscale_serve",
+      silent_fallback: false
+    },
+    current_update_pairing_rows: ["preserve", "rotate"].map((pairing_identity_policy) => ({
+      pairing_identity_policy,
+      plugin: version,
+      companion: version,
+      installer: version
+    })),
+    adapter_rows: [
+      { profile_id: "dogfood-local-v1", adapter: "local_managed_relay" },
+      { profile_id: "dogfood-vps-v1", adapter: "legacy_vps_relay" }
+    ],
+    helper_rows: [{
+      component: "legacy_retirement_helper",
+      name: expectedAssetName("legacy_retirement_helper", version),
+      source_path: "gateway/relay/legacy_retirement.py",
+      delivery: "signed_kit_asset",
+      sha256: helperDigest
+    }],
+    execution_constraints: {
+      runtime_paths_must_be_absolute: true,
+      runtime_exact_paths: ["/usr/bin/python3", "/usr/local/bin/python3"],
+      runtime_prefixes: ["/opt/claudian-remote/runtime"],
+      import_paths_must_be_absolute: true,
+      import_prefixes: ["/opt/claudian-remote", "/var/lib/claudian-remote/operations"],
+      developer_checkout_dependency: "forbidden",
+      unbound_network_dependency: "forbidden",
+      runtime_proof_secret_material: "excluded"
+    },
+    packaged_acceptance_rows: [
+      { journey: "fresh_install", components: ["plugin", "companion", "relay", "installer"] },
+      { journey: "current_update", components: ["plugin", "companion", "relay", "installer"] },
+      { journey: "legacy_upgrade", components: ASSET_COMPONENTS }
+    ]
+  };
+}
+
+function containsPrivateKeyMaterial(value) {
+  if (Array.isArray(value)) return value.some(containsPrivateKeyMaterial);
+  if (value && typeof value === "object") {
+    return Object.entries(value).some(([key, item]) => {
+      const normalizedKey = key.toLowerCase().replaceAll(/[^a-z0-9]/g, "");
+      return normalizedKey.includes("privatekey") || containsPrivateKeyMaterial(item);
+    });
+  }
+  return typeof value === "string"
+    && /-----BEGIN (?:[A-Z0-9]+ )?PRIVATE KEY-----/.test(value);
+}
 
 export class ReleaseContractError extends Error {
   constructor(errors) {
@@ -140,6 +215,33 @@ function validateRuntimeDistribution(runtime, matrixRuntime, errors) {
   }
 }
 
+function validateUpgradeContract(contract, matrixContract, releaseVersion, context, errors) {
+  const matrixHelper = Array.isArray(matrixContract?.helper_rows)
+    ? matrixContract.helper_rows[0]
+    : null;
+  const helperDigest = matrixHelper?.sha256;
+  if (!SHA256.test(helperDigest ?? "")) {
+    errors.push("upgrade helper digest is missing or invalid");
+    return;
+  }
+  const expected = expectedUpgradeContract(releaseVersion, helperDigest);
+  if (canonicalJson(matrixContract) !== canonicalJson(expected)) {
+    errors.push("support-matrix upgrade capability rows are unsupported");
+  }
+  if (canonicalJson(contract) !== canonicalJson(expected)) {
+    errors.push("signed upgrade capability rows disagree");
+  }
+  if (context.rootDir) {
+    try {
+      if (sha256File(resolve(context.rootDir, expected.helper_rows[0].source_path)) !== helperDigest) {
+        errors.push("upgrade helper source digest disagrees with the signed contract");
+      }
+    } catch {
+      errors.push("upgrade helper source is missing");
+    }
+  }
+}
+
 export function validateReleaseContract(manifest, context) {
   const errors = [];
   const compatibility = manifest?.compatibility_set ?? {};
@@ -148,7 +250,9 @@ export function validateReleaseContract(manifest, context) {
   const pluginManifest = context.pluginManifest;
   const versions = context.versions;
 
+  if (containsPrivateKeyMaterial(manifest)) errors.push("private key material must not be included in a release manifest");
   if (manifest?.schema_version !== 1) errors.push("schema_version must be 1");
+  if (manifest?.release_version !== REQUIRED_RELEASE_VERSION) errors.push(`release version must be ${REQUIRED_RELEASE_VERSION}`);
   if (manifest?.release_tag !== `v${manifest?.release_version}`) errors.push("release tag and release version disagree");
   if (manifest?.source_ref !== `refs/tags/${manifest?.release_tag}`) errors.push("source_ref must be the exact release tag");
   if (context.expectedTag && manifest?.release_tag !== context.expectedTag) errors.push("workflow tag and manifest tag disagree");
@@ -156,6 +260,8 @@ export function validateReleaseContract(manifest, context) {
   if (plugin.version !== manifest?.release_version || pluginManifest.version !== manifest?.release_version) errors.push("plugin and release versions disagree");
   if (versions[manifest?.release_version] !== pluginManifest.minAppVersion) errors.push("versions.json and plugin minimum app version disagree");
   if (matrix.release_version !== manifest?.release_version) errors.push("support matrix and release versions disagree");
+  if (compatibility.id !== matrix.components?.compatibility_set_id
+    || compatibility.id !== `claudian-remote-${manifest?.release_version}`) errors.push("compatibility set id and release version disagree");
   for (const component of COMPONENTS) {
     if (compatibility[component]?.version !== matrix.components?.[component]) errors.push(`${component} and support-matrix versions disagree`);
   }
@@ -164,7 +270,13 @@ export function validateReleaseContract(manifest, context) {
     || canonicalJson(compatibility.protocol?.compatible) !== canonicalJson(matrix.protocol?.compatible)
     || canonicalJson(compatibility.protocol?.rollback) !== canonicalJson(matrix.protocol?.rollback)) errors.push("protocol compatibility ranges disagree");
   validateRuntimeDistribution(compatibility.runtime, matrix.runtime, errors);
-  if (compatibility.claudian?.exact_version !== REQUIRED_CLAUDIAN_VERSION || matrix.claudian?.exact_version !== REQUIRED_CLAUDIAN_VERSION) errors.push("Claudian 2.0.4 is the only writable beta version");
+  validateUpgradeContract(compatibility.upgrade_contract, matrix.upgrade_contract, manifest?.release_version, context, errors);
+  for (const claudian of [compatibility.claudian, matrix.claudian]) {
+    if (claudian?.exact_version !== REQUIRED_CLAUDIAN_VERSION
+      || canonicalJson(claudian?.supported_versions) !== canonicalJson(SUPPORTED_CLAUDIAN_VERSIONS)) {
+      errors.push("Claudian supported versions must be exactly 2.0.4 and 2.2.6");
+    }
+  }
   if (plugin.minimum_obsidian_version !== matrix.plugin?.minimum_obsidian_version) errors.push("minimum Obsidian versions disagree");
 
   const allowedOwner = manifest?.distribution_channel === "private_beta"
@@ -178,18 +290,34 @@ export function validateReleaseContract(manifest, context) {
   if (!migrationIds.includes(LEGACY_PLUGIN_ID) || matrix.plugin?.legacy_id_may_coexist !== false) errors.push("legacy plugin id must be migration-only and non-coexisting");
 
   const assets = Array.isArray(manifest?.assets) ? manifest.assets : [];
-  for (const component of COMPONENTS) {
+  if (assets.length !== ASSET_COMPONENTS.length) errors.push("release asset set must be exact");
+  for (const component of ASSET_COMPONENTS) {
     if (assets.filter((asset) => asset.component === component).length !== 1) errors.push(`exactly one ${component} asset is required`);
   }
   const names = new Set();
   for (const asset of assets) {
     if (names.has(asset.name)) errors.push(`duplicate asset name: ${asset.name}`);
     names.add(asset.name);
+    if (basename(String(asset.name ?? "")) !== asset.name) errors.push(`unsafe asset name: ${asset.name ?? "unknown"}`);
+    if (!ASSET_COMPONENTS.includes(asset.component)) errors.push(`unsupported asset component: ${asset.component ?? "unknown"}`);
+    if (ASSET_COMPONENTS.includes(asset.component)
+      && asset.name !== expectedAssetName(asset.component, manifest?.release_version)) {
+      errors.push(`asset version or name mismatch: ${asset.name ?? "unknown"}`);
+    }
     if (!SHA256.test(asset.sha256 ?? "")) errors.push(`missing or invalid asset digest: ${asset.name ?? "unknown"}`);
     if (!Number.isSafeInteger(asset.size) || asset.size < 1) errors.push(`invalid asset size: ${asset.name ?? "unknown"}`);
-    const expectedLicense = asset.component === "relay" ? "AGPL-3.0-only" : "MIT";
+    const expectedLicense = ["relay", "legacy_retirement_helper"].includes(asset.component) ? "AGPL-3.0-only" : "MIT";
     if (asset.license !== expectedLicense) errors.push(`wrong license for ${asset.component}`);
-    if (!Array.isArray(asset.dependency_locks) || asset.dependency_locks.length === 0) errors.push(`dependency lock missing for ${asset.name ?? "unknown"}`);
+    const expectedLock = asset.component === "plugin"
+      ? "package-lock.json"
+      : asset.component === "installer"
+        ? "release/lifecycle-dependencies.lock.json"
+        : "gateway/requirements.lock";
+    if (!Array.isArray(asset.dependency_locks)
+      || asset.dependency_locks.length !== 1
+      || asset.dependency_locks[0]?.path !== expectedLock) {
+      errors.push(`dependency lock mismatch for ${asset.name ?? "unknown"}`);
+    }
     for (const lock of asset.dependency_locks ?? []) {
       if (!SHA256.test(lock.sha256 ?? "")) errors.push(`missing or invalid lock digest: ${lock.path ?? "unknown"}`);
       if (context.rootDir) {
@@ -208,6 +336,11 @@ export function validateReleaseContract(manifest, context) {
         errors.push(`asset missing: ${asset.name}`);
       }
     }
+  }
+  const helperRow = compatibility.upgrade_contract?.helper_rows?.[0];
+  const helperAsset = assets.find((asset) => asset.component === "legacy_retirement_helper");
+  if (!helperAsset || helperAsset.name !== helperRow?.name || helperAsset.sha256 !== helperRow?.sha256) {
+    errors.push("upgrade helper asset binding mismatch");
   }
 
   const signature = manifest?.signature ?? {};

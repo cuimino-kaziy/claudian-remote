@@ -3,11 +3,62 @@ import { RenderGeneration, renderDelay } from "./render-policy.js";
 
 const PASSIVE_MEDIA_SELECTOR = "img, source, audio, video, iframe, embed, object";
 const REQUEST_ATTRIBUTES = ["src", "srcset", "poster", "data"];
+const PASSIVE_MEDIA_HTML = /^<\s*\/?\s*(?:img|source|audio|video|track|picture|iframe|embed|object|svg|image|feimage|use|script|link|input|style)\b/i;
 
 function sanitizePassiveMedia(root) {
   for (const element of root.querySelectorAll(PASSIVE_MEDIA_SELECTOR)) {
     for (const attribute of REQUEST_ATTRIBUTES) element.removeAttribute(attribute);
   }
+}
+
+function neutralizeInlineMedia(markdownLine) {
+  let output = "";
+  let inlineCodeTicks = 0;
+  for (let index = 0; index < markdownLine.length;) {
+    if (markdownLine[index] === "`") {
+      let end = index + 1;
+      while (markdownLine[end] === "`") end += 1;
+      const ticks = end - index;
+      if (inlineCodeTicks === ticks) inlineCodeTicks = 0;
+      else if (inlineCodeTicks === 0 && markdownLine.indexOf("`".repeat(ticks), end) !== -1) inlineCodeTicks = ticks;
+      output += markdownLine.slice(index, end);
+      index = end;
+      continue;
+    }
+    if (inlineCodeTicks === 0 && markdownLine[index] === "!" && markdownLine[index + 1] === "[") {
+      let slashCount = 0;
+      for (let cursor = index - 1; cursor >= 0 && markdownLine[cursor] === "\\"; cursor -= 1) slashCount += 1;
+      if (slashCount % 2 === 0) output += "\\";
+      output += "![";
+      index += 2;
+      continue;
+    }
+    if (inlineCodeTicks === 0 && markdownLine[index] === "<" && PASSIVE_MEDIA_HTML.test(markdownLine.slice(index))) {
+      output += "&lt;";
+      index += 1;
+      continue;
+    }
+    output += markdownLine[index];
+    index += 1;
+  }
+  return output;
+}
+
+function neutralizePassiveMedia(markdown) {
+  let fence = null;
+  return String(markdown).split("\n").map((line) => {
+    const marker = line.match(/^ {0,3}(`{3,}|~{3,})/);
+    if (fence) {
+      if (marker && marker[1][0] === fence.character && marker[1].length >= fence.length) fence = null;
+      return line;
+    }
+    if (marker) {
+      fence = { character: marker[1][0], length: marker[1].length };
+      return line;
+    }
+    if (/^(?: {4}|\t)/.test(line)) return line;
+    return neutralizeInlineMedia(line);
+  }).join("\n");
 }
 
 function createPlainTextPlaceholder(markdown) {
@@ -70,7 +121,13 @@ export class StreamingMarkdownRenderer {
       try {
         component = new Component();
         component.load();
-        await MarkdownRenderer.render(this.app, pending.markdown, wrapper, this.sourcePath, component);
+        await MarkdownRenderer.render(
+          this.app,
+          neutralizePassiveMedia(pending.markdown),
+          wrapper,
+          this.sourcePath,
+          component
+        );
       } catch {
         component?.unload();
         renderFailed = true;

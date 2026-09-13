@@ -112,8 +112,8 @@ def test_resume_uses_one_lock_for_arbitration_gate_verification_and_mutation(
             self.release()
 
     class TrackingArbitrator:
-        def __init__(self, _state_dir: Path) -> None:
-            pass
+        def __init__(self, _state_dir: Path, *, journal_dir=None) -> None:
+            assert journal_dir is None
 
         def inspect(self):
             assert lock_state["depth"] == 1, "resume arbitration ran outside OperationLock"

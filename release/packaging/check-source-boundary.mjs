@@ -15,14 +15,10 @@ const SECRET_PATTERNS = [
   /\bsk-[A-Za-z0-9_-]{20,}\b/g,
   /Authorization:\s*Bearer\s+(?![<[]|token-example|abcde)[A-Za-z0-9._~+/=-]{20,}/gi
 ];
-const PRIVATE_SOURCE_PATTERNS = [
-  new RegExp(["relay", "quelplan", "com"].join("\\."), "gi"),
-  new RegExp(`\\b${["com", "lantian"].join("\\.")}\\.`, "g"),
-  new RegExp(["周", "环", "系", "统"].join(""), "g")
-];
 const PERSONAL_PATH = /\/Users\/(?!example(?:\/|$)|tester(?:\/|$)|beta-user(?:\/|$))[A-Za-z0-9._-]+\/[A-Za-z0-9._~ -]+/g;
 
-export function scanSourceBoundary(root) {
+export function scanSourceBoundary(root, privateIdentifiers = (process.env.CLAUDIAN_PRIVATE_SOURCE_IDENTIFIERS ?? "").split(/\r?\n/)) {
+  const privateValues = privateIdentifiers.map((value) => value.trim().toLowerCase()).filter(Boolean);
   const findings = [];
   const walk = (directory) => {
     for (const entry of readdirSync(directory, { withFileTypes: true })) {
@@ -43,10 +39,7 @@ export function scanSourceBoundary(root) {
         if (pattern.test(text)) findings.push(`${display}: credential-like value`);
         pattern.lastIndex = 0;
       }
-      for (const pattern of PRIVATE_SOURCE_PATTERNS) {
-        if (pattern.test(text)) findings.push(`${display}: private deployment identifier`);
-        pattern.lastIndex = 0;
-      }
+      if (privateValues.some((value) => text.toLowerCase().includes(value))) findings.push(`${display}: private deployment identifier`);
     }
   };
   walk(resolve(root));
@@ -60,6 +53,6 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error(findings.join("\n"));
     process.exitCode = 1;
   } else {
-    console.log("publish-safe source boundary: ok");
+    console.log("source boundary checks: ok");
   }
 }

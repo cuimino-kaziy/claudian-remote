@@ -136,3 +136,19 @@ test("approved credential replaces revoked identity and never restores the old c
   assert.equal(deviceStore.read("offline-cache"), null);
   assert.deepEqual(controller.diagnosticSummary(), { status: "idle" });
 });
+
+test("native pairing keeps HTTP errors available and bounds an unreachable Relay request", async (t) => {
+  const { controller } = setup();
+  controller.requestImpl = async (options) => {
+    assert.equal(options.throw, false);
+    return { status: 400, json: { error: "claim_expired" } };
+  };
+  await assert.rejects(controller.acceptShortCode("TEST1234"), /claim_expired/);
+  controller.requestImpl = () => new Promise(() => {});
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const pending = controller.acceptShortCode("TEST1234");
+  const rejected = assert.rejects(pending, /pairing_request_timeout/);
+  t.mock.timers.tick(15000);
+  await rejected;
+  assert.equal(controller.pending, null);
+});

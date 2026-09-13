@@ -314,6 +314,35 @@ def test_checkpoint_and_transaction_phase_sets_must_match(tmp_path):
         decode_v1_compatibility_set(**paths)
 
 
+@pytest.mark.parametrize("invalid", [None, "field", "phase", "progress", "identity", "migration"])
+def test_beta2_compact_transaction_is_narrowly_decoded_without_invented_fields(tmp_path, invalid):
+    paths, values = _artifact_set(tmp_path, migration=invalid == "migration")
+    values["checkpoint"].update(state="blocked", phase="release_archive_unsafe_member", completed_phases=[])
+    transaction = {key: values["local_transaction"][key] for key in (
+        "transaction_schema", "operation_id", "plan_id", "phase", "completed_phases"
+    )}
+    transaction.update(phase="before_staging", completed_phases=[])
+    if invalid == "field":
+        transaction["activation_started"] = False
+    elif invalid == "phase":
+        transaction["phase"] = "activation_started"
+    elif invalid == "progress":
+        transaction["completed_phases"] = ["staging"]
+    elif invalid == "identity":
+        transaction["operation_id"] = "op-" + "b" * 32
+    _write(paths["checkpoint_path"], values["checkpoint"])
+    _write(paths["local_transaction_path"], transaction)
+    before = paths["local_transaction_path"].read_bytes()
+    if invalid:
+        with pytest.raises(CompatibilityDecodeError):
+            decode_v1_compatibility_set(**paths)
+    else:
+        result = decode_v1_compatibility_set(**paths)
+        assert result.mutation_may_have_started is True
+        assert compatibility_decode.load_supported_v1_transaction(paths["local_transaction_path"]) == transaction
+    assert paths["local_transaction_path"].read_bytes() == before
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [("vault_id", "other-vault"), ("connection_mode", "remote_vps")],

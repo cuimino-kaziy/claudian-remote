@@ -122,6 +122,7 @@ class WebSocketClient:
         self.compatibility: Dict[str, Any] = {}
         self.device_id: str = ""
         self.credential_id: str = ""
+        self.credential_generation: int = 0
 
     def enqueue_nowait(self, frame: Dict[str, Any]) -> None:
         self.queue.put_nowait(frame)

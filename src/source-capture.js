@@ -1,5 +1,6 @@
 import { safeText, safeToolSummary, sha256 } from "./stream-normalizer.js";
 import {
+  canSubmitToClaudian,
   claudianManifest,
   evaluateClaudianCompatibility
 } from "./protocol/compatibility.js";
@@ -112,6 +113,7 @@ export class SourceCapture {
     return {
       semantic_stream: typeof stream?.handleStreamChunk === "function",
       completion_barrier: typeof input?.sendMessage === "function",
+      native_execution_events: typeof input?.handleExecutionEvent === "function",
       stop: typeof input?.cancelStreaming === "function",
       steer: Boolean(provider.supportsTurnSteer && typeof input?.steerQueuedMessage === "function"),
       approval: typeof input?.handleApprovalRequest === "function",
@@ -233,8 +235,21 @@ export class SourceCapture {
     const originalChunk = stream.handleStreamChunk;
     const originalSend = input.sendMessage;
     const originalCancel = typeof input.cancelStreaming === "function" ? input.cancelStreaming : null;
+    const nativeExecution = claudianManifest(this.claudian).version === "2.2.6";
+    const originalExecutionEvent = nativeExecution ? input.handleExecutionEvent : null;
+    let activeNativeTurn = null;
     const normalizer = this.normalizer;
     const capture = this;
+    const wrappedExecutionEvent = originalExecutionEvent && function remoteExecutionEvent(event, ...args) {
+      // 2.2.6 drops terminal events before handleStreamChunk. Keep only their safe type.
+      const status = event?.type === "execution_error" ? "failed"
+        : event?.type === "cancelled" ? "interrupted"
+          : event?.type === "turn_completed" ? "completed" : null;
+      if (activeNativeTurn && status && (!activeNativeTurn.status || activeNativeTurn.status === "completed")) {
+        activeNativeTurn.status = status;
+      }
+      return originalExecutionEvent.call(this, event, ...args);
+    };
     const wrappedChunk = async function remotePostCommit(chunk, message) {
       const result = await originalChunk.call(this, chunk, message);
       try {
@@ -249,9 +264,14 @@ export class SourceCapture {
       if (tab?.state?.isStreaming) {
         try {
           const context = contextFor(tab, tab?.state?.messages?.at?.(-1));
-          normalizer.noteTerminalHint?.(context.conversationId, "interrupted", {
-            queued_draft_returned: Boolean(tab?.state?.queuedMessage)
-          });
+          const details = { queued_draft_returned: Boolean(tab?.state?.queuedMessage) };
+          if (nativeExecution) {
+            if (activeNativeTurn && (!activeNativeTurn.status || activeNativeTurn.status === "completed")) {
+              Object.assign(activeNativeTurn, { status: "interrupted", ...details });
+            }
+          } else {
+            normalizer.noteTerminalHint?.(context.conversationId, "interrupted", details);
+          }
         } catch (error) {
           capture.compatibilityMode = true;
           capture.diagnostic({ type: "cancel_hook_failed", error_type: error?.name || "Error" });
@@ -260,8 +280,14 @@ export class SourceCapture {
       return originalCancel.apply(this, args);
     };
     const wrappedSend = async function remoteCompletionBarrier(...args) {
-      const wasStreaming = Boolean(tab?.state?.isStreaming);
-      if (!wasStreaming) {
+      if (!canSubmitToClaudian(capture.claudian, tab) || tab?.state?.isStreaming) return originalSend.apply(this, args);
+      // Auto-continuation can start another send before this save barrier returns.
+      const nativeTurn = nativeExecution ? { status: null } : null;
+      if (nativeTurn) {
+        if (activeNativeTurn) activeNativeTurn.superseded = true;
+        activeNativeTurn = nativeTurn;
+      }
+      const started = (async () => {
         try {
           const context = contextFor(tab, tab?.state?.messages?.at?.(-1));
           await normalizer.emit("turn.started", context, {
@@ -272,42 +298,55 @@ export class SourceCapture {
           capture.compatibilityMode = true;
           capture.diagnostic({ type: "start_hook_failed", error_type: error?.name || "Error" });
         }
+      })();
+      let result;
+      try {
+        // Invoke native admission synchronously, before notification delivery yields.
+        [result] = await Promise.all([originalSend.apply(this, args), started]);
+      } finally {
+        if (activeNativeTurn === nativeTurn) activeNativeTurn = null;
       }
-      const result = await originalSend.apply(this, args);
-      if (!wasStreaming) {
-        try {
-          const context = contextFor(tab, tab?.state?.messages?.at?.(-1));
-          const terminalHint = normalizer.consumeTerminalHint?.(context.conversationId) || { status: "completed" };
-          const terminal = typeof terminalHint === "string" ? terminalHint : terminalHint.status;
-          normalizer.finalizeTurnProjection?.(context, terminal);
-          const keyframe = await capture.emitKeyframe(tab, { turnStatus: terminal });
-          const checksum = keyframe.checksum;
-          if (terminal === "failed") {
-            await normalizer.emit("turn.failed", context, { status: "failed", error_code: "provider_error", message: "Desktop agent reported an error" });
-          } else if (terminal === "interrupted") {
-            await normalizer.emit("turn.interrupted", context, {
-              status: "interrupted",
-              queued_draft_returned: Boolean(terminalHint?.queued_draft_returned)
-            });
-          } else {
-            await normalizer.emit("turn.completed", context, { status: "completed", checksum });
-          }
-        } catch (error) {
-          capture.compatibilityMode = true;
-          capture.diagnostic({ type: "completion_hook_failed", error_type: error?.name || "Error" });
+      if (nativeTurn?.superseded) return result;
+      try {
+        const context = contextFor(tab, tab?.state?.messages?.at?.(-1));
+        const terminalHint = nativeTurn
+          ? nativeTurn.status ? nativeTurn : { status: "failed", error_code: "completion_unconfirmed" }
+          : normalizer.consumeTerminalHint?.(context.conversationId) || { status: "completed" };
+        const terminal = typeof terminalHint === "string" ? terminalHint : terminalHint.status;
+        normalizer.finalizeTurnProjection?.(context, terminal);
+        const keyframe = await capture.emitKeyframe(tab, { turnStatus: terminal });
+        const checksum = keyframe.checksum;
+        if (terminal === "failed") {
+          await normalizer.emit("turn.failed", context, {
+            status: "failed",
+            error_code: terminalHint.error_code || "provider_error",
+            message: terminalHint.error_code === "completion_unconfirmed" ? "Desktop turn completion could not be confirmed" : "Desktop agent reported an error"
+          });
+        } else if (terminal === "interrupted") {
+          await normalizer.emit("turn.interrupted", context, {
+            status: "interrupted",
+            queued_draft_returned: Boolean(terminalHint?.queued_draft_returned)
+          });
+        } else {
+          await normalizer.emit("turn.completed", context, { status: "completed", checksum });
         }
+      } catch (error) {
+        capture.compatibilityMode = true;
+        capture.diagnostic({ type: "completion_hook_failed", error_type: error?.name || "Error" });
       }
       return result;
     };
     stream.handleStreamChunk = wrappedChunk;
     input.sendMessage = wrappedSend;
     if (wrappedCancel) input.cancelStreaming = wrappedCancel;
+    if (wrappedExecutionEvent) input.handleExecutionEvent = wrappedExecutionEvent;
     stream[WRAP] = wrappedChunk;
     input[WRAP] = wrappedSend;
     this.restorers.set(tab, () => {
       if (stream.handleStreamChunk === wrappedChunk) stream.handleStreamChunk = originalChunk;
       if (input.sendMessage === wrappedSend) input.sendMessage = originalSend;
       if (wrappedCancel && input.cancelStreaming === wrappedCancel) input.cancelStreaming = originalCancel;
+      if (wrappedExecutionEvent && input.handleExecutionEvent === wrappedExecutionEvent) input.handleExecutionEvent = originalExecutionEvent;
       delete stream[WRAP];
       delete input[WRAP];
     });

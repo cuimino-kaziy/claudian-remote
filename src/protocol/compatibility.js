@@ -1,4 +1,12 @@
-export const REQUIRED_CLAUDIAN_VERSION = "2.0.4";
+export const REQUIRED_CLAUDIAN_VERSION = "2.2.6";
+export const SUPPORTED_CLAUDIAN_VERSIONS = Object.freeze(["2.0.4", "2.2.6"]);
+
+export function canSubmitToClaudian(claudian, tab) {
+  const state = tab?.state;
+  const admission = tab?.session?.acceptsIntents;
+  return (claudianManifest(claudian).version === "2.2.6" ? admission === true : admission !== false)
+    && !state?.isCreatingConversation && !state?.isSwitchingConversation && !state?.isRewinding;
+}
 
 export const REQUIRED_CLAUDIAN_CAPABILITIES = Object.freeze([
   "semantic_stream",
@@ -11,10 +19,10 @@ export const REQUIRED_CLAUDIAN_CAPABILITIES = Object.freeze([
 ]);
 
 export const COMPATIBILITY_SET = Object.freeze({
-  id: "claudian-remote-0.2.0-beta.4",
-  plugin: "0.2.0-beta.4",
-  companion: "0.2.0-beta.4",
-  relay: "0.2.0-beta.4",
+  id: "claudian-remote-0.2.0-beta.5",
+  plugin: "0.2.0-beta.5",
+  companion: "0.2.0-beta.5",
+  relay: "0.2.0-beta.5",
   protocol: "claudian.remote.v2",
   configuration_schema: 1
 });
@@ -33,7 +41,7 @@ export function claudianManifest(claudian) {
 
 export function evaluateClaudianCompatibility({ manifest = {}, capabilities = {} } = {}) {
   const currentVersion = text(manifest.version);
-  if (currentVersion !== REQUIRED_CLAUDIAN_VERSION) {
+  if (!SUPPORTED_CLAUDIAN_VERSIONS.includes(currentVersion)) {
     return {
       writable: false,
       mode: "read_only",
@@ -44,7 +52,11 @@ export function evaluateClaudianCompatibility({ manifest = {}, capabilities = {}
       remediation: `Update Claudian to ${REQUIRED_CLAUDIAN_VERSION}`
     };
   }
-  const missing = REQUIRED_CLAUDIAN_CAPABILITIES.filter((key) => capabilities?.[key] !== true);
+  // 2.2.6 terminal events bypass legacy stream chunks; steer is provider-dependent.
+  const required = currentVersion === "2.2.6"
+    ? REQUIRED_CLAUDIAN_CAPABILITIES.map((key) => key === "steer" ? "native_execution_events" : key)
+    : REQUIRED_CLAUDIAN_CAPABILITIES;
+  const missing = required.filter((key) => capabilities?.[key] !== true);
   if (missing.length) {
     return {
       writable: false,

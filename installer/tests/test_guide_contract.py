@@ -52,6 +52,7 @@ def test_every_actionable_result_and_gate_has_guide_copy():
         "pairing_admin_bootstrap_required",
         "desktop_plugin_bootstrap_required",
         "obsidian_close_for_migration_required",
+        "legacy_authority_authorization_required",
         "purge_confirmation_required",
         "diagnostic_export_confirmation_required",
     }
@@ -70,3 +71,28 @@ def test_guide_explains_product_defaults_to_tailscale_and_minimizes_questions():
     assert "由 Agent 继续操作" in text
     assert "我自己操作" in text
     assert "remote_vps" in text and "尚未开放" in text
+
+
+def test_guide_uses_typed_retirement_outcomes_and_recovery_boundaries():
+    text = GUIDE.read_text(encoding="utf-8")
+    for outcome in ("not_applied", "retired", "inconclusive"):
+        assert outcome in text
+    # Three-way recovery copy, never interchanged.
+    assert "finish_forward" in text
+    assert "reconcile_retirement_outcome" in text
+    assert "预边界回滚" in text or "rollback" in text
+    # After dispatch, cancellation is unavailable and no new install may start.
+    assert "cancellation_available" in text
+    assert "派发后" in text
+
+
+def test_guide_covers_capability_split_and_tailnet_fast_path():
+    text = GUIDE.read_text(encoding="utf-8")
+    assert "requires_capability" in text
+    assert "browser_control" in text
+    assert "computer_control" in text
+    assert "快速路径" in text
+    assert "CLI integration" in text
+    # Unknown schema still stops and diagnoses; never ad-hoc or secret requests.
+    assert "失败关闭" in text
+    assert "diagnose" in text

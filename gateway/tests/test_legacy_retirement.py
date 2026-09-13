@@ -3,6 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import hmac
+import json
+from dataclasses import asdict
 
 import pytest
 
@@ -58,6 +60,29 @@ def request(**changes):
     return LegacyRetirementRequest.from_mapping(value)
 
 
+@pytest.mark.parametrize("profile_id", ["unsupported", "", None, []])
+def test_invalid_retirement_profile_is_rejected_before_storage(tmp_path, profile_id):
+    with pytest.raises(ValueError, match="legacy_retirement_profile_invalid"):
+        RelayConfig(legacy_retirement_profile_id=profile_id)
+    config_path = tmp_path / "relay.json"
+    config_path.write_text(json.dumps({"legacy_retirement_profile_id": profile_id}))
+    with pytest.raises(ValueError, match="legacy_retirement_profile_invalid"):
+        RelayConfig.from_file(config_path)
+    database = tmp_path / "retirement.db"
+    with pytest.raises(ValueError, match="legacy_retirement_profile_invalid"):
+        LegacyRetirementStore(
+            database,
+            profile_id=profile_id,
+            authority_instance_id="authority-a",
+            protocol_version="legacy-retirement/v1",
+            runtime_key_id="runtime-key-a",
+            runtime_key=b"runtime-proof-key",
+            restart_epoch=1,
+            clock=lambda: NOW,
+        )
+    assert not database.exists()
+
+
 def test_local_retirement_is_idempotent_and_persists_across_restart(tmp_path):
     database = tmp_path / "legacy-retirement.db"
     runtime_key = b"runtime-proof-key"
@@ -81,6 +106,9 @@ def test_local_retirement_is_idempotent_and_persists_across_restart(tmp_path):
         consumer_installation_ids=("installation-a",),
         generation=1,
     )
+    assert store.descriptor("slot-a", authority_origin="https://relay.example")[
+        "authority"
+    ]["profile_id"] == "dogfood-local-v1"
 
     first = store.retire(request(), b"old-mobile-secret")
     assert first["outcome"] == "retired"
@@ -213,9 +241,11 @@ def test_wrong_binding_and_generation_leave_the_old_credential_active(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("profile_id", ["dogfood-local-v1", "dogfood-vps-v1"])
 async def test_relay_route_retires_old_token_and_rejects_it_immediately(
     tmp_path,
     aiohttp_client,
+    profile_id,
 ):
     runtime_key = tmp_path / "runtime-proof.key"
     runtime_key.write_bytes(b"runtime-proof-key")
@@ -241,6 +271,7 @@ async def test_relay_route_retires_old_token_and_rejects_it_immediately(
         upload_reserve_min_bytes=0,
         upload_reserve_fraction=0,
         legacy_retirement_enabled=True,
+        legacy_retirement_profile_id=profile_id,
         legacy_retirement_database_path=str(tmp_path / "retirement.db"),
         legacy_retirement_authority_instance_id="authority-a",
         legacy_retirement_runtime_key_id="runtime-key-a",
@@ -248,7 +279,12 @@ async def test_relay_route_retires_old_token_and_rejects_it_immediately(
         legacy_retirement_owner_id="owner-a",
         legacy_retirement_mac_id="mac-a",
     )
-    client = await aiohttp_client(create_app(config))
+    config_data = asdict(config)
+    if profile_id == "dogfood-local-v1":
+        config_data.pop("legacy_retirement_profile_id")
+    config_path = tmp_path / "relay.json"
+    config_path.write_text(json.dumps(config_data))
+    client = await aiohttp_client(create_app(RelayConfig.from_file(config_path)))
     headers = {"Authorization": "Bearer old-mobile-secret"}
 
     descriptor_response = await client.get(
@@ -257,6 +293,7 @@ async def test_relay_route_retires_old_token_and_rejects_it_immediately(
     )
     assert descriptor_response.status == 200
     descriptor = await descriptor_response.json()
+    assert descriptor["authority"]["profile_id"] == profile_id
     slot = descriptor["slot"]
 
     retirement = request(

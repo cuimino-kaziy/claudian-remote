@@ -40,8 +40,16 @@ test("runtime asset verification has a per-asset timeout with target context", a
       sha256: "a".repeat(64)
     }
   };
+  // AbortSignal.timeout's timer is unref'd, so it does not keep the Node event
+  // loop alive on its own; in a busy CI loop the abort could be starved before
+  // the fake fetch settles. Keep the loop alive from the fetch side so the
+  // production default per-asset timeout deterministically fires the abort.
   const fetchImpl = (_url, { signal }) => new Promise((_resolve, reject) => {
-    signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+    const keepAlive = setInterval(() => {}, 60_000);
+    signal.addEventListener("abort", () => {
+      clearInterval(keepAlive);
+      reject(signal.reason);
+    }, { once: true });
   });
 
   await assert.rejects(

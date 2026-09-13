@@ -5,16 +5,216 @@ import { SourceCapture } from "../src/source-capture.js";
 import { SemanticStreamNormalizer } from "../src/stream-normalizer.js";
 
 function supportedClaudian(tab, value = {}) {
+  tab.session = { acceptsIntents: true };
   const input = tab.controllers.inputController;
   if (typeof input.cancelStreaming !== "function") input.cancelStreaming = () => {};
   if (typeof input.steerQueuedMessage !== "function") input.steerQueuedMessage = async () => {};
   if (typeof input.handleApprovalRequest !== "function") input.handleApprovalRequest = async () => "cancel";
+  if (typeof input.handleExecutionEvent !== "function") input.handleExecutionEvent = async () => {};
   const activeCapabilities = input.getActiveCapabilities?.bind(input);
   input.getActiveCapabilities = () => ({ ...(activeCapabilities?.() || {}), supportsTurnSteer: true });
-  return { manifest: { id: "realclaudian", version: "2.0.4" }, ...value };
+  return { manifest: { id: "realclaudian", version: "2.2.6" }, ...value };
 }
 
-test("provider done is observable but completion waits for sendMessage save barrier", async () => {
+test("Claudian 2.2.6 ignored submissions produce no remote turn or completion", async () => {
+  for (const blocked of ["paused", "missing_session", "isCreatingConversation", "isSwitchingConversation", "isRewinding"]) {
+    const events = [];
+    let calls = 0;
+    const tab = {
+      conversationId: "conv", state: { isStreaming: false, messages: [] },
+      controllers: {
+        streamController: { async handleStreamChunk() {} },
+        inputController: { async sendMessage() { calls += 1; } },
+        conversationController: { async switchTo() {} }
+      }
+    };
+    const claudian = supportedClaudian(tab, { getConversationList: () => [] });
+    if (blocked === "paused") tab.session.acceptsIntents = false;
+    else if (blocked === "missing_session") delete tab.session;
+    else tab.state[blocked] = true;
+    const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "admission", emit: (event) => events.push(event) });
+    const capture = new SourceCapture({ claudian, normalizer });
+    capture.instrument(tab);
+    await tab.controllers.inputController.sendMessage({ content: "ignored" });
+    assert.equal(calls, 1, "desktop controller still owns its admission check");
+    assert.deepEqual(events, [], blocked);
+    capture.unload();
+    normalizer.dispose();
+  }
+});
+
+for (const [nativeType, terminalType, errorCode] of [
+  ["execution_error", "turn.failed", "provider_error"],
+  ["cancelled", "turn.interrupted"],
+  ["turn_completed", "turn.completed"],
+  [null, "turn.failed", "completion_unconfirmed"]
+]) test(`2.2.6 ${nativeType || "missing terminal"} stays truthful after save`, async () => {
+  const events = [];
+  const nativeCalls = [];
+  let releaseSave;
+  const saved = new Promise((resolve) => { releaseSave = resolve; });
+  const message = { id: "native-message", role: "assistant", content: "safe answer" };
+  const tab = {
+    conversationId: "conv-native", state: { isStreaming: false, messages: [message] },
+    controllers: {
+      streamController: { async handleStreamChunk() { assert.fail("native terminal events do not convert to chunks"); } },
+      inputController: {
+        async handleExecutionEvent(event) { nativeCalls.push([this, event]); return "native-result"; },
+        async sendMessage() {
+          tab.state.isStreaming = true;
+          if (nativeType) {
+            assert.equal(await this.handleExecutionEvent({ type: nativeType, raw: "private-provider-data" }), "native-result");
+          }
+          await saved;
+          tab.state.isStreaming = false;
+          return "saved-result";
+        }
+      },
+      conversationController: { async switchTo() {} }
+    }
+  };
+  const claudian = supportedClaudian(tab, { getConversationList: () => [] });
+  const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "native-terminal", emit: (event) => events.push(event) });
+  const capture = new SourceCapture({ claudian, normalizer });
+  const input = tab.controllers.inputController;
+  const originalEvent = input.handleExecutionEvent;
+  capture.instrument(tab);
+  const wrappedEvent = input.handleExecutionEvent;
+  capture.instrument(tab);
+  assert.equal(input.handleExecutionEvent, wrappedEvent);
+  assert.notEqual(wrappedEvent, originalEvent);
+  const pending = input.sendMessage({ content: "question" });
+  try {
+    await new Promise(setImmediate);
+    assert.deepEqual(events.map((event) => event.event_type), ["turn.started"]);
+    releaseSave();
+    assert.equal(await pending, "saved-result");
+    const terminals = events.filter((event) => ["turn.completed", "turn.failed", "turn.interrupted"].includes(event.event_type));
+    assert.equal(terminals.length, 1);
+    assert.equal(terminals[0].event_type, terminalType);
+    if (errorCode) assert.equal(terminals[0].payload.error_code, errorCode);
+    assert.equal(events.find((event) => event.event_type === "keyframe.page").payload.projection.turns[0].status, terminalType.slice(5));
+    assert.ok(events.findIndex((event) => event.event_type === "keyframe.final") < events.indexOf(terminals[0]));
+    assert.equal(JSON.stringify(events).includes("private-provider-data"), false);
+    assert.equal(nativeCalls.length, nativeType ? 1 : 0);
+    if (nativeType) assert.equal(nativeCalls[0][0], input);
+  } finally {
+    releaseSave();
+    await pending;
+    capture.refresh([]);
+    assert.equal(input.handleExecutionEvent, originalEvent);
+    capture.instrument(tab);
+    capture.unload();
+    assert.equal(input.handleExecutionEvent, originalEvent);
+    normalizer.dispose();
+  }
+});
+
+test("2.2.6 admits before yielding and a queued send preserves native terminal evidence", async () => {
+  const events = [];
+  let releaseStart;
+  let releaseSave;
+  const startPublished = new Promise((resolve) => { releaseStart = resolve; });
+  const saved = new Promise((resolve) => { releaseSave = resolve; });
+  let turns = 0;
+  let queued = 0;
+  const tab = {
+    conversationId: "conv", state: { isStreaming: false, messages: [] },
+    controllers: {
+      streamController: { async handleStreamChunk() {} },
+      inputController: {
+        async sendMessage() {
+          if (!tab.session.acceptsIntents) return;
+          if (tab.state.isStreaming) { queued += 1; return; }
+          turns += 1;
+          tab.state.isStreaming = true;
+          await this.handleExecutionEvent({ type: "turn_completed" });
+          await saved;
+          tab.state.isStreaming = false;
+        }
+      },
+      conversationController: { async switchTo() {} }
+    }
+  };
+  const claudian = supportedClaudian(tab, { getConversationList: () => [] });
+  const normalizer = new SemanticStreamNormalizer({
+    sourceInstanceId: "admission-order",
+    emit: (event) => {
+      events.push(event);
+      if (event.event_type === "turn.started") {
+        queueMicrotask(() => { tab.session.acceptsIntents = false; });
+        return startPublished;
+      }
+    }
+  });
+  const capture = new SourceCapture({ claudian, normalizer });
+  capture.instrument(tab);
+  const pending = tab.controllers.inputController.sendMessage({ content: "first" });
+  try {
+    assert.equal(turns, 1, "native admission must precede the first async yield");
+    await tab.controllers.inputController.sendMessage({ content: "queue" });
+    assert.equal(queued, 1);
+    releaseSave();
+    await new Promise(setImmediate);
+    assert.equal(events.some((event) => event.event_type === "turn.completed"), false);
+    releaseStart();
+    await pending;
+    assert.equal(events.filter((event) => event.event_type === "turn.started").length, 1);
+    assert.equal(events.filter((event) => event.event_type === "turn.completed").length, 1);
+  } finally {
+    releaseStart();
+    releaseSave();
+    await pending;
+    capture.unload();
+    normalizer.dispose();
+  }
+});
+
+test("native auto-continuation keeps the shared turn running until the latest save barrier", async () => {
+  const events = [];
+  let releaseContinuation;
+  let continuation;
+  const continuationSave = new Promise((resolve) => { releaseContinuation = resolve; });
+  const tab = {
+    conversationId: "conv", state: { isStreaming: false, messages: [] },
+    controllers: {
+      streamController: { async handleStreamChunk() {} },
+      inputController: {
+        async sendMessage({ content }) {
+          tab.state.isStreaming = true;
+          await this.handleExecutionEvent({ type: content === "outer" ? "turn_completed" : "execution_error" });
+          if (content === "outer") {
+            tab.state.isStreaming = false;
+            continuation = this.sendMessage({ content: "continuation" });
+          } else {
+            await continuationSave;
+            tab.state.isStreaming = false;
+          }
+        }
+      },
+      conversationController: { async switchTo() {} }
+    }
+  };
+  const claudian = supportedClaudian(tab, { getConversationList: () => [] });
+  const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "continuation", emit: (event) => events.push(event) });
+  const capture = new SourceCapture({ claudian, normalizer });
+  capture.instrument(tab);
+  try {
+    await tab.controllers.inputController.sendMessage({ content: "outer" });
+    assert.equal(events.some((event) => /keyframe\.|turn\.(completed|failed|interrupted)$/.test(event.event_type)), false);
+    assert.equal(normalizer.projectionForTurn({ conversationId: "conv", turnId: "turn-conv" }).status, "running");
+    releaseContinuation();
+    await continuation;
+    assert.deepEqual(events.filter((event) => /turn\.(completed|failed)$/.test(event.event_type)).map((event) => event.event_type), ["turn.failed"]);
+  } finally {
+    releaseContinuation();
+    await continuation;
+    capture.unload();
+    normalizer.dispose();
+  }
+});
+
+for (const version of ["2.0.4", "2.2.6"]) test(`${version} provider done is observable but completion waits for sendMessage save barrier`, async () => {
   const events = [];
   let releaseSave;
   const saved = new Promise((resolve) => { releaseSave = resolve; });
@@ -24,11 +224,22 @@ test("provider done is observable but completion waits for sendMessage save barr
     state: { isStreaming: false, messages: [message] },
     controllers: {
       streamController: { async handleStreamChunk() {} },
-      inputController: { async sendMessage() { await saved; }, getActiveCapabilities: () => ({}) },
+      inputController: {
+        async sendMessage() {
+          if (version === "2.2.6") await this.handleExecutionEvent({ type: "turn_completed" });
+          await saved;
+        },
+        getActiveCapabilities: () => ({})
+      },
       conversationController: { switchTo() {} }
     }
   };
   const claudian = supportedClaudian(tab, { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] });
+  claudian.manifest.version = version;
+  if (version === "2.0.4") {
+    delete tab.session;
+    delete tab.controllers.inputController.handleExecutionEvent;
+  }
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
   const capture = new SourceCapture({ claudian, normalizer });
   capture.instrument(tab);
@@ -62,7 +273,7 @@ test("queued send does not emit a false completion barrier", async () => {
   assert.equal(events.some((event) => event.event_type === "turn.completed"), false);
 });
 
-test("error chunk converges to one failed terminal instead of completed plus failed", async () => {
+test("legacy 2.0.4 error chunk converges to one failed terminal without a session", async () => {
   const events = [];
   const message = { id: "message-1", role: "assistant", content: "", toolCalls: [] };
   const tab = {
@@ -74,7 +285,11 @@ test("error chunk converges to one failed terminal instead of completed plus fai
     }
   };
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
-  const capture = new SourceCapture({ claudian: supportedClaudian(tab, { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] }), normalizer });
+  const claudian = supportedClaudian(tab, { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] });
+  claudian.manifest.version = "2.0.4";
+  delete tab.session;
+  delete tab.controllers.inputController.handleExecutionEvent;
+  const capture = new SourceCapture({ claudian, normalizer });
   capture.instrument(tab);
   await tab.controllers.streamController.handleStreamChunk({ type: "error", content: "private provider failure" }, message);
   await tab.controllers.inputController.sendMessage({ content: "question" });
@@ -85,7 +300,7 @@ test("error chunk converges to one failed terminal instead of completed plus fai
   assert.equal(JSON.stringify(events).includes("private provider failure"), false);
 });
 
-test("repeated stop emits one interrupted terminal after an interrupted final keyframe", async () => {
+test("late repeated stop overrides native completion before the save barrier", async () => {
   const events = [];
   let release;
   const cancelled = new Promise((resolve) => { release = resolve; });
@@ -100,6 +315,7 @@ test("repeated stop emits one interrupted terminal after an interrupted final ke
         async sendMessage() {
           tab.state.isStreaming = true;
           tab.state.queuedMessage = { content: "queued draft stays on desktop" };
+          await this.handleExecutionEvent({ type: "turn_completed" });
           await cancelled;
           tab.state.isStreaming = false;
         },
@@ -170,6 +386,7 @@ test("completion keyframe carries the observed mobile-safe operation, approvals,
       inputController: {
         async sendMessage() {
           tab.state.isStreaming = true;
+          await this.handleExecutionEvent({ type: "turn_completed" });
           await saved;
           tab.state.isStreaming = false;
         },

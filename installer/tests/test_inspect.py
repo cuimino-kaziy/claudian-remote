@@ -2,9 +2,12 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from installer.claudian_remote_lifecycle.cli import LifecycleServices, main
 from installer.claudian_remote_lifecycle.inspect import Inspector, LocalInspectionProbe
 from installer.claudian_remote_lifecycle.model import SNAPSHOT_SCHEMA
+from installer.claudian_remote_lifecycle.plan import PlanBuilder
 
 
 class FakeProbe:
@@ -69,8 +72,21 @@ def test_unsupported_claudian_blocks_mutation_but_inspection_still_returns_snaps
     assert code == 2
     assert result["state"] == "blocked"
     assert result["code"] == "unsupported_claudian_version"
-    assert result["data"]["snapshot"]["support"]["required_claudian_version"] == "2.0.4"
+    assert result["data"]["snapshot"]["support"]["required_claudian_version"] == "2.2.6"
     assert result["data"]["mutation_performed"] is False
+
+
+@pytest.mark.parametrize("version", ["2.0.4", "2.2.6", "2.2.5", "2.2.7"])
+def test_exact_version_allowlist_agrees_for_inspection_and_selected_vault(version):
+    probe = FakeProbe(claudian_version=version, vaults=[{
+        "vault_id": "vault-a", "display_name": "Notes",
+        "claudian_version": version, "claudian_enabled": True,
+    }])
+    snapshot = Inspector(probe).snapshot()
+    supported = version in {"2.0.4", "2.2.6"}
+    assert ("unsupported_claudian_version" not in snapshot["support"]["reason_codes"]) == supported
+    plan = PlanBuilder().build(snapshot, mode="local_tailscale", vault_id="vault-a")
+    assert ("unsupported_claudian_version" not in plan["blockers"]) == supported
 
 
 def test_local_probe_discovers_vault_and_claudian_without_exposing_local_path(tmp_path):
@@ -200,15 +216,24 @@ def test_local_probe_classifies_recognized_legacy_plugin_without_exposing_creden
     assert str(tmp_path) not in encoded
 
 
-def test_local_probe_rejects_unknown_legacy_plugin_version_before_upgrade(tmp_path):
+@pytest.mark.parametrize("version, build, recognized", [
+    ("custom-build", b"known-build", False),
+    ("0.2.0", b"known-build", True),
+    ("0.2.0", b"unknown-build", False),
+])
+def test_local_probe_binds_legacy_version_to_known_build(tmp_path, monkeypatch, version, build, recognized):
+    import hashlib
+    from installer.claudian_remote_lifecycle import inspect as inspection
+    monkeypatch.setattr(inspection, "SUPPORTED_LEGACY_PLUGIN_BUILDS", {"0.2.0": hashlib.sha256(b"known-build").hexdigest()})
     home = tmp_path / "home"
     vault = tmp_path / "Private" / "Notes"
     plugin = vault / ".obsidian" / "plugins" / "whale-agent-bridge"
     plugin.mkdir(parents=True)
     (plugin / "manifest.json").write_text(
-        json.dumps({"id": "whale-agent-bridge", "version": "custom-build"}),
+        json.dumps({"id": "whale-agent-bridge", "version": version}),
         encoding="utf-8",
     )
+    (plugin / "main.js").write_bytes(build)
     (vault / ".obsidian" / "community-plugins.json").write_text(
         '["whale-agent-bridge"]', encoding="utf-8"
     )
@@ -224,12 +249,15 @@ def test_local_probe_rejects_unknown_legacy_plugin_version_before_upgrade(tmp_pa
     assert snapshot["installation"]["plugin_lineage"]["legacy"] == {
         "enabled": True,
         "present": True,
-        "recognized": False,
-        "versions": ["custom-build"],
+        "recognized": recognized,
+        "versions": [version],
     }
-    assert snapshot["journey"]["journey"] == "coexistence_conflict"
-    assert snapshot["journey"]["reason_code"] == "unsupported_legacy_lineage"
-    assert snapshot["journey"]["blocked"] is True
+    if not recognized:
+        assert snapshot["journey"]["journey"] == "coexistence_conflict"
+        assert snapshot["journey"]["reason_code"] == "unsupported_legacy_lineage"
+        assert snapshot["journey"]["blocked"] is True
+    else:
+        assert snapshot["journey"]["journey"] == "legacy_upgrade"
 
 
 def test_both_enabled_remote_plugins_are_reported_as_a_conflict(tmp_path):

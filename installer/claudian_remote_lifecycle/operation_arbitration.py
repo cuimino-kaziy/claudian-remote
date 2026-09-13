@@ -41,7 +41,6 @@ _TRANSACTION_FIELDS = frozenset(
 )
 _TRANSACTION_COMPLETED_PHASES = (
     "staging",
-    "legacy_plugin_migration",
     "secure_provisioning",
     "plugin_activation",
     "launchd",
@@ -52,13 +51,13 @@ _TRANSACTION_COMPLETED_PHASES = (
 _TRANSACTION_PHASE_PREFIXES = {
     "before_staging": 0,
     "before_legacy_migration": 1,
-    "before_activation": 2,
-    "activation_started": 2,
-    "plugin_activated": 3,
-    "after_activation": 6,
-    "await_plugin_bootstrap": 6,
-    "await_pairing": 7,
-    "ready": 8,
+    "before_activation": 1,
+    "activation_started": 1,
+    "plugin_activated": 2,
+    "after_activation": 5,
+    "await_plugin_bootstrap": 5,
+    "await_pairing": 6,
+    "ready": 7,
 }
 
 
@@ -115,21 +114,26 @@ class _ClassifiedOperation:
 class OperationArbitrator:
     """Reconcile supported v1/v2 operations without selecting by file mtime."""
 
-    def __init__(self, state_dir: Path) -> None:
+    def __init__(self, state_dir: Path, *, journal_dir: Path | None = None) -> None:
         self.state_dir = Path(state_dir)
+        self.journal_dir = Path(journal_dir) if journal_dir is not None else self.state_dir
 
-    def inspect(self) -> OperationArbitration:
-        if not self.state_dir.exists():
-            return OperationArbitration("clear", "no_prior_operation", True)
-        if not self.state_dir.is_dir() or self.state_dir.is_symlink():
-            return self._invalid()
-
+    def inspect(self, *, operation_id: str | None = None) -> OperationArbitration:
+        requested_operation = operation_id
         checkpoint_paths: dict[str, Path] = {}
-        transaction_ids: set[str] = set()
-        migration_ids: set[str] = set()
-        diagnostic_destination_ids: set[str] = set()
+        transaction_paths: dict[str, Path] = {}
+        migration_paths: dict[str, Path] = {}
+        diagnostic_destination_paths: dict[str, Path] = {}
+        entries = []
         try:
-            entries = tuple(self.state_dir.iterdir())
+            for directory in dict.fromkeys((self.state_dir, self.journal_dir)):
+                if directory.is_symlink():
+                    return self._invalid()
+                if not directory.exists():
+                    continue
+                if not directory.is_dir():
+                    return self._invalid()
+                entries.extend(directory.iterdir())
         except OSError:
             return self._invalid()
         for path in entries:
@@ -144,18 +148,26 @@ class OperationArbitrator:
                 path.name
             )
             if checkpoint:
+                if path.parent != self.state_dir:
+                    return self._invalid()
                 checkpoint_paths[checkpoint.group(1)] = path
             elif transaction:
-                transaction_ids.add(transaction.group(1))
+                if transaction.group(1) in transaction_paths:
+                    return self._invalid()
+                transaction_paths[transaction.group(1)] = path
             elif migration:
-                migration_ids.add(migration.group(1))
+                if migration.group(1) in migration_paths:
+                    return self._invalid()
+                migration_paths[migration.group(1)] = path
             elif diagnostic_destination:
-                diagnostic_destination_ids.add(diagnostic_destination.group(1))
+                if path.parent != self.state_dir:
+                    return self._invalid()
+                diagnostic_destination_paths[diagnostic_destination.group(1)] = path
             elif path.name.startswith("op-") and path.suffix == ".json":
                 return self._invalid()
 
         companion_ids = (
-            transaction_ids | migration_ids | diagnostic_destination_ids
+            transaction_paths.keys() | migration_paths.keys() | diagnostic_destination_paths.keys()
         )
         if companion_ids - set(checkpoint_paths):
             return self._invalid()
@@ -174,36 +186,21 @@ class OperationArbitrator:
                     current = self._validate_v2_companions(
                         current,
                         plan=plan,
-                        transaction_path=(
-                            self.state_dir / f"{operation_id}.transaction.json"
-                            if operation_id in transaction_ids
-                            else None
-                        ),
-                        migration_path=(
-                            self.state_dir / f"{operation_id}.legacy-plugin.json"
-                            if operation_id in migration_ids
-                            else None
-                        ),
-                        diagnostic_destination_path=(
-                            self.state_dir
-                            / f"{operation_id}.diagnostic-destination.json"
-                            if operation_id in diagnostic_destination_ids
-                            else None
-                        ),
+                        transaction_path=transaction_paths.get(operation_id),
+                        migration_path=migration_paths.get(operation_id),
+                        diagnostic_destination_path=diagnostic_destination_paths.get(operation_id),
                     )
                     classified.append(self._classify_v2(current))
                 except (OSError, ValueError):
                     return self._invalid()
                 continue
             saved_plan = self.state_dir / "plans" / f"{plan_id}.json"
-            transaction = self.state_dir / f"{operation_id}.transaction.json"
-            migration = self.state_dir / f"{operation_id}.legacy-plugin.json"
             try:
                 reconciliation = decode_v1_compatibility_set(
                     checkpoint_path=checkpoint,
                     saved_plan_path=saved_plan,
-                    local_transaction_path=transaction if transaction.is_file() else None,
-                    legacy_migration_path=migration if migration.is_file() else None,
+                    local_transaction_path=transaction_paths.get(operation_id),
+                    legacy_migration_path=migration_paths.get(operation_id),
                 )
             except (CompatibilityDecodeError, OSError):
                 return self._invalid()
@@ -220,6 +217,13 @@ class OperationArbitrator:
                 True,
                 terminal_operation_ids=terminal_ids,
             )
+        if len(unfinished) != 1 and requested_operation is not None:
+            # Only the narrow v1 staging rollback may recover one explicitly
+            # named operation among several. Its live probes forbid activation
+            # effects; install/resume still require global reconciliation.
+            selected = [item for item in unfinished if item.operation_id == requested_operation]
+            if selected and selected[0].reconciliation is not None and selected[0].action == "rollback":
+                unfinished = selected
         if len(unfinished) != 1:
             return OperationArbitration(
                 "blocked",
@@ -373,6 +377,7 @@ class OperationArbitrator:
             transaction_path,
             operation_id=str(current["operation_id"]),
             plan_id=str(current["plan_id"]),
+            journey=str(plan["journey"]),
         )
         transaction_phase = str(transaction["phase"])
         checkpoint_state = str(current["state"])
@@ -396,6 +401,36 @@ class OperationArbitrator:
             raise ValueError("checkpoint_transaction_terminal_mismatch")
         if checkpoint_state == "rolled_back" and transaction_phase != "rolled_back":
             raise ValueError("checkpoint_transaction_terminal_mismatch")
+
+        if (
+            current.get("journey") == "fresh_install"
+            and checkpoint_state == "blocked"
+            and current.get("phase") == "preparation"
+            and current.get("active_gate") is None
+            and current.get("next_actions") == []
+            and current.get("recovery_policy") == "not_applicable"
+            and current.get("irreversible_boundary_crossed") is False
+            and current.get("cancellation_available") is False
+            and transaction_phase == "await_pairing"
+            and transaction.get("activation_started") is True
+            and transaction.get("plugin_activated") is True
+            and checkpoint_completed == transaction_completed
+            and current.get("effect_summary") == {
+                "credential_effect": "not_applicable", "effect_codes": ["environment_drift"],
+                "local_effect": "unchanged", "mutation_performed": False,
+                "owned_resource_count": 0, "remote_effect": "not_applicable",
+            }
+        ):
+            # Earlier resume failures erased the outer recovery controls.
+            # The bound activation journal permits rechecking the same plan;
+            # it does not establish pairing success or permit a new operation.
+            current.update(
+                state="prepared", phase=LifecyclePhase.PAIRING.value,
+                recovery_policy="retry_same_operation",
+                next_actions=[_projected_lifecycle_action("resume")],
+                effect_summary={**current["effect_summary"], "local_effect": "staged",
+                    "mutation_performed": True, "owned_resource_count": 1},
+            )
 
         if transaction_phase == "recovery_required":
             if split_retirement_reconciliation:
@@ -671,6 +706,13 @@ class OperationArbitrator:
             )
         if state == "blocked" and value.active_gate_present:
             return _ClassifiedOperation(value.operation_id, False, "prior_operation_gate_waiting", "resume", value)
+        if (
+            state == "blocked"
+            and value.checkpoint_phase == "release_archive_unsafe_member"
+            and not value.completed_phases
+            and transaction in {"before_staging", "rolled_back"}
+        ):
+            return _ClassifiedOperation(value.operation_id, False, "prior_operation_recovery_required", "rollback", value)
         if state == "blocked" and not value.mutation_may_have_started and transaction in {
             None,
             "before_staging",
@@ -834,6 +876,7 @@ def _read_transaction_companion(
     *,
     operation_id: str,
     plan_id: str,
+    journey: str,
 ) -> dict[str, Any]:
     try:
         value = json.loads(
@@ -860,13 +903,26 @@ def _read_transaction_companion(
     }:
         raise ValueError("invalid_transaction_companion_phase")
     completed = transaction.get("completed_phases")
+    completed_sequence = _TRANSACTION_COMPLETED_PHASES
+    if journey == "legacy_upgrade":
+        completed_sequence = (
+            completed_sequence[:1]
+            + ("legacy_plugin_migration",)
+            + completed_sequence[1:]
+        )
     if (
         not isinstance(completed, list)
-        or completed != list(_TRANSACTION_COMPLETED_PHASES[: len(completed)])
+        or completed != list(completed_sequence[: len(completed)])
     ):
         raise ValueError("invalid_transaction_companion_progress")
-    if phase in _TRANSACTION_PHASE_PREFIXES and len(completed) != _TRANSACTION_PHASE_PREFIXES[phase]:
-        raise ValueError("invalid_transaction_companion_progress")
+    if phase in _TRANSACTION_PHASE_PREFIXES:
+        expected_length = _TRANSACTION_PHASE_PREFIXES[phase]
+        if journey == "legacy_upgrade" and phase not in {
+            "before_staging", "before_legacy_migration",
+        }:
+            expected_length += 1
+        if len(completed) != expected_length:
+            raise ValueError("invalid_transaction_companion_progress")
     activation_started = transaction.get("activation_started")
     plugin_activated = transaction.get("plugin_activated")
     if not isinstance(activation_started, bool) or not isinstance(plugin_activated, bool):

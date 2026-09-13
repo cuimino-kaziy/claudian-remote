@@ -1,4 +1,4 @@
-import { Platform, Plugin, PluginSettingTab, Setting, requestUrl } from "obsidian";
+import { Notice, Platform, Plugin, PluginSettingTab, Setting, requestUrl } from "obsidian";
 import { DesktopAdapter } from "./desktop/adapter.js";
 import {
   CompanionChannel,
@@ -28,6 +28,23 @@ function id(prefix) {
 class RemoteSettingsTab extends PluginSettingTab {
   constructor(app, plugin) { super(app, plugin); this.plugin = plugin; }
 
+  async runPairingAction(button, action) {
+    if (this.pairingBusy) return;
+    this.pairingBusy = true;
+    button.setDisabled(true);
+    const notice = new Notice("正在处理设备配对…", 0);
+    try {
+      await action();
+      this.display();
+    } catch (error) {
+      this.plugin.showPairingError(error);
+    } finally {
+      notice.hide();
+      button.setDisabled(false);
+      this.pairingBusy = false;
+    }
+  }
+
   display() {
     this.containerEl.empty();
     this.containerEl.createEl("h2", { text: "Claudian Remote" });
@@ -49,27 +66,24 @@ class RemoteSettingsTab extends PluginSettingTab {
         .onChange((value) => { shortCode = value; }));
       pairing.addButton((button) => button
         .setButtonText("配对")
-        .onClick(async () => {
+        .onClick(() => this.runPairingAction(button, async () => {
           await this.plugin.mobilePairing?.acceptShortCode(shortCode);
           this.plugin.startMobilePairingPolling();
-          this.display();
-        }));
+        })));
     } else {
       pairing.addButton((button) => button
         .setButtonText("添加移动设备")
-        .onClick(async () => {
+        .onClick(() => this.runPairingAction(button, async () => {
           await this.plugin.createPairingClaim();
-          this.display();
-        }));
+        })));
     }
     if (Platform.isMobileApp && this.plugin.mobilePairing?.pending) {
       new Setting(this.containerEl)
         .setName("等待 Mac 批准")
         .setDesc("批准后点“完成/刷新”；页面保持打开时也会有界自动检查。")
-        .addButton((button) => button.setButtonText("完成/刷新").setCta().onClick(async () => {
+        .addButton((button) => button.setButtonText("完成/刷新").setCta().onClick(() => this.runPairingAction(button, async () => {
           await this.plugin.mobilePairing.complete();
-          this.display();
-        }))
+        })))
         .addButton((button) => button.setButtonText("取消").onClick(() => {
           this.plugin.mobilePairing.cancel();
           this.display();
@@ -85,14 +99,12 @@ class RemoteSettingsTab extends PluginSettingTab {
       new Setting(this.containerEl)
         .setName(pending.device_name || "待审批移动设备")
         .setDesc(`设备 ID：${pending.device_id}`)
-        .addButton((button) => button.setButtonText("批准").setCta().onClick(async () => {
+        .addButton((button) => button.setButtonText("批准").setCta().onClick(() => this.runPairingAction(button, async () => {
           await this.plugin.approvePairingClaim(pending.claim_id, pending.device_id);
-          this.display();
-        }))
-        .addButton((button) => button.setButtonText("拒绝").onClick(async () => {
+        })))
+        .addButton((button) => button.setButtonText("拒绝").onClick(() => this.runPairingAction(button, async () => {
           await this.plugin.rejectPairingClaim(pending.claim_id);
-          this.display();
-        }));
+        })));
     }
     for (const device of this.plugin.pairedDevices || []) {
       new Setting(this.containerEl)
@@ -101,18 +113,16 @@ class RemoteSettingsTab extends PluginSettingTab {
         .addButton((button) => button
           .setButtonText(device.status === "active" ? "撤销" : "已撤销")
           .setDisabled(device.status !== "active")
-          .onClick(async () => {
+          .onClick(() => this.runPairingAction(button, async () => {
             await this.plugin.revokePairedDevice(device.device_id);
-            this.display();
-          }));
+          })));
     }
     if (!Platform.isMobileApp) pairing.addExtraButton((button) => button
       .setIcon("refresh-cw")
       .setTooltip("刷新待审批设备")
-      .onClick(async () => {
+      .onClick(() => this.runPairingAction(button, async () => {
         await this.plugin.refreshPairingManagementState();
-        this.display();
-      }));
+      })));
     new Setting(this.containerEl)
       .setName("附件导入目录")
       .setDesc("相对于当前 Vault，只由 Mac 端导入器写入。")
@@ -136,7 +146,7 @@ export default class ClaudianRemotePlugin extends Plugin {
       void this.mobilePairing.acceptProtocolParams(params).then(() => {
         this.startMobilePairingPolling();
         return this.openMobileView();
-      });
+      }).catch((error) => this.showPairingError(error));
     });
     this.registerView(MOBILE_VIEW_TYPE, (leaf) => new ClaudianRemoteMobileView(leaf, this));
     this.addCommand({ id: "open-claudian-remote", name: "打开 Claudian Remote", callback: () => void this.openMobileView() });
@@ -313,9 +323,26 @@ export default class ClaudianRemotePlugin extends Plugin {
     return true;
   }
 
+  showPairingError(error) {
+    const messages = {
+      pairing_endpoint_missing: "请先填写 Relay 地址。",
+      pairing_endpoint_invalid: "Relay 地址必须是有效的 HTTPS 地址。",
+      pairing_short_code_missing: "请先输入 Mac 上的配对码。",
+      claim_expired: "配对码已过期，请在 Mac 生成新码。",
+      claim_replayed: "配对码已使用，请在 Mac 生成新码。",
+      claim_invalid: "配对码无效，请检查或在 Mac 生成新码。",
+      pairing_wrong_vault: "请打开与 Mac 同步的同一个仓库。",
+      wrong_vault: "请打开与 Mac 同步的同一个仓库。",
+      pairing_request_timeout: "连接超时，请检查 Relay 地址和两端的 Tailscale 连接。"
+    };
+    new Notice(`配对失败：${messages[error?.message] || "请检查 Relay 地址和两端的 Tailscale 连接后重试。"}`, 10000);
+  }
+
   startMobilePairingPolling() {
     if (!this.mobilePairing?.pending) return;
-    void this.mobilePairing.pollUntilComplete({ intervalMs: 1000, maxAttempts: 60 }).catch(() => {});
+    return this.mobilePairing.pollUntilComplete({ intervalMs: 1000, maxAttempts: 60 })
+      .then((result) => { if (result.paired) new Notice("配对成功，可以打开 Claudian Remote。"); })
+      .catch((error) => this.showPairingError(error));
   }
 
   currentPairingClaim() {

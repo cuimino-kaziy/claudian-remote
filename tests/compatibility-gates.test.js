@@ -21,7 +21,7 @@ const fixture = JSON.parse(fs.readFileSync(
 ));
 
 function requiredCapabilities(overrides = {}) {
-  return Object.fromEntries(fixture.required_capabilities.map((key) => [key, overrides[key] ?? true]));
+  return Object.fromEntries([...fixture.required_capabilities, "native_execution_events"].map((key) => [key, overrides[key] ?? true]));
 }
 
 function writableState() {
@@ -38,35 +38,65 @@ function writableState() {
   };
 }
 
-test("versioned Claudian 2.0.4 fixture is the only writable manifest", () => {
-  const supported = evaluateClaudianCompatibility({
-    manifest: fixture.claudian,
-    capabilities: requiredCapabilities()
-  });
-  assert.equal(supported.writable, true);
-  assert.equal(supported.current_version, "2.0.4");
-  assert.equal(supported.required_version, "2.0.4");
+test("only explicitly supported Claudian versions are writable", () => {
+  for (const version of ["2.0.4", "2.2.6"]) {
+    const supported = evaluateClaudianCompatibility({
+      manifest: { ...fixture.claudian, version },
+      capabilities: requiredCapabilities()
+    });
+    assert.equal(supported.writable, true);
+    assert.equal(supported.current_version, version);
+    assert.equal(supported.required_version, "2.2.6");
+  }
   assert.deepEqual(COMPATIBILITY_SET, fixture.compatibility_set);
 
-  for (const version of ["2.0.3", "2.0.5", "", null]) {
+  for (const version of ["2.0.3", "2.0.5", "2.2.5", "2.2.7", "2.2.6-beta", "", null]) {
     const result = evaluateClaudianCompatibility({
       manifest: { id: "realclaudian", version },
       capabilities: requiredCapabilities()
     });
     assert.equal(result.writable, false);
     assert.equal(result.reason, "unsupported_claudian_version");
-    assert.equal(result.required_version, "2.0.4");
+    assert.equal(result.required_version, "2.2.6");
   }
 });
 
 test("supported version still fails closed when a required writable capability is absent", () => {
-  const result = evaluateClaudianCompatibility({
-    manifest: fixture.claudian,
-    capabilities: requiredCapabilities({ stop: false })
-  });
-  assert.equal(result.writable, false);
-  assert.equal(result.reason, "required_capability_missing");
-  assert.deepEqual(result.missing_capabilities, ["stop"]);
+  for (const version of ["2.0.4", "2.2.6"]) {
+    const result = evaluateClaudianCompatibility({
+      manifest: { ...fixture.claudian, version },
+      capabilities: requiredCapabilities({ stop: false })
+    });
+    assert.equal(result.writable, false);
+    assert.equal(result.reason, "required_capability_missing");
+    assert.deepEqual(result.missing_capabilities, ["stop"]);
+  }
+});
+
+test("2.2.6 keeps send available without provider steer and requires native terminal observation", () => {
+  const capabilities = requiredCapabilities({ steer: false });
+  const compatibility = evaluateClaudianCompatibility({ manifest: { version: "2.2.6" }, capabilities });
+  assert.equal(compatibility.writable, true);
+  const state = { ...writableState(), compatibility, capabilities };
+  state.conversations.conv.turns.turn.status = "running";
+  assert.equal(controlAvailability(state).send, true);
+  assert.equal(controlAvailability(state).steer, false);
+  assert.equal(buildCommand(state, "message.submit", { text: "queue this" }).command_type, "message.submit");
+  assert.equal(evaluateClaudianCompatibility({ manifest: { version: "2.0.4" }, capabilities }).writable, false);
+
+  const matrix = JSON.parse(fs.readFileSync(new URL("../release/support-matrix.json", import.meta.url), "utf8"));
+  for (const [version, required] of Object.entries(matrix.claudian.required_capabilities_by_version)) {
+    assert.equal(evaluateClaudianCompatibility({
+      manifest: { version }, capabilities: Object.fromEntries(required.map((key) => [key, true]))
+    }).writable, true);
+    for (const key of required) {
+      const blocked = evaluateClaudianCompatibility({
+        manifest: { version }, capabilities: requiredCapabilities({ [key]: false })
+      });
+      assert.equal(blocked.writable, false, `${version}: ${key}`);
+      assert.deepEqual(blocked.missing_capabilities, [key]);
+    }
+  }
 });
 
 test("every component, protocol, and configuration schema mismatch has precise read-only remediation", () => {
@@ -138,7 +168,7 @@ test("unsupported Claudian bootstrap preserves diagnostics and history while des
   const capability = events.find((event) => event.event_type === "capability.state");
   assert.equal(capability.payload.writable, false);
   assert.equal(capability.payload.current_version, "2.0.5");
-  assert.equal(capability.payload.required_version, "2.0.4");
+  assert.equal(capability.payload.required_version, "2.2.6");
   assert.ok(events.some((event) => event.event_type === "keyframe.page"));
 
   const adapter = new DesktopAdapter({

@@ -25,6 +25,9 @@ PLAN_V1 = "claudian-remote.plan/v1"
 SNAPSHOT_V1 = "claudian-remote.inspection/v1"
 LOCAL_TRANSACTION_V1 = "claudian-remote.local-transaction/v1"
 LEGACY_MIGRATION_V1 = "claudian-remote.legacy-plugin/v1"
+COMPACT_TRANSACTION_FIELDS = frozenset({
+    "transaction_schema", "operation_id", "plan_id", "phase", "completed_phases"
+})
 
 _OPERATION_ID = re.compile(r"op-[0-9a-f]{32}")
 _CONTENT_ID = re.compile(r"(?:plan|inspection)-[0-9a-f]{64}")
@@ -253,7 +256,7 @@ def mark_supported_v1_checkpoint_rolled_back(
         if checkpoint["phase"] != "rollback_completed":
             raise CompatibilityDecodeError("v1_checkpoint_terminal_state_invalid")
         return source.evidence
-    if checkpoint["state"] != "recovery_required":
+    if not _checkpoint_recoverable(checkpoint):
         raise CompatibilityDecodeError("v1_checkpoint_not_recoverable")
 
     updated = {
@@ -332,6 +335,8 @@ def decode_v1_compatibility_set(
     if legacy_migration_path is not None:
         if transaction is None:
             raise CompatibilityDecodeError("v1_companion_missing")
+        if transaction.keys() == COMPACT_TRANSACTION_FIELDS:
+            raise CompatibilityDecodeError("v1_companion_phase_mismatch")
         migration_source = _read_source(
             legacy_migration_path, ArtifactKind.LEGACY_MIGRATION
         )
@@ -374,7 +379,8 @@ def decode_v1_compatibility_set(
         legacy_credential_effect=legacy_effect,
         mutation_may_have_started=bool(
             checkpoint["completed_phases"]
-            or (transaction and transaction["activation_started"])
+            or (transaction and transaction["phase"] == "before_staging")
+            or (transaction and transaction.get("activation_started"))
             or migration is not None
         ),
         sources=tuple(sources),
@@ -464,7 +470,7 @@ def _atomic_replace_checkpoint_if_unchanged(
             expected_operation_id=expected_operation_id,
             expected_checkpoint_sha256=expected_checkpoint_sha256,
         )
-        if checkpoint["state"] != "recovery_required":
+        if not _checkpoint_recoverable(checkpoint):
             raise CompatibilityDecodeError("v1_checkpoint_not_recoverable")
 
         try:
@@ -820,7 +826,32 @@ def _validate_plan(value: Mapping[str, Any], snapshot: Mapping[str, Any]) -> Non
         raise CompatibilityDecodeError("v1_plan_invalid")
 
 
+def _checkpoint_recoverable(value: Mapping[str, Any]) -> bool:
+    return value["state"] == "recovery_required" or (
+        value["state"] == "blocked"
+        and value["phase"] == "release_archive_unsafe_member"
+        and value["completed_phases"] == []
+        and value["active_gate"] is None
+    )
+
+
+def load_supported_v1_transaction(path: Path) -> Mapping[str, Any]:
+    source = _read_source(path, ArtifactKind.LOCAL_TRANSACTION)
+    value = _validate_local_transaction(source.value)
+    _require_filename(path, f"{value['operation_id']}.transaction.json")
+    return value
+
+
 def _validate_local_transaction(value: Mapping[str, Any]) -> Mapping[str, Any]:
+    # Beta 2 wrote five fields before extraction. Missing activation fields
+    # are only understood for this exact pre-activation shape, never filled in.
+    compact = value.keys() == COMPACT_TRANSACTION_FIELDS
+    if compact:
+        _require_match(value["operation_id"], _OPERATION_ID, "v1_transaction_invalid")
+        _require_match(value["plan_id"], re.compile(r"plan-[0-9a-f]{64}"), "v1_transaction_invalid")
+        if value["phase"] not in {"before_staging", "rolled_back"} or value["completed_phases"] != []:
+            raise CompatibilityDecodeError("v1_transaction_invalid")
+        return dict(value)
     _exact_keys(
         value,
         {

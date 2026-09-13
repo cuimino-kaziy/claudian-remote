@@ -32,8 +32,12 @@ from .provisioning import verify_secure_provisioning
 from .runtime import RuntimeLayout
 
 
-SUPPORTED_CLAUDIAN_VERSION = "2.0.4"
+SUPPORTED_CLAUDIAN_VERSION = "2.2.6"
+SUPPORTED_CLAUDIAN_VERSIONS = frozenset({"2.0.4", "2.2.6"})
 SUPPORTED_LEGACY_PLUGIN_VERSIONS = frozenset({"recognized-dogfood-lineage"})
+SUPPORTED_LEGACY_PLUGIN_BUILDS = {
+    "0.2.0": "09e5e1f43b7db46636f12aace6117da579d0a50e322de2c8743ce42b5000de2f",
+}
 
 
 class InspectionProbe(Protocol):
@@ -171,7 +175,13 @@ class LocalInspectionProbe:
                 plugin_id == "whale-agent-bridge"
                 and str(version or "") not in SUPPORTED_LEGACY_PLUGIN_VERSIONS
             ):
-                recognized = False
+                main = plugin / "main.js"
+                try:
+                    build = hashlib.sha256(main.read_bytes()).hexdigest() if not main.is_symlink() else None
+                except OSError:
+                    build = None
+                if build is None or SUPPORTED_LEGACY_PLUGIN_BUILDS.get(str(version)) != build:
+                    recognized = False
             enabled_plugins = self._read_json(
                 vault["_path"] / ".obsidian" / "community-plugins.json"
             )
@@ -225,7 +235,7 @@ class LocalInspectionProbe:
             layout = RuntimeLayout(root, self.home / "Library" / "LaunchAgents")
             if not verify_secure_provisioning(layout, MacOSKeychain()):
                 raise ValueError("secure_provisioning_missing")
-            with socket.create_connection(("127.0.0.1", 27124), timeout=0.25):
+            with socket.create_connection(("127.0.0.1", 27125), timeout=0.25):
                 pass
             return {
                 "secure_provisioning_available": True,
@@ -557,7 +567,7 @@ class Inspector:
         if snapshot["macos"].get("platform") != "Darwin":
             reasons.append("unsupported_desktop_os")
         claudian = snapshot["claudian"]
-        if claudian.get("version") != SUPPORTED_CLAUDIAN_VERSION:
+        if claudian.get("version") not in SUPPORTED_CLAUDIAN_VERSIONS:
             reasons.append("unsupported_claudian_version")
         if not claudian.get("enabled"):
             reasons.append("claudian_not_enabled")

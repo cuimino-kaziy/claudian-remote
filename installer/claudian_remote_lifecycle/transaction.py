@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .availability import validate_bound_vault_name
+from .compatibility_decode import COMPACT_TRANSACTION_FIELDS, load_supported_v1_transaction
 from .launchd import LaunchAgentManager
 from .legacy_authority import LegacyCredentialRetirementService
 from .migrations import (
@@ -26,6 +27,7 @@ from .pairing import PairingIdentityTransition
 from .private_io import tree_digest, write_private_json
 from .provisioning import PairingAdminProvisioner
 from .runtime import ReleaseSource, RuntimeLayout, StagedRelease
+from .uninstall import OwnershipUninstaller
 
 
 class LifecycleInterrupted(RuntimeError):
@@ -56,8 +58,8 @@ class TransactionDependencies:
     bridge_ready_probe: Callable[[], bool] = lambda: True
     migration_safe_probe: Callable[[], bool] = lambda: True
     interruption_probe: Callable[[str], bool] = lambda _phase: False
-    readiness_attempts: int = 20
-    readiness_delay_seconds: float = 0.25
+    readiness_attempts: int = 60
+    readiness_delay_seconds: float = 1.0
     sleep: Callable[[float], None] = time.sleep
     local_listener_absent_probe: Callable[[int], bool] = _loopback_listener_absent
     active_pairing_device_ids: Callable[[], object] | None = None
@@ -363,7 +365,7 @@ class LocalTailscaleTransaction:
         _journal_phase: str | None = None,
         _require_staging_absent: bool | None = None,
     ) -> bool:
-        """Prove the one Beta 4 recovery shape that Beta 5 may close.
+        """Prove supported v1 recovery before or immediately after staging.
 
         This is intentionally narrower than ordinary transaction recovery.
         It binds the old journal to a live host state in which only an inert,
@@ -392,38 +394,30 @@ class LocalTailscaleTransaction:
 
         operation_file = layout.state / f"{operation_id}.transaction.json"
         try:
-            journal = json.loads(operation_file.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            journal = load_supported_v1_transaction(operation_file)
+        except (OSError, ValueError):
             return False
-        expected_fields = {
-            "transaction_schema",
-            "operation_id",
-            "plan_id",
-            "phase",
-            "completed_phases",
-            "prior_availability_vault",
-            "prior_release_id",
-            "activation_started",
-            "plugin_activated",
-        }
+        compact = journal.keys() == COMPACT_TRANSACTION_FIELDS
+        completed = journal["completed_phases"]
+        expected_phase = "before_staging" if completed == [] else "recovery_required"
+        if closed:
+            expected_phase = "rolled_back"
+        if _journal_phase is not None:
+            expected_phase = _journal_phase
         if (
             not isinstance(journal, Mapping)
-            or set(journal) != expected_fields
             or journal.get("transaction_schema")
             != "claudian-remote.local-transaction/v1"
             or journal.get("operation_id") != operation_id
             or journal.get("plan_id") != plan_id
-            or journal.get("phase")
-            != (
-                _journal_phase
-                if _journal_phase is not None
-                else ("rolled_back" if closed else "recovery_required")
-            )
-            or journal.get("completed_phases") != ["staging"]
-            or journal.get("prior_availability_vault") is not None
-            or journal.get("prior_release_id") is not None
-            or journal.get("activation_started") is not False
-            or journal.get("plugin_activated") is not False
+            or journal.get("phase") != expected_phase
+            or completed not in ([], ["staging"])
+            or (not compact and (
+                journal.get("prior_availability_vault") is not None
+                or journal.get("prior_release_id") is not None
+                or journal.get("activation_started") is not False
+                or journal.get("plugin_activated") is not False
+            ))
         ):
             return False
 
@@ -436,7 +430,7 @@ class LocalTailscaleTransaction:
         if require_staging_absent:
             if partial.exists() or partial.is_symlink():
                 return False
-        elif partial.is_symlink() or (partial.exists() and not partial.is_dir()):
+        elif partial.is_symlink() or (partial.exists() and not self._private_owned_directory(partial)):
             return False
 
         forbidden_paths = (
@@ -510,7 +504,7 @@ class LocalTailscaleTransaction:
         *,
         operation_id: str,
     ) -> dict[str, Any]:
-        """Close the exact Beta 4 staging-only crash shape.
+        """Close supported full or compact v1 staging-only journals.
 
         Unlike the ordinary rollback path, this method can only remove the
         operation-owned inert staging directory and close its transaction
@@ -544,14 +538,16 @@ class LocalTailscaleTransaction:
         layout = self.dependencies.layout
         partial = layout.staging / f"{operation_id}.partial"
         operation_file = layout.state / f"{operation_id}.transaction.json"
-        mutated = partial.exists()
+        mutated = False
         try:
+            journal = load_supported_v1_transaction(operation_file)
+            mutated = partial.exists()
             if mutated:
                 shutil.rmtree(partial)
             if not self.verify_supported_v1_staging_only_recovery(
                 plan,
                 operation_id=operation_id,
-                _journal_phase="recovery_required",
+                _journal_phase=str(journal["phase"]),
                 _require_staging_absent=True,
             ):
                 return {
@@ -560,9 +556,10 @@ class LocalTailscaleTransaction:
                     "mutation_performed": mutated,
                     "restored_previous": False,
                 }
-            journal = json.loads(operation_file.read_text(encoding="utf-8"))
+            if load_supported_v1_transaction(operation_file) != journal:
+                raise ValueError("v1_transaction_drift_detected")
             write_private_json(operation_file, {**journal, "phase": "rolled_back"})
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             return {
                 "state": "recovery_required",
                 "code": "rollback_closure_unverified",
@@ -845,6 +842,7 @@ class LocalTailscaleTransaction:
         self,
         *,
         operation_id: str,
+        plan_id: str,
         compatibility_set_id: str,
         release_target: Path,
         plugin: Path,
@@ -906,11 +904,47 @@ class LocalTailscaleTransaction:
         receipt = {
             "receipt_schema": "claudian-remote.ownership/v1",
             "operation_id": operation_id,
+            "plan_id": plan_id,
             "compatibility_set_id": compatibility_set_id,
             "plugin_root": str(plugin),
             "resources": entries,
         }
         write_private_json(layout.ownership_receipt, receipt)
+
+    def _ownership_receipt_ready(self, plan: Mapping[str, Any]) -> bool:
+        layout = self.dependencies.layout
+        vault_id = str(plan.get("vault_id") or "")
+        try:
+            preflight = OwnershipUninstaller(
+                layout,
+                stop_owned_services=lambda: None,
+                revoke_credentials=lambda: None,
+                expected_plan_id=str(plan.get("plan_id") or ""),
+                expected_compatibility_set_id=str(
+                    plan.get("compatibility_set_id") or ""
+                ),
+                expected_plugin_root=self._plugin_destination(vault_id),
+                require_operation_binding=True,
+            ).preflight(
+                require_present=True,
+                required_resource_ids=frozenset(
+                    {
+                        "managed_runtime",
+                        "managed_release_store",
+                        "active_release_pointer",
+                        "active_release",
+                        "relay_launch_agent",
+                        "companion_launch_agent",
+                        "availability_launch_agent",
+                        "availability_config",
+                        "plugin_directory",
+                        "plugin_shipped_file:manifest.json",
+                    }
+                ),
+            )
+        except ValueError:
+            return False
+        return preflight.get("state") == "ready"
 
     def _already_ready(self, target: Path, plan: Mapping[str, Any]) -> bool:
         layout = self.dependencies.layout
@@ -921,7 +955,7 @@ class LocalTailscaleTransaction:
             endpoint = ""
         return (
             self._active_target() == target
-            and layout.ownership_receipt.is_file()
+            and self._ownership_receipt_ready(plan)
             and self._legacy_migration(
                 str(plan.get("vault_id") or ""),
                 str(plan.get("topology", {}).get("mode") or "local_tailscale"),
@@ -1188,7 +1222,12 @@ class LocalTailscaleTransaction:
         endpoint = str(preflight.get("endpoint") or "")
         expected_audience = f"claudian-remote:local_tailscale:{installation_id}"
         target = self.dependencies.layout.release_path(compatibility_set_id)
-        if target.exists() and self._already_ready(target, plan):
+        operation_file = self.dependencies.layout.state / f"{operation_id}.transaction.json"
+        # An already healthy runtime still needs to finish its waiting journal.
+        awaiting_activation = operation_file.is_file() and json.loads(
+            operation_file.read_text(encoding="utf-8")
+        ).get("phase") in {"after_activation", "await_plugin_bootstrap", "await_pairing"}
+        if not awaiting_activation and target.exists() and self._already_ready(target, plan):
             identity_ready = True
             if pairing_transition is not None and journey == "current_update":
                 try:
@@ -1226,7 +1265,6 @@ class LocalTailscaleTransaction:
                     ),
                     "mutation_performed": False,
                 }
-        operation_file = layout.state / f"{operation_id}.transaction.json"
         prior_availability_vault = self.dependencies.launchd.availability_vault_name()
         prior_target = self._active_target()
         activation_started = False
@@ -1463,8 +1501,9 @@ class LocalTailscaleTransaction:
                     }
             phase("before_legacy_migration", completed)
             try:
-                migration.prepare(operation_id=operation_id)
-                completed.append("legacy_plugin_migration")
+                migration_result = migration.prepare(operation_id=operation_id)
+                if migration_result.get("legacy_present") is True:
+                    completed.append("legacy_plugin_migration")
             except LifecycleInterrupted:
                 raise
             except Exception as exc:
@@ -1546,6 +1585,7 @@ class LocalTailscaleTransaction:
         # opens Obsidian or finishes phone pairing.
         self._record_receipt(
             operation_id=operation_id,
+            plan_id=plan_id,
             compatibility_set_id=compatibility_set_id,
             release_target=target,
             plugin=plugin_destination,
@@ -1588,13 +1628,15 @@ class LocalTailscaleTransaction:
         # owned and ordinary uninstall can remove it.
         self._record_receipt(
             operation_id=operation_id,
+            plan_id=plan_id,
             compatibility_set_id=compatibility_set_id,
             release_target=target,
             plugin=plugin_destination,
             vault_id=vault_id,
         )
         migration.commit(operation_id=operation_id)
-        completed.append("verified")
+        if "verified" not in completed:
+            completed.append("verified")
         pairing_result: dict[str, Any]
         if journey == "current_update":
             assert pairing_transition is not None

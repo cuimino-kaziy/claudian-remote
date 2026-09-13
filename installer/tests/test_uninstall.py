@@ -94,6 +94,49 @@ def test_uninstall_accepts_and_removes_the_authenticated_bridge_ack_receipt(tmp_
     assert not layout.bridge_bootstrap_ack.exists()
 
 
+def test_preflight_require_present_fails_closed_on_missing_receipt(tmp_path):
+    layout = layout_for(tmp_path)
+    service = OwnershipUninstaller(
+        layout,
+        stop_owned_services=lambda: None,
+        revoke_credentials=lambda: None,
+    )
+
+    # A missing ownership receipt must never satisfy readiness: an interrupted
+    # installation after activation but before receipt recording must take the
+    # safe recovery/install path instead of being reported already ready.
+    outcome = service.preflight(require_present=True)
+    assert outcome["state"] == "blocked"
+    assert outcome["code"] == "ownership_receipt_missing"
+    assert outcome["resources"] == []
+
+    # The ordinary uninstall flow (require_present=False) keeps the idempotent
+    # already_uninstalled result for a missing receipt.
+    assert service.uninstall() == {
+        "state": "ready",
+        "code": "already_uninstalled",
+        "mutation_performed": False,
+    }
+
+
+def test_preflight_require_present_fails_closed_on_uninstalled_receipt(tmp_path):
+    layout = layout_for(tmp_path)
+    layout.state.mkdir(parents=True, exist_ok=True)
+    layout.ownership_receipt.write_text(json.dumps({
+        "receipt_schema": "claudian-remote.ownership/v1",
+        "status": "uninstalled",
+        "resources": [],
+    }), encoding="utf-8")
+    service = OwnershipUninstaller(
+        layout,
+        stop_owned_services=lambda: None,
+        revoke_credentials=lambda: None,
+    )
+
+    assert service.preflight(require_present=True)["code"] == "ownership_receipt_missing"
+    assert service.uninstall()["code"] == "already_uninstalled"
+
+
 def test_modified_owned_resource_blocks_before_any_mutation(tmp_path):
     layout = layout_for(tmp_path)
     layout.runtime.mkdir(parents=True)

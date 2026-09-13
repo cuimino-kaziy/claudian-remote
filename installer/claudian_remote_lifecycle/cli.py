@@ -49,7 +49,7 @@ from .model import (
 from .operation_arbitration import OperationArbitration, OperationArbitrator
 from .launchd import LaunchAgentManager
 from .keychain import MacOSKeychain
-from .plan import PlanBuilder, PlanError, PlanStore, validate_mutation_environment
+from .plan import EnvironmentDrift, PlanBuilder, PlanError, PlanStore, validate_mutation_environment
 from .runtime import BootstrapVerifiedReleaseSource, RuntimeLayout, UnavailableReleaseSource
 from .provisioning import SecureInputFile, verify_bridge_bootstrap_ack
 from .tailscale import TailscaleController
@@ -177,7 +177,9 @@ class LifecycleServices:
                     "Content-Type": "application/json",
                 },
             )
-            with urllib.request.urlopen(request, timeout=5) as response:
+            # The local Tailscale route must not inherit macOS web proxies.
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=5) as response:
                 value = json.loads(response.read().decode("utf-8"))
             return value if isinstance(value, dict) else {}
 
@@ -532,11 +534,18 @@ def _static_result(
     )
 
 
+def _operation_arbitrator(state_dir: Path, services: LifecycleServices) -> OperationArbitrator:
+    return OperationArbitrator(
+        state_dir, journal_dir=services.layout.state if services.layout else None
+    )
+
+
 def _arbitrated_snapshot(
     inspector: Inspector,
     state_dir: Path,
+    services: LifecycleServices,
 ) -> tuple[dict[str, Any], OperationArbitration]:
-    arbitration = OperationArbitrator(state_dir).inspect()
+    arbitration = _operation_arbitrator(state_dir, services).inspect()
     return (
         inspector.snapshot(operation_arbitration=arbitration.to_summary()),
         arbitration,
@@ -1005,7 +1014,7 @@ def _diagnostic_observation(
         CheckpointStore(layout.base / "lifecycle") if layout else None
     )
     arbitration = (
-        OperationArbitrator(store.directory.path).inspect()
+        _operation_arbitrator(store.directory.path, services).inspect()
         if store is not None
         else OperationArbitration("clear", "no_prior_operation", True)
     )
@@ -1214,7 +1223,7 @@ def dispatch(
     plans = PlanStore(args.state_dir)
 
     if command == "inspect":
-        snapshot, arbitration = _arbitrated_snapshot(inspector, args.state_dir)
+        snapshot, arbitration = _arbitrated_snapshot(inspector, args.state_dir, services)
         if arbitration.state != "clear":
             return _arbitration_result(
                 command, arbitration, snapshot=snapshot
@@ -1257,7 +1266,7 @@ def dispatch(
 
     if command == "plan":
         live_snapshot, arbitration = _arbitrated_snapshot(
-            inspector, args.state_dir
+            inspector, args.state_dir, services
         )
         if arbitration.state != "clear":
             return _arbitration_result(
@@ -1315,7 +1324,7 @@ def dispatch(
         )
 
     if command == "status":
-        arbitration = OperationArbitrator(args.state_dir).inspect()
+        arbitration = _operation_arbitrator(args.state_dir, services).inspect()
         if arbitration.state != "clear" and (
             arbitration.operation_id in {None, args.operation_id}
         ):
@@ -1364,7 +1373,7 @@ def dispatch(
     if command == "resume":
         try:
             with OperationLock(args.state_dir):
-                arbitration = OperationArbitrator(args.state_dir).inspect()
+                arbitration = _operation_arbitrator(args.state_dir, services).inspect()
                 if arbitration.state != "clear" and (
                     arbitration.operation_id in {None, args.operation_id}
                 ):
@@ -1521,7 +1530,7 @@ def dispatch(
     if command == "cancel":
         try:
             with OperationLock(args.state_dir):
-                arbitration = OperationArbitrator(args.state_dir).inspect()
+                arbitration = _operation_arbitrator(args.state_dir, services).inspect()
                 if arbitration.state != "clear" and (
                     arbitration.operation_id not in {None, args.operation_id}
                     or arbitration.reconciliation is not None
@@ -1696,12 +1705,12 @@ def dispatch(
     if command in {"install", "update"}:
         try:
             with OperationLock(args.state_dir):
-                arbitration = OperationArbitrator(args.state_dir).inspect()
+                arbitration = _operation_arbitrator(args.state_dir, services).inspect()
                 if arbitration.state != "clear":
                     return _arbitration_result(command, arbitration)
                 plan, planned_snapshot = plans.read(args.plan_id)
                 current_snapshot, current_arbitration = _arbitrated_snapshot(
-                    inspector, args.state_dir
+                    inspector, args.state_dir, services
                 )
                 if current_arbitration.state != "clear":
                     return _arbitration_result(command, current_arbitration)
@@ -1779,7 +1788,7 @@ def dispatch(
             )
         try:
             with OperationLock(args.state_dir):
-                arbitration = OperationArbitrator(args.state_dir).inspect()
+                arbitration = _operation_arbitrator(args.state_dir, services).inspect()
                 if arbitration.state != "clear":
                     return _arbitration_result(command, arbitration)
                 checkpoint = _create_support_operation_checkpoint(
@@ -1817,7 +1826,7 @@ def dispatch(
             return blocked_not_implemented(command)
         try:
             with OperationLock(args.state_dir):
-                arbitration = OperationArbitrator(args.state_dir).inspect()
+                arbitration = _operation_arbitrator(args.state_dir, services).inspect()
                 if arbitration.state != "clear":
                     return _arbitration_result(command, arbitration)
                 outcome = services.revoke_device(args.device_id)
@@ -1832,7 +1841,7 @@ def dispatch(
             return blocked_not_implemented(command, plan_id=args.plan_id)
         try:
             with OperationLock(args.state_dir):
-                arbitration = OperationArbitrator(args.state_dir).inspect()
+                arbitration = _operation_arbitrator(args.state_dir, services).inspect()
                 if arbitration.state != "clear":
                     return _arbitration_result(command, arbitration)
                 plan, _snapshot = plans.read(args.plan_id)
@@ -1879,7 +1888,7 @@ def dispatch(
             return blocked_not_implemented(command, plan_id=args.plan_id)
         try:
             with OperationLock(args.state_dir):
-                arbitration = OperationArbitrator(args.state_dir).inspect()
+                arbitration = _operation_arbitrator(args.state_dir, services).inspect()
                 if arbitration.state != "clear":
                     return _arbitration_result(command, arbitration)
                 plan, _snapshot = plans.read(args.plan_id)
@@ -1951,11 +1960,11 @@ def dispatch(
     if command == "rollback":
         try:
             with OperationLock(args.state_dir):
-                arbitration = OperationArbitrator(args.state_dir).inspect()
+                arbitration = _operation_arbitrator(args.state_dir, services).inspect(operation_id=args.operation_id)
                 if arbitration.state == "blocked":
                     return _arbitration_result(command, arbitration)
 
-                if arbitration.reconciliation is not None:
+                if arbitration.reconciliation is not None and args.operation_id not in arbitration.terminal_operation_ids:
                     if arbitration.operation_id != args.operation_id:
                         raise FileNotFoundError("operation_not_found")
                     if arbitration.recommended_action != "rollback":
@@ -1992,11 +2001,10 @@ def dispatch(
                         "verify_supported_v1_staging_only_recovery",
                         None,
                     )
-                    if not callable(effect_probe) or effect_probe(
-                        plan,
-                        operation_id=args.operation_id,
-                        closed=False,
-                    ) is not True:
+                    if not callable(effect_probe) or not any(
+                        effect_probe(plan, operation_id=args.operation_id, closed=closed) is True
+                        for closed in (False, True)
+                    ):
                         return _v1_recovery_probe_failed(
                             command,
                             operation_id=args.operation_id,
@@ -2041,11 +2049,8 @@ def dispatch(
                         expected_operation_id=args.operation_id,
                         expected_checkpoint_sha256=checkpoint_evidence.sha256,
                     )
-                    closed = OperationArbitrator(args.state_dir).inspect()
-                    if not (
-                        closed.state == "clear"
-                        and args.operation_id in closed.terminal_operation_ids
-                    ):
+                    closed = _operation_arbitrator(args.state_dir, services).inspect()
+                    if args.operation_id not in closed.terminal_operation_ids:
                         return LifecycleResult(
                             command=command,
                             state="recovery_required",
@@ -2160,7 +2165,17 @@ def dispatch(
                 if arbitration.state == "reconciliation_required":
                     if arbitration.operation_id != args.operation_id:
                         raise FileNotFoundError("operation_not_found")
-                    if arbitration.recommended_action != "rollback":
+                    owned_checkpoint = arbitration.checkpoint or {}
+                    bootstrap_rollback = (
+                        arbitration.recommended_action == "resume"
+                        and owned_checkpoint.get("journey") == "fresh_install"
+                        and owned_checkpoint.get("state") == "blocked"
+                        and owned_checkpoint.get("irreversible_boundary_crossed") is False
+                        and owned_checkpoint.get("recovery_policy") == "retry_same_operation"
+                        and (owned_checkpoint.get("active_gate") or {}).get("gate_type")
+                        == "desktop_plugin_bootstrap_required"
+                    )
+                    if arbitration.recommended_action != "rollback" and not bootstrap_rollback:
                         return _arbitration_result(command, arbitration)
 
                 checkpoint = checkpoints.read(args.operation_id)
@@ -2478,6 +2493,17 @@ def _run_mutation(
             plan_id=plan_id,
             operation_id=operation_id,
             phase=LifecyclePhase.RECONCILIATION,
+            data={"mutation_performed": False},
+        )
+    except EnvironmentDrift:
+        # The failed attempt changed nothing; keep the original operation's
+        # durable effects and resume owner instead of erasing its progress.
+        checkpoint = checkpoints.read(operation_id)
+        return LifecycleResult(
+            command=command, state="blocked", code="environment_drift",
+            message="Restore the plan-bound environment, then resume this operation.",
+            plan_id=plan_id, operation_id=operation_id,
+            **_checkpoint_controls(checkpoint),
             data={"mutation_performed": False},
         )
     except (FileNotFoundError, ValueError, RuntimeError) as exc:

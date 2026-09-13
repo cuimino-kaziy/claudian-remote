@@ -159,3 +159,37 @@ def test_legacy_authority_gate_offers_agent_and_manual_routes_without_secret_dat
         "manual_continue",
     ]
     assert "token" not in encoded.lower()
+
+
+def test_agent_route_declares_capability_and_manual_route_is_human_only(tmp_path):
+    store = CheckpointStore(tmp_path / "state")
+    checkpoint = store.create(command="install", plan_id="plan-a")
+    controller = HumanGateController(store, {"tailscale_logged_in": lambda: False})
+
+    gate = controller.require(
+        checkpoint["operation_id"],
+        gate_type="tailscale_login_required",
+        explanation="Tailscale must be signed in by the user.",
+        exact_action="Open Tailscale and finish sign-in.",
+        verification_probe="tailscale_logged_in",
+        operator_options=(
+            {
+                "id": "agent_continue",
+                "label": "由 Agent 继续操作",
+                "instructions": "Open the installed Tailscale app and guide sign-in.",
+                "recommended": True,
+                "requires_capability": "computer_control",
+            },
+            {
+                "id": "manual",
+                "label": "我自己操作",
+                "instructions": "Open the Tailscale app on this Mac and finish sign-in.",
+            },
+        ),
+    )
+
+    options = {item["id"]: item for item in gate.to_dict()["operator_options"]}
+    assert options["agent_continue"]["requires_capability"] == "computer_control"
+    assert "requires_capability" not in options["manual"]
+    assert gate.resume_reference == checkpoint["operation_id"]
+    assert gate.verification_probe == "tailscale_logged_in"

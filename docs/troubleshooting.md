@@ -7,7 +7,7 @@
 
 ## 常见阻塞
 
-- `unsupported_claudian_version`：安装并启用 Claudian `2.0.4`，重新 inspect。不要尝试写操作。
+- `unsupported_claudian_version`：安装并启用 Claudian `2.2.6`（也支持 `2.0.4`），重新 inspect。不要尝试写操作。
 - `vault_selection_required`：在 Obsidian 打开并明确选择唯一目标 Vault，再重新 plan。
 - `human_action_required`：完成返回值中的 `exact_action`，随后用原 `operation_id` resume。
   在聊天中回复“完成”不会满足门禁。

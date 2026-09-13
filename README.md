@@ -6,8 +6,10 @@ and a user-controlled Relay.
 
 ## Beta contract
 
-- Supported Claudian version: **2.0.4 only**. Other versions must remain
+- Supported Claudian versions: **2.0.4 and 2.2.6** (preferred: **2.2.6**). Other versions must remain
   read-only; inspection, diagnostics, rollback, and removal stay available.
+- On Claudian 2.2.6, immediate steer is enabled only when the active provider
+  supports it. Claude can still send and queue messages without steer.
 - Plugin ID: `claudian-remote`. The old private ID `whale-agent-bridge` is only
   a migration source and must not coexist with this plugin.
 - Distribution: exact invited GitHub Release assets only. Mutable branches,
@@ -56,6 +58,13 @@ Connection-mode security and exact recovery limits are documented in
 [`docs/self-host-vps.md`](docs/self-host-vps.md).
 
 ## Development gates
+
+The source-boundary check rejects local state, credential patterns, and personal
+Mac paths. To also reject your deployment identifiers, set
+`CLAUDIAN_PRIVATE_SOURCE_IDENTIFIERS` to a newline-separated list before running
+the checks. Keep that list outside the repository; do not put real deployment
+names in scanner code or test fixtures. Scan Git history and final release
+archives with a dedicated secret scanner before publication.
 
 ```sh
 npm ci --ignore-scripts
