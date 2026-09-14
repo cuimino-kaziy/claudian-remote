@@ -1,72 +1,49 @@
-# Internal beta release checklist
+# 公开测试发布检查
 
-This checklist distinguishes automated package readiness from evidence that
-only a maintainer and real devices can supply. An Agent must not mark the beta
-released while any item in **Human release blockers** remains open.
+本版定位为 GitHub 公开测试版 `0.2.0-beta.6.7`。公开下载不要求加入邀请名单，安装和升级继续由配套安装器管理；尚未上架 Obsidian 插件市场。
 
-## Automated release gates
+公开测试只报告已经取得的证据。下方待测项目用于收集不同环境的结果，不应写成已经通过；存在数据丢失、凭据泄露或安装器绕过验证等已知问题时，必须先处理再发布。
 
-- [x] Clean checkout passes `npm ci --ignore-scripts`, `npm run verify`, the
-  Gateway suite, and the installer suite.
-- [x] `sh release/packaging/build-assets.sh --assets-only` produces plugin,
-  Companion, Relay, and lifecycle archives; the lifecycle archive contains the
-  guide, package, entrypoint, release trust files, and a matching source lock.
-- [x] Every third-party GitHub Action is pinned to a 40-character commit SHA;
-  CI has read-only repository permission and only the publish job receives
-  `contents: write`.
-- [x] Contract tests reject manifest/asset tampering, dependency-lock drift,
-  unknown or revoked signing keys, mutable Action refs, and incomplete runtime
-  metadata.
-- [x] Source and packaged-asset scans contain no credentials, personal paths,
-  local state, logs, databases, or private deployment identifiers.
+## 已验证的发行资产
 
-## Human release blockers
+- [x] JavaScript 286 项、Python 718 项检查通过；依赖、发布契约和托管运行时摘要已核对。
+- [x] 已配置维护者 Ed25519 公钥与指纹，私钥保存在仓库之外；安装包签名和文件摘要验证通过。
+- [x] 在干净源码副本重建的发行资产与已验收文件逐字节一致。
+- [x] 已验收的完整包为 `claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz`，SHA-256 为 `14eb15669db2ccbd01023702ab6ea6a6ec140c7c168049257bcfc2859b933cd4`。
+- [x] 现有 Mac / iPhone 环境完成安装恢复、连接、升级后配对保留验证，并于 2026-09-14 收到用户使用正常的反馈。
+- [x] GitHub 草稿中的 11 项发行资产及 `SHA256SUMS` 与本地文件摘要一致。
 
-- [ ] Generate the maintainer Ed25519 signing key outside the repository, keep
-  the private key only in macOS Keychain and the release secret store, and
-  commit the matching trusted public key plus fingerprint to
-  `release/trust-root.json`.
-- [ ] Send the generated `CLAUDIAN_REMOTE_TRUSTED_BOOTSTRAP-<version>.md`
-  through an existing authenticated direct channel, separately from GitHub
-  Release. Confirm each tester verifies the MD-pinned whole-Kit SHA-256 before
-  extraction; Kit-provided code and trust files must not run first.
-- [x] Pin immutable upstream CPython `3.12.11` and uv `0.10.12` archives for
-  macOS arm64 and x86_64, including their GitHub-published SHA-256 digests, in
-  `release/support-matrix.json`; no mutable `latest` URL is accepted.
-- [ ] Create the exact signed Git tag and let the pinned release workflow create
-  a private GitHub **prerelease**. Confirm all invited testers download the same
-  manifest and asset digests.
-- [ ] Run the required clean-Mac and real-iPhone/iPad matrix and preserve the
-  non-sensitive evidence. Unit or simulated tests do not replace this gate.
-- [ ] Start with two canary testers. Expand to the remaining invited cohort only
-  after both complete install, daily use, update/rollback, revocation, and
-  removal without maintainer screen control.
+构建来源为 `ba480aa77958076b8b5954032dc9afe581397051`。后续介绍和指南的修改不重写已签名归档，也不改变同版本运行文件。
 
-## Real-device matrix
+## 公开前需要完成
 
-- [ ] Apple Silicon Mac + iPhone over Tailscale and cellular: WSS streaming,
-  background/foreground, Wi-Fi-to-cellular change, replay recovery,
-  attachments, stop, and Steer Now.
-- [ ] Intel Mac uses the x86_64 managed runtime and reaches the same verified
-  lifecycle state, or Intel support is removed from the signed support matrix
-  before release rather than silently falling back.
-- [ ] User-owned supported VPS: HTTPS/WSS, pairing, resource checks, and safe
-  failure for invalid TLS, insufficient capacity, or incompatible versions.
-- [ ] Obsidian Sync and iCloud separately: plugin arrival, same-Vault binding,
-  pairing, generated Markdown visibility, and mixed-version read-only state.
-- [ ] Lost-phone revocation closes the active connection and the old identity
-  fails every later route.
-- [ ] Interrupted install/update resumes or rolls back after Agent-session loss
-  and Mac restart without duplicate resources.
-- [ ] Uninstall and purge leave no owned process, LaunchAgent, listener,
-  credential, recovery data, or mixed compatibility set.
-- [ ] Trusted LAN remains unavailable unless its separate permission, trusted
-  WSS, interface binding, network-change shutdown, authorization, and packet
-  inspection matrix all pass with no plaintext content or credential.
+- [x] 检查全部远端 Git 分支、历史、发行附件以及 GitHub Actions 日志，未发现凭据或私人部署信息。
+- [x] 确认公开的 Claudian 2.2.7 可下载，所需接口的静态检查通过。该公开原版的首次安装与完整交互仍列入下方实机待测范围。
+- [x] 提供[公开下载与校验说明](install-verification-0.2.0-beta.6.7.md)，以确认官方 GitHub 发布者身份为首次信任起点；不再要求私聊交付，也不将同源摘要描述为独立信任来源。
+- [x] 更新项目首页、首次安装指南、故障反馈入口和公开测试发布说明。
 
-## Explicit non-evidence
+发布时将默认分支更新到本版，仓库公开后核对未登录用户能浏览首页、读取指南并下载同一批资产。发布 `v0.2.0-beta.6.7` 时标记为 prerelease，并复核远端文件摘要；不要让自动构建覆盖已验收的签名资产。实际发行状态见 [官方发布页](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/v0.2.0-beta.6.7)。
 
-The empty trust root is not a development convenience, an unsigned archive is
-not a beta release, and a locally generated test key does not establish the
-maintainer trust root. Likewise, a simulator, desktop browser, or unit-test
-fixture cannot satisfy the clean-machine or real-iPhone acceptance matrix.
+## 公开测试中继续收集的实机结果
+
+- [ ] 全新 Apple Silicon Mac 和独立 iPhone 用户，使用公开原版 Claudian，无维护者代操作完成安装、日常使用、升级、撤销和卸载。
+- [ ] Intel Mac 使用 x86_64 托管运行时完成相同流程。
+- [ ] iPad 的软键盘、横竖屏、分屏与输入栏布局。
+- [ ] Tailscale 下的后台恢复、Wi-Fi 与蜂窝网络切换、附件、停止和提供方支持的插队。
+- [ ] 自建 VPS 的 HTTPS/WSS、配对、资源检查及证书无效或容量不足时的安全失败。
+- [ ] iCloud 与 Obsidian Sync 分别验证插件到达、同仓库绑定、文件可见性及混合版本只读行为。
+- [ ] 丢失手机后撤销设备，旧身份无法重新连接、上传或提交命令。
+- [ ] 安装或升级在助手退出、Mac 重启后恢复原操作，不产生重复服务。
+- [ ] 卸载和清除仅移除 Remote 所有的服务、凭据和恢复数据，不删除用户笔记或 Claudian 会话。
+
+这些组合目前不宣称全部验证通过。应记录设备、系统、版本、操作、预期与实测结果；模拟浏览器和单元测试不能替代真机结果。
+
+## 保持关闭的能力
+
+可信局域网 `local_lan` 继续保持不可发布，除非独立的权限、可信 WSS、接口绑定、网络切换关闭和真机流量检查全部通过。Tailscale 失败时不得自动切换到公网、VPS 或明文连接。
+
+## 旧字段和历史记录
+
+本版已签名安装包保留 `private_beta` 通道值，用来选择 `lifecycle_manager` 作为更新管理者；它不是邀请名单鉴权。`community` 表示由 Obsidian 管理插件更新，不能为了改名而替换该值。历史支持矩阵中的邀请人数是旧测试规模记录，不是当前公开测试人数上限。
+
+完整 Kit 的旧手册中“内测”指这一既有安装方式；本版公开测试的下载入口、已验证范围和步骤以当前发布说明及指南为准。签名、摘要和安装核验要求继续适用。

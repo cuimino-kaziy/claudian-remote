@@ -6,7 +6,7 @@
 
 [从零开始安装与连接](docs/getting-started.md) · [常见问题](docs/troubleshooting.md) · [本版更新](docs/release-notes-0.2.0-beta.6.7.md)
 
-> 当前版本：**0.2.0-beta.6.7**，正在准备 GitHub 内测发行。仓库目前为私有，Release 为草稿，尚未上架 Obsidian 插件市场。受邀用户请按维护者提供的入口取得安装材料。
+> 当前版本：**0.2.0-beta.6.7 · 公开测试版**。从 [官方 GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/v0.2.0-beta.6.7) 免费下载；尚未上架 Obsidian 插件市场。
 
 ## 可以用它做什么
 
@@ -40,9 +40,9 @@ flowchart LR
 | Mac | Obsidian、可正常使用的 Claudian，以及本版配套的 Remote 后台服务 |
 | 手机 | Obsidian、与 Mac 相同且已同步的仓库、Claudian Remote 插件 |
 | 连接网络 | 默认在 Mac 和手机安装 Tailscale，登录同一账号并打开连接 |
-| 安装材料 | 维护者提供的完整 Kit，以及通过独立可信渠道提供的校验说明 |
+| 安装材料 | 官方 GitHub Releases 发布的完整 Kit，以及公开的 [下载与校验说明](docs/install-verification-0.2.0-beta.6.7.md) |
 
-插件要求 Obsidian **1.12.3 或更新版本**，支持指定的 Claudian **2.0.4 / 2.2.6 / 2.2.7**；其中 Claudian **2.2.7 要求 Obsidian 1.13.0 或更新版本**。版本号和所需接口都会检查。没有符合条件的 Claudian 时，先向维护者确认获取方式，Remote 安装包不包含 Claudian 本体。
+插件要求 Obsidian **1.12.3 或更新版本**，支持指定的 Claudian **2.0.4 / 2.2.6 / 2.2.7**；其中 Claudian **2.2.7 要求 Obsidian 1.13.0 或更新版本**。Claudian 本体可从 [官方 2.2.7 发布页](https://github.com/YishenTu/claudian/releases/tag/2.2.7) 获取，Remote 安装包不包含它。静态检查已确认该公开原版具备所需接口，尚未完成与 Remote 的端到端验收；不据此推定其他新版本兼容。已有可用且兼容的 Claudian 无需为本次测试更换。
 
 现有 Mac / iPhone 环境已通过用户验收；iPad、Intel Mac 等其他组合仍需完成对应实机验证。每套安装目前绑定一个 Mac、一个仓库和一台移动设备。
 
@@ -54,7 +54,7 @@ flowchart LR
 | 已有维护者部署好的 VPS | 已有 VPS 连接 | 向部署者取得 HTTPS 地址，确认 Mac 已绑定同一服务，按 [VPS 指南](docs/self-host-vps.md) 连接 |
 | 有一台空服务器，想从头部署 | 维护者手动部署 | 先阅读 [环境与部署步骤](docs/self-host-vps.md)；本版不提供 VPS 自动安装 |
 
-Tailscale 的安装入口见 [官方网站](https://tailscale.com/download)。个人非商业用途可按其 Personal 计划使用，适用范围与费用以 [Tailscale 当前说明](https://tailscale.com/pricing) 为准。模型服务、可选同步服务及自建 VPS 的费用由各服务决定，Remote 不代付这些费用。
+**Claudian Remote 公开测试本身免费。** Tailscale 的安装入口见 [官方网站](https://tailscale.com/download)。个人非商业用途可按其 Personal 计划使用，适用范围与费用以 [Tailscale 当前说明](https://tailscale.com/pricing) 为准。模型服务、可选同步服务及自建 VPS 的费用由各服务决定，Remote 不代付这些费用。
 
 ## 第一次使用的顺序
 
@@ -72,12 +72,12 @@ Tailscale 的安装入口见 [官方网站](https://tailscale.com/download)。�
 
 | 下载文件 | 用途 |
 |---|---|
-| `claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz` | **首次安装与内测升级使用这个完整包** |
+| `claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz` | **首次安装与测试版升级使用这个完整包** |
 | `claudian-remote-plugin-0.2.0-beta.6.7.zip` | 插件便捷副本，不含 Mac 后台服务 |
 | `main.js`、`manifest.json`、`styles.css` | 同版插件的独立文件，供维护者分发 |
 | 其余组件归档、`release-manifest.json`、`SHA256SUMS` | 安装助手与维护者使用的配套组件和校验材料 |
 
-发布完成后，受邀用户可从 [GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases) 取得文件。不要下载 GitHub 自动提供的“Source code”来安装；不要把旧的同版本完整包与本次发行混用。完整 Kit 的可信摘要由维护者单独提供，验证成功后再解压操作。
+从 [官方 GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/v0.2.0-beta.6.7) 下载完整包，按 [下载与校验说明](docs/install-verification-0.2.0-beta.6.7.md) 先验证再解压，无需私聊领取材料。不要用 GitHub 自动提供的“Source code”安装，也不要混用旧的同版本完整包。
 
 ## 用起来之后
 
@@ -95,6 +95,7 @@ Tailscale 路线连接到你自己的 Mac；已有 VPS 路线经过你管理的�
 ## 文档入口
 
 - [安装与连接指南](docs/getting-started.md)：从准备环境到首次对话、日常使用和升级。
+- [下载与校验说明](docs/install-verification-0.2.0-beta.6.7.md)：确认官方来源、核对完整包，再解压安装。
 - [常见问题与故障排查](docs/troubleshooting.md)：费用、配对、同步、只读与连接异常。
 - [VPS 部署说明](docs/self-host-vps.md)：服务器环境、操作与配置字段。
 - [本版发布说明](docs/release-notes-0.2.0-beta.6.7.md)：改动、验收范围和下载包。
@@ -102,6 +103,10 @@ Tailscale 路线连接到你自己的 Mac；已有 VPS 路线经过你管理的�
 
 <details>
 <summary>维护者与开发者：兼容、许可、构建及发布约束</summary>
+
+## 公开测试的既有安装通道
+
+已签名安装包与包内手册中的 `private_beta`／“内测”沿用既有安装器通道名称，不表示需要邀请。旧手册中私发或独立渠道校验说明的要求，以本次 [公测下载与校验补充说明](docs/install-verification-0.2.0-beta.6.7.md) 为准；其余安装与核验步骤不变，原 Ed25519 签名、固定指纹及更新器均保持不变。
 
 ## Beta contract
 
@@ -111,7 +116,7 @@ Tailscale 路线连接到你自己的 Mac；已有 VPS 路线经过你管理的�
   supports it. Claude can still send and queue messages without steer.
 - Plugin ID: `claudian-remote`. The old private ID `whale-agent-bridge` is only
   a migration source and must not coexist with this plugin.
-- Distribution: exact invited GitHub Release assets only. Mutable branches,
+- Distribution: exact official GitHub Release assets for the public beta only. Mutable branches,
   development checkouts, `curl | shell`, and server-returned commands are not
   installation sources.
 - Update owner: the external lifecycle manager for `private_beta`; the plugin
@@ -147,8 +152,10 @@ loss or compromise.
 
 The plugin, Mac Companion, and lifecycle/packaging code are MIT licensed. The
 self-hosted Relay under `gateway/relay/` is AGPL-3.0-only; see its own license.
-GitHub Releases is used only to authenticate invited downloads and is not the
-integrity root. Depending on the selected mode, users operate Tailscale or a
+The official GitHub repository is the initial download-trust source for this
+public beta. Verify the exact Kit with the system checksum tool before
+extracting it, then retain the existing Ed25519 and pinned-fingerprint checks.
+This is not independent-channel verification. Depending on the selected mode, users operate Tailscale or a
 user-owned VPS. A VPS terminates TLS and can read Relay plaintext; this beta
 does not claim end-to-end encryption.
 
@@ -172,8 +179,8 @@ python3.12 -m pytest gateway/tests -q
 ```
 
 Release metadata lives in `release/`. Publication remains fail-closed until a
-maintainer configures a real signing key and pins its public fingerprint in the
-trusted lifecycle bootstrap; no signing secret is stored here.
+maintainer configures a real signing key and pins its public fingerprint for
+lifecycle verification; no signing secret is stored here.
 
 Maintainers may sign locally using the existing macOS Keychain entry, then
 verify and upload the exact signed assets. GitHub Actions always verifies and

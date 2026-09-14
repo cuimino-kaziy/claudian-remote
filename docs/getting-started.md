@@ -2,7 +2,7 @@
 
 Claudian Remote 让你在 iPhone 或 iPad 上，继续使用 Mac 里的 Claudian：发送消息、阅读回复、添加附件和查看历史。模型调用、笔记读写和工具操作仍由 Mac 上的 Claudian 完成。产品介绍见 [README](../README.md)。
 
-**当前是受邀内测。** 仓库仍为私有，GitHub Release 仍是草稿，尚不能按公开下载或 Obsidian 插件市场安装。请先向维护者取得本次安装包的访问方式，以及独立交付的可信校验说明。
+**Remote 公开测试版免费下载。** 从 [官方 GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/v0.2.0-beta.6.7) 下载本次完整安装包，并按 [下载与校验说明](install-verification-0.2.0-beta.6.7.md) 核验。尚未上架 Obsidian 插件市场。模型、VPS 及可选同步服务等外部费用另计。
 
 ## 先认识四个名称
 
@@ -16,7 +16,7 @@ Claudian Remote 让你在 iPhone 或 iPad 上，继续使用 Mac 里的 Claudian
 ## 1. 准备好 Mac 和手机
 
 - **Mac：** 安装 Obsidian，打开准备使用的仓库，确认 Claudian 能收到消息并完成回复。已有可用的 Claudian 先保留，由安装助手检查兼容性。
-- **版本：** 当前检查范围为 Obsidian 1.12.3 起、Claudian 2.0.4／2.2.6／2.2.7；使用已有的 2.2.7 构建时要求 Obsidian 1.13.0 起。这里是兼容范围，不表示每个版本都已在上游公开下载。
+- **版本：** 当前检查范围为 Obsidian 1.12.3 起、Claudian 2.0.4／2.2.6／2.2.7；Claudian 2.2.7 要求 Obsidian 1.13.0 起，可从 [Claudian 官方 2.2.7 发布页](https://github.com/YishenTu/claudian/releases/tag/2.2.7) 获取。静态检查已确认该公开原版具备所需接口，与 Remote 的端到端验收尚未完成；其他新版本不能自动视为兼容。
 - **iPhone／iPad：** 安装 Obsidian，能够通过 iCloud 打开 Mac 的同一个仓库。如果还没有建立仓库同步，先请安装助手协助完成这一步，Remote 不会自动搬迁你的笔记库。
 - **运行条件：** Mac 需要保持开机、已登录和唤醒，Obsidian 与 Claudian 可用。屏幕可以熄灭；真正睡眠、关机或退出登录后，手机不能通过 Remote 唤醒它。
 
@@ -45,11 +45,13 @@ claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz
 
 使用这份修复后的完整包；不要换成同版本旧 Kit、GitHub 的 “Source code”、插件 ZIP 或三个独立插件文件。插件文件本身不包含 Mac 后台服务。包内手册若使用通用名称 `claudian-remote-beta-kit-<version>.tar.gz`，本次对应的是上面这份 recovery-kit。
 
-**先核验，再解压和运行。** 请按维护者通过独立可信渠道交付的校验说明（trusted bootstrap），核验这份确切的压缩包。压缩包内自带的公钥、校验器或同处下载的摘要，不能单独证明包可信。
+**先核验，再解压和运行。** 按 [下载与校验说明](install-verification-0.2.0-beta.6.7.md) 确认官方仓库、版本和文件名。让安装助手用系统工具核对完整包，通过后才解压，并继续验证签名。无需私聊领取材料。
 
-首次安装目前需要能够在这台 Mac 上操作的安装助手或维护者。可以把已取得的包和独立校验说明交给本地助手，复制下面这段请求：
+已签名包与手册中的 `private_beta`／“内测”是既有安装器通道名称，不表示需要邀请。旧手册中私发或独立渠道校验说明的要求，以本次 [公测补充说明](install-verification-0.2.0-beta.6.7.md) 为准；其余安装与核验步骤不变，不修改通道值、原签名、固定指纹或更新器。
 
-> 请帮我安装 Claudian Remote。我已取得 claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz，以及维护者独立交付的可信校验说明。请先核验这份包，通过后才解压并按包内 CLAUDIAN_REMOTE_INSTALL.md 操作。先只读检查当前 Obsidian、Claudian、目标仓库和连接环境，再按检查结果安装；默认使用 Tailscale。若发现已有安装，请沿用升级流程并保留配对，不另建一套连接。遇到登录或系统授权，请让我在官方界面完成。安装等待手机配对时，请指导我完成手机操作；配对后恢复原安装操作，再完成核验。
+首次安装目前需要能够在这台 Mac 上操作的安装助手或维护者。可以把已下载的包和上面的公开校验说明交给本地助手，复制下面这段请求：
+
+> 请帮我安装 Claudian Remote。我已下载 claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz。请先阅读官方仓库 cuimino-kaziy/claudian-remote 中的 docs/install-verification-0.2.0-beta.6.7.md，确认官方来源和精确版本，用系统 shasum 核对完整包，通过后才解压。旧手册关于私发校验说明的要求以该公测补充说明为准，其余按包内 CLAUDIAN_REMOTE_INSTALL.md 操作。先只读检查当前 Obsidian、Claudian、目标仓库和连接环境，再按检查结果安装；默认使用 Tailscale。若已有安装，请升级并保留配对。登录和系统授权由我在官方界面完成。安装等待手机配对时，请指导我操作；配对后恢复原安装操作，再完成核验。
 
 安装助手按 [安装与连接手册](../CLAUDIAN_REMOTE_INSTALL.md) 检查环境、确定仓库、安装并核验后台服务。多个仓库时，需要你指定使用哪一个。Tailscale 路线可能提示启用 MagicDNS 和 HTTPS；由你在官方界面完成对应确认。无需自行填写 Python 路径、IP 或端口，也不要把账号密码、验证码或 API Key 发给助手。
 
@@ -115,7 +117,7 @@ Mac 离线时可以查看已有缓存和编辑草稿，恢复连接前不能发�
 
 ## 升级时保留现有配对
 
-之后取得新版完整包及其独立可信校验说明，仍请安装助手先核验，再按包内手册的**升级**流程处理。告诉助手这是现有安装，需要保留原仓库、连接身份和设备配对；不要卸载重装或只替换手机的三个文件。
+之后从官方 GitHub Releases 取得新版完整包，按该版本的公开下载与校验说明核验，再按包内手册的**升级**流程处理。告诉助手这是现有安装，需要保留原仓库、连接身份和设备配对；不要卸载重装或只替换手机的三个文件。
 
 Mac 核验通过后，再等待 iCloud 把插件同步到手机。在手机“帮助 → 安装包与插件”确认目标版本已加载，然后测试连接和一条消息往返。Mac 与手机插件、后台服务应使用匹配版本。
 

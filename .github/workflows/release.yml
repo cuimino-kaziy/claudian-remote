@@ -60,4 +60,4 @@ jobs:
             dist/*.tar.gz dist/*.zip dist/claudian-remote-legacy-retirement-helper-*.py \
             dist/main.js dist/manifest.json dist/styles.css dist/release-manifest.json \
             --verify-tag --prerelease --title "Claudian Remote ${GITHUB_REF_NAME}" \
-            --notes "Private beta release. First installation requires the signed beta kit and Mac services. Plugin ZIP and standalone files are convenience copies; verify against the signed plugin archive."
+            --notes "Public beta release. First installation requires the signed beta kit and Mac services. Follow the repository download verification guide before extraction. Plugin ZIP and standalone files are convenience copies; verify against the signed plugin archive."

@@ -76,6 +76,15 @@ backups.
 
 ## Privacy and trust disclosure
 
+For the public beta, first-time users confirm the official GitHub publisher
+`cuimino-kaziy/claudian-remote`, then check the exact whole-Kit SHA-256 with a
+system tool before extraction. The versioned [download verification guide](install-verification-0.2.0-beta.6.7.md)
+replaces the old private handoff requirement. This is a GitHub-account trust
+model, not an independent channel and not protection against that account being
+compromised. The pinned Ed25519 key, manifest signature, exact-version checks,
+and component hashes remain enforced after extraction. Existing users can also
+compare the public fingerprint with their previously saved trusted copy.
+
 The plugin sends no telemetry, diagnostic data, message or attachment content,
 paths, network identities, or credentials to the maintainer. Diagnostic export
 is a separate explicit action and uses an allowlist.
