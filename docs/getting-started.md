@@ -2,7 +2,7 @@
 
 Claudian Remote 让你在 iPhone 或 iPad 上，继续使用 Mac 里的 Claudian：发送消息、阅读回复、添加附件和查看历史。模型调用、笔记读写和工具操作仍由 Mac 上的 Claudian 完成。产品介绍见 [README](../README.md)。
 
-当前为 **0.2.0**，已建立 Obsidian 社区插件目录草稿，尚未上架。插件与后台服务分别安装，发行文件和校验说明见 [GitHub Release](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0) 与 [下载说明](install-verification-0.2.0.md)。
+当前为 **0.2.0**，已在 [Obsidian 社区插件目录](https://community.obsidian.md/plugins/claudian-remote) 发布。插件与后台服务分别安装，后台服务包和校验说明见 [GitHub Release](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0) 与 [下载说明](install-verification-0.2.0.md)。
 
 ## 先认识四个名称
 
@@ -37,7 +37,7 @@ Tailscale 从 [官方网站](https://tailscale.com/download) 安装，首次使�
 
 ## 3. 先启用插件，再安装 Mac 服务
 
-在 Mac 的目标仓库安装并启用 **Claudian Remote 0.2.0**，打开一次设置。审核通过后可从 Obsidian 社区插件目录搜索安装；审核期间使用发行页上的 `main.js`、`manifest.json`、`styles.css`，放入仓库 `.obsidian/plugins/claudian-remote/`，保留原 `data.json`，不要删除插件目录重装。等待仓库身份同步到手机。
+从 [社区目录](https://community.obsidian.md/plugins/claudian-remote) 点击 **Add to Obsidian**，或在 Obsidian 的社区插件中搜索 Claudian Remote。在 Mac 的目标仓库安装并启用 **0.2.0**，打开一次设置，等待仓库身份同步到手机。已有安装直接更新，保留原 `data.json`，不要删除插件目录重装。
 
 后台服务使用 **`claudian-remote-kit-0.2.0.tar.gz`**。三个插件文件或插件 ZIP 不包含后台服务。按 [下载与校验说明](install-verification-0.2.0.md) 确认官方仓库和精确版本，先用系统工具核对完整包，通过后才解压，继续验证组件签名。
 

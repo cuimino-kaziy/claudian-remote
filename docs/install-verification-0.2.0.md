@@ -4,7 +4,7 @@
 
 ## 插件
 
-审核通过后，插件由 Obsidian 社区插件目录安装和更新。审核期间可从上述发行页取得 `main.js`、`manifest.json`、`styles.css`，将同一版本三份文件放入目标仓库的 `.obsidian/plugins/claudian-remote/`，保留已有 `data.json`，再启用或重新加载插件。Mac 与手机都应加载 **0.2.0**，并打开同一个已同步仓库。
+从 [Obsidian 社区插件目录](https://community.obsidian.md/plugins/claudian-remote) 安装和更新插件。如需手动安装，可从上述发行页取得 `main.js`、`manifest.json`、`styles.css`，将同一版本三份文件放入目标仓库的 `.obsidian/plugins/claudian-remote/`，保留已有 `data.json`，再启用或重新加载插件。Mac 与手机都应加载 **0.2.0**，并打开同一个已同步仓库。
 
 ## Mac 后台服务
 

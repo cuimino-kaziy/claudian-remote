@@ -1,6 +1,6 @@
 # Claudian Remote 0.2.0
 
-本版为 Obsidian 社区插件分发准备了标准版本和安装流程。目录草稿已建立，尚未上架；不能把 GitHub 发布等同于市场审核通过。
+本版已在 [Obsidian 社区插件目录](https://community.obsidian.md/plugins/claudian-remote) 发布，可点击 **Add to Obsidian** 安装。官方扫描完成，并确认发布的 `main.js` 与仓库构建结果逐字节一致。
 
 ## 改动
 

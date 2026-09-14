@@ -6,7 +6,7 @@
 
 [从零开始安装与连接](docs/getting-started.md) · [常见问题](docs/troubleshooting.md) · [本版更新](docs/release-notes-0.2.0.md)
 
-> 当前版本：**0.2.0**。已建立 Obsidian 社区插件目录草稿，尚未上架。发行文件见 [GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0)。
+> 当前版本：**0.2.0**。已在 [Obsidian 社区插件目录](https://community.obsidian.md/plugins/claudian-remote) 发布，点击 **Add to Obsidian** 安装。后台服务包见 [GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0)。
 
 ## 可以用它做什么
 
@@ -44,7 +44,7 @@ flowchart LR
 
 插件要求 Obsidian **1.12.3 或更新版本**，支持指定的 Claudian **2.0.4 / 2.2.6 / 2.2.7**；其中 Claudian **2.2.7 要求 Obsidian 1.13.0 或更新版本**。Claudian 本体可从 [官方 2.2.7 发布页](https://github.com/YishenTu/claudian/releases/tag/2.2.7) 获取，Remote 安装包不包含它。静态检查已确认该公开原版具备所需接口，尚未完成与 Remote 的端到端验收；不据此推定其他新版本兼容。已有可用且兼容的 Claudian 无需为本次测试更换。
 
-现有 Mac / iPhone 环境已通过用户验收；iPad、Intel Mac 等其他组合仍需完成对应实机验证。每套安装目前绑定一个 Mac、一个仓库和一台移动设备。
+上一版已在用户的 Mac / iPhone 环境验收；本版社区安装变更通过自动化验证，尚未完成新版本真机验收。iPad、Intel Mac 等其他组合仍需实机验证。每套安装目前绑定一个 Mac、一个仓库和一台移动设备。
 
 ## 选择连接方式
 
@@ -59,7 +59,7 @@ Tailscale 的安装入口见 [官方网站](https://tailscale.com/download)。�
 ## 第一次使用的顺序
 
 1. **先在 Mac 检查 Claudian。** 在目标仓库发送一句话，确认能够收到完整回复。
-2. **安装并启用插件。** 在 Mac 和手机的同一同步仓库中启用 Claudian Remote 0.2.0，先打开一次设置。审核通过后可在 Obsidian 社区插件中搜索安装；审核期间使用同一发行页的三个插件文件。
+2. **安装并启用插件。** 从 [社区目录](https://community.obsidian.md/plugins/claudian-remote) 点击 **Add to Obsidian**，或在 Obsidian 社区插件中搜索 Claudian Remote。在 Mac 和手机的同一同步仓库中启用 0.2.0，先打开一次设置。
 3. **配置 Mac 服务。** 让本地安装助手核验完整 Kit，再按包内手册配置后台服务。安装器只核验已启用的插件，不写入插件目录。首次安装等待手机配对时继续下一步。
 4. **配对一次。** Mac 设置中点击“添加移动设备”；手机保存连接地址，再填写 8 位配对码。也可以在手机打开 Mac 生成的配对链接。
 5. **完成安装核验与首次对话。** 手机配对后，让助手恢复原安装操作并完成核验；手机显示“已就绪”后发送测试消息，确认收到完整回复。
@@ -73,7 +73,7 @@ Tailscale 的安装入口见 [官方网站](https://tailscale.com/download)。�
 | 下载文件 | 用途 |
 |---|---|
 | `claudian-remote-kit-0.2.0.tar.gz` | Mac 后台服务的首次安装或升级；先安装并启用同版本插件 |
-| `main.js`、`manifest.json`、`styles.css` | Obsidian 社区插件使用的三份资产；审核期间可手动放入仓库的 `.obsidian/plugins/claudian-remote/` |
+| `main.js`、`manifest.json`、`styles.css` | Obsidian 社区插件自动下载的三份资产；手动安装时放入仓库的 `.obsidian/plugins/claudian-remote/`，保留原 `data.json` |
 | `claudian-remote-plugin-0.2.0.zip` | 同版插件便捷副本，不包含后台服务 |
 | 其余组件归档、`release-manifest.json`、`SHA256SUMS` | 安装助手与维护者使用的配套组件和校验材料 |
 
