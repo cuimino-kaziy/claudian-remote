@@ -1,32 +1,109 @@
-# Claudian Remote 内测故障排查
+# 常见问题与故障排查
 
-在已解压的 Beta Kit 目录中先运行 `./bin/claudian-remote-lifecycle inspect`；若已有 `operation_id`，再运行
-`./bin/claudian-remote-lifecycle status --operation-id <operation-id>`。请只转述 `code`、
-`state`、phase 和 Agent-safe summary，不要发送配置文件、完整路径、URL 查询参数、
-令牌、短码、QR、主机私钥或诊断数据库。
+第一次使用，请先看 [入门引导](getting-started.md)；下载和版本信息见 [项目首页](../README.md)，完整安装步骤见 [安装手册](../CLAUDIAN_REMOTE_INSTALL.md)。
 
-## 常见阻塞
+## Relay 是什么？地址从哪里来？
 
-- `unsupported_claudian_version`：安装并启用 Claudian `2.2.6`（也支持 `2.0.4`），重新 inspect。不要尝试写操作。
-- `vault_selection_required`：在 Obsidian 打开并明确选择唯一目标 Vault，再重新 plan。
-- `human_action_required`：完成返回值中的 `exact_action`，随后用原 `operation_id` resume。
-  在聊天中回复“完成”不会满足门禁。
-- `lifecycle_operation_busy`：已有生命周期写操作持锁。查询原操作 status，不要并行重装。
-- `environment_drift`：环境已经变化。重新 inspect 和 plan，不要继续使用旧 plan_id。
-- `secure_provisioning_missing`：Companion 的安全配置桥或 OS 安全存储尚未通过真实 probe。
-  不要尝试从 lifecycle 写 Obsidian WebView localStorage，也不要把 Pairing Admin 秘密交给 Agent。
-- `operation_not_implemented`：当前开发构建没有该写操作；没有发生修改，也不能视为成功。
-- `operation_not_found`：停止恢复，不要创建重复服务；运行 diagnose 并向维护者口头提供摘要。
+Relay 是在手机和 Mac 之间转发消息的服务。这里填写它的完整 HTTPS 地址，不是模型 API 地址、SSH 登录地址、服务器密码或配对码。
 
-## 安全失败原则
+- **Tailscale 连接：** 从 Mac 的 Claudian Remote“连接”设置复制地址，形式类似 `https://你的Mac名称.你的网络.ts.net`。
+- **已有 VPS：** 使用部署者提供的地址，例如 `https://relay.你的域名.com`。
+- 在手机打开 Mac 生成的配对链接，地址会自动带入；手填时保留 `https://`，不要附带密码或问号后的参数。
 
-- 连接模式不会静默切换；Tailscale 失败不会自动暴露 LAN 或改用 VPS。
-- 未知 schema/state/code 必须停止并运行 `claudian-remote-lifecycle diagnose`。
-- `claudian-remote-lifecycle export-diagnostics` 是独立的人工确认操作；普通 diagnose 不导出文件。
-- 不运行可变分支、服务器返回的命令或 `curl | shell`。
-- 不删除 Vault、Claudian 对话、全局 Tailscale、共享代理/TLS 或系统/Homebrew 的共享工具。
+地址在浏览器中显示空白或 404 不一定是故障；它不是普通网站。以远程页面的状态和消息往返为准。
 
-## 仍需人工支持时
+## 我已经安装手机插件，为什么还不能连接？
 
-口头提供：生命周期版本、结果 code、当前 phase、连接模式以及最近一次 probe 的非敏感结果。
-不要提供消息内容、附件、路径、网络身份或任何凭据。维护者不会要求远程屏幕控制或秘密。
+手机插件只是操作界面。Mac 还需要安装配套后台服务，并打开已绑定的 Obsidian 仓库和 Claudian。Tailscale 需要两台设备都安装、登录同一网络并连接；VPS 需要部署者先完成服务器及 Mac 配置。
+
+首次安装按 [入门引导](getting-started.md) 使用完整安装包。单独的插件 ZIP、三个插件文件或 GitHub 的 “Source code” 都不能代替后台服务安装。当前自动安装路径是 Tailscale；[VPS 手册](self-host-vps.md) 面向已有服务或能管理服务器的用户。
+
+## Mac 必须一直开着吗？手机锁屏会停止任务吗？
+
+Mac 需要开机、已登录并保持唤醒，Obsidian 的目标仓库和 Claudian 也要打开。屏幕可以熄灭或锁定，但系统真正睡眠、关机或退出登录后就不能继续远程操作；换成 VPS 也不能替代 Mac 运行 Claudian。本版本不能远程唤醒 Mac，也不会自行更改电源设置。
+
+手机锁屏、切到后台或断网会中断手机连接，不会主动停止 Mac 上的任务。回到前台会重新连接并校准状态。要停止当前生成，应在连接可用时点输入栏的“停止”，并确认任务状态更新；它不是关闭后台服务的按钮。
+
+## 连接设置和诊断在哪里？
+
+在远程页面点顶部显示“已就绪”“Mac 离线”等文字的状态按钮，即可打开“连接详情”，其中有“重新连接”“复制诊断报告”和“连接设置”。也可以点右侧历史按钮，再点历史栏底部的“设置”。
+
+## 配对码过期了，要每天重新配对吗？
+
+不需要。8 位配对码用于让新设备加入，5 分钟内有效且只能使用一次。首次配对未完成时，在 Mac 的“设备”设置点“添加移动设备”生成新码，手机输入正确验证码后自动连接，无需再到 Mac 批准。
+
+码过期不会影响已经配对的设备。断网、重启和同一套连接的普通升级也不应要求重新配对。换手机、清除本机数据、设备被撤销或更换服务器身份才需要重新配对。不要把删除配置、清除手机数据或反复配对当作通用排查方法。
+
+若看到“旧版服务等待批准”，表示后台服务仍在使用旧配对流程，应先完成配套服务更新。聊天中的工具权限询问则沿用电脑端 Claudian 的权限设置，与设备配对是两回事。
+
+## 已配对、已连接，为什么还是不能发送？
+
+“已配对”表示手机已保存连接凭据；“Remote 已连接”只表示手机连到了 Relay。还需要 Mac 在线、版本兼容且状态校准完成，才能发送。
+
+| 页面提示 | 含义与下一步 |
+|---|---|
+| 需要配对 | 本机没有可用配对凭据。首次使用按引导配对；原来能用则先确认是否换了仓库、清过本机数据或被撤销。 |
+| Remote 未连接 | 先检查手机网络、连接地址，以及 Tailscale 或 VPS 服务是否可达，再点“重新连接”。 |
+| Mac 离线 | 唤醒 Mac，确认已登录、Obsidian / Claudian 和后台服务已打开；VPS 模式也需要检查 Mac。 |
+| 目标 Vault 未打开 | 在 Mac 打开安装时绑定的那个 Obsidian 仓库及 Claudian。 |
+| 正在校准 | 正在恢复消息和状态，暂时只读。稍等后仍不恢复，可重新连接并复制诊断报告。 |
+| 组件版本不匹配 | 手机插件、Mac 插件及后台服务没有使用匹配版本。按同一份发布说明完成更新，不要只替换其中一个文件。 |
+| Claudian 版本不受支持 | 当前支持 Claudian 2.0.4、2.2.6、2.2.7；其他版本暂时只读。Claudian 2.2.7 还要求 Obsidian 1.13.0 或更新版本。 |
+| Claudian 能力缺失 | Remote 未检测到所需接口，或握手仍保留加载早期的状态；不是模型额度提示。确认 Mac 的 Claudian 已打开、更新已完成，仍异常时复制诊断报告。 |
+| 兼容性不匹配 | 有一层兼容检查未通过，查看诊断报告，交由维护者定位。 |
+| 已就绪 / 正在运行 | 当前允许远程操作；“正在运行”表示已有任务执行中，不代表该任务已完成。 |
+
+诊断中的 `compatibility_mobile_relay`、`compatibility_mac_relay`、`compatibility_claudian` 分别记录三层检查。某一层是 `ready` 不代表全部就绪；不要为消除只读提示而关闭兼容检查。
+
+## “发送失败，草稿已保留”怎么办？
+
+先检查顶部连接状态，恢复到可用状态后检查输入栏里的草稿，再手动发送。离线时可以编辑草稿，但没有自动补发队列。
+
+如果提示“回执待确认，请勿重复发送”，当前无法确认 Mac 是否已收到；先恢复连接、查看会话或 Mac 端结果，避免重复执行同一任务。“已送达中转”也不等于“电脑已接收”或“已完成”。
+
+## 更新后还是旧版，或者又提示配对？
+
+iCloud 同步完成只说明文件传到了设备，不代表手机已经加载了新插件。确认手机插件列表的版本，再关闭并开启 Claudian Remote，或重启 Obsidian；诊断报告中的 `client_plugin_version` 可核对当前加载版本。文件尚未到达时，先等同步，不要混用不同版本的三个插件文件。
+
+同一套连接的普通升级应保留原配对。若更新后出现“需要配对”，先核对仓库、已加载版本和安装恢复状态，再联系维护者，不要先删除配置或撤销设备。插件文件会随仓库同步，设备配对凭据不会借此复制给另一台设备。
+
+## 哪些地方可能产生费用？
+
+费用需要分开确认：Claudian 所用模型服务的订阅或 API 用量、自有 VPS 的租用与域名，以及所选网络和仓库同步服务的套餐。安装 Remote 不会替你购买或包含这些外部服务。
+
+Tailscale 当前提供面向非商业个人用途的 Personal 免费计划，商业用途、试用和付费计划条件不同；请按自己的用途查看 [Tailscale 官方定价](https://tailscale.com/pricing)。若旧版安装手册笼统写“免费 Tailscale”，应以上述用途条件和官方套餐为准。
+
+## 用 VPS 后，谁能看到我的内容？
+
+VPS 由你选择并管理，管理员能够访问经 Relay 转发的会话和附件内容。本版本不宣称 VPS 部署具有端到端加密。模型调用仍由 Mac 上的 Claudian 及你选择的模型服务处理。
+
+Remote 不会自动向维护者上传遥测、聊天或诊断数据。配对码和配对链接能让新设备加入，不应公开分享；设备遗失时可在 Mac 的设备列表撤销该设备。详细边界见 [安全说明](security.md)。
+
+## 如何提供有用又安全的求助信息？
+
+1. 先复现一次问题，再打开“连接详情”→“复制诊断报告”，把报告交给维护者。
+2. 补充出现问题的操作、页面提示、使用 Tailscale 还是 VPS，以及 Mac 是否唤醒。输入框问题可先复现键盘弹出，再复制报告。
+3. 报告包含版本、连接状态、错误类型、计数、会话标识的摘要和布局尺寸，不含对话正文、附件正文或凭据。分享前仍请检查自己额外附加的截图和文字。
+
+不要发送配置文件、数据库、完整私人路径、配对码 / 链接 / 二维码、Token、API Key、SSH 私钥或带密码的网址。若诊断报告无法复制，先提供版本、操作和错误提示即可，不必改发整份配置。
+
+## 维护者附录：安装与恢复错误码
+
+在已验证并解压的完整 Kit 目录运行 `./bin/claudian-remote-lifecycle inspect`；已有操作时，同时查询 `./bin/claudian-remote-lifecycle status --operation-id <operation-id>`。以返回的 `state`、`code`、`phase`、`next_actions` 和安全摘要为准，保留原操作与计划引用。
+
+| 错误码 | 处理方式 |
+|---|---|
+| `unsupported_claudian_version` | 核对支持矩阵；目前为 2.0.4 / 2.2.6 / 2.2.7。不要绕过版本门禁执行安装或 Remote 写操作。 |
+| `vault_selection_required` | 明确目标仓库。已有操作先查询其状态，不要另起一个操作覆盖绑定。 |
+| `human_action_required` | 完成返回的 `exact_action`，再用原 `operation_id` 执行 `resume`，由真实检查确认通过；口头“完成”不等于通过。 |
+| `lifecycle_operation_busy` | 查询正在持锁的原操作，不要并行重装、删锁或创建重复服务。 |
+| `environment_drift` | 先查看原操作状态和只读诊断，保留其已执行步骤；按返回动作恢复计划绑定的环境，再恢复原操作。不能直接新建 plan 取代未完成操作。只有确认没有进行中操作或原操作已安全结束后，才重新检查并计划。 |
+| `secure_provisioning_missing` | 检查 Companion 安全配置交接与系统安全存储的真实检查结果；不要手填长期凭据或直接写 WebView localStorage。 |
+| `operation_not_implemented` | 当前构建未提供所请求操作，不能视为安装成功；核对发行件与返回状态。 |
+| `operation_not_found` | 停止写操作，保留现有文件和服务，运行 `diagnose` 并提供安全摘要；不要靠新建服务猜测恢复。 |
+
+旧版安装手册将环境漂移概括为“重新 inspect/plan”，不适用于已有未完成操作；应先遵循上表的原操作恢复流程。
+
+`recovery_required` 或未知 schema / state / code 出现时，先停止写操作并诊断。取消、回退或继续安装必须遵循原操作实际提供的 `next_actions`；跨越不可逆边界后不能假定仍可回退。`diagnose` 不导出文件，`export-diagnostics` 是另有明确人工确认的操作。
+
+不删除 Vault、Claudian 对话、配对数据库或共享系统工具来“清理重装”；不执行可变分支、服务器返回的命令或 `curl | shell`。Tailscale 失败也不会自动切换到公网或 VPS。详细恢复流程见 [安装手册](../CLAUDIAN_REMOTE_INSTALL.md)。

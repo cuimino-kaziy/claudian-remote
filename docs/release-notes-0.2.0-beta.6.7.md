@@ -2,6 +2,10 @@
 
 GitHub 内测候选，面向受邀用户。现有 Mac / iPhone 使用环境已由用户验收；尚未上架 Obsidian 插件市场。
 
+Claudian Remote 让你在手机 Obsidian 中继续 Mac 上的 Claudian 对话，查看实时回复与执行记录，并发送照片或文件。模型、工具与仓库操作仍由 Mac 执行，Mac 需要保持开机、登录和唤醒。
+
+**第一次使用：** 先读 [项目介绍](../README.md)，再按 [安装与连接指南](getting-started.md) 准备环境、安装后台服务并配对手机。已经安装的用户可直接查看 [常见问题与升级排查](troubleshooting.md)。
+
 ## 本版变化
 
 - 手机输入栏随 Obsidian 页面布局调整，保留 Claudian 配色、正文排版和 Obsidian 底部导航。
