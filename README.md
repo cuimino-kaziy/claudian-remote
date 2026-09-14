@@ -1,114 +1,118 @@
 # Claudian Remote
 
-**在手机的 Obsidian 里，继续 Mac 上的 Claudian 对话。**
+**English** | [中文](README.zh-CN.md)
 
-离开电脑后，你可以在手机上发送任务、查看逐步生成的回复和执行记录，或者把照片与文件带进当前对话。模型调用、仓库读写和工具操作仍由 Mac 上的 Claudian 完成，沿用电脑端的权限设置。
+**Continue your Mac's Claudian conversations in Obsidian on your phone.**
 
-[从零开始安装与连接](docs/getting-started.md) · [常见问题](docs/troubleshooting.md) · [本版更新](docs/release-notes-0.2.0.md)
+Away from your computer, you can send tasks, follow streaming replies and execution logs, and add photos or files to the current conversation. Model requests, vault access, and tool execution still run through Claudian on your Mac, using its existing permission settings.
 
-> 当前版本：**0.2.0**。已在 [Obsidian 社区插件目录](https://community.obsidian.md/plugins/claudian-remote) 发布，点击 **Add to Obsidian** 安装。后台服务包见 [GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0)。
+[Getting started (Chinese)](docs/getting-started.md) · [FAQ and troubleshooting (Chinese)](docs/troubleshooting.md) · [Release notes (Chinese)](docs/release-notes-0.2.0.md)
 
-## 可以用它做什么
+> Current version: **0.2.0**. Available in the [Obsidian community plugin directory](https://community.obsidian.md/plugins/claudian-remote): click **Add to Obsidian** to install. Download the background services from [GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0).
 
-| 你想做的事 | 在手机上如何使用 |
+## What you can do
+
+| What you want to do | How to do it on your phone |
 |---|---|
-| 继续电脑上的任务 | 打开同一仓库的远程页面，在当前对话中继续输入 |
-| 查看任务进度 | 阅读实时回复、Markdown 内容和执行记录，处理当前任务的权限请求 |
-| 发送手机上的材料 | 点输入栏旁的 `+` 选择照片或文件，等待附件就绪后发送 |
-| 找回之前的对话 | 打开历史栏，按标题搜索、切换对话，或归档暂时不用的对话 |
-| 管理连接 | 点历史栏底部“设置”，或点顶部连接状态查看详情 |
+| Continue a task from your computer | Open the remote view in the same vault and continue typing in the current conversation |
+| Follow task progress | Read streaming replies, Markdown, and execution logs, and respond to permission requests for the current task |
+| Send materials from your phone | Tap `+` beside the input field, choose photos or files, and wait for attachments to be ready before sending |
+| Find an earlier conversation | Open the history panel to search by title, switch conversations, or archive conversations you no longer need |
+| Manage the connection | Tap Settings (`设置`) at the bottom of the history panel, or tap the connection status at the top for details |
 
-Claudian 是电脑上实际执行任务的插件；**Claudian Remote 是它的远程入口**。Remote 不附带模型服务，也不提供仓库文件同步。开始前，你的 Mac 上需要有能够正常对话的受支持 Claudian，两端也需要打开同一个已同步的 Obsidian 仓库。
+Claudian is the plugin that executes tasks on your computer; **Claudian Remote gives you remote access to it**. Remote does not include a model service or sync vault files. Before starting, you need a supported, working installation of Claudian on your Mac, with both devices opening the same synchronized Obsidian vault.
 
-## 它如何连接
+## How it connects
 
 ```mermaid
 flowchart LR
-  Phone[手机 Obsidian / Claudian Remote] <-->|Tailscale 私有连接| Service[Mac 上的连接服务]
-  Service <--> Claudian[Mac 上的 Claudian]
-  Claudian <--> Vault[同一个 Obsidian 仓库]
+  Phone[Phone: Obsidian / Claudian Remote] <-->|Private Tailscale connection| Service[Connection services on Mac]
+  Service <--> Claudian[Claudian on Mac]
+  Claudian <--> Vault[Same Obsidian vault]
 ```
 
-你会在设置里看到“服务器地址”，有时也叫 **Relay 地址**。它表示手机该连接哪个服务。安装完成后直接复制 Mac 显示的完整 `https://` 地址即可，不需要自己推算 IP、端口或填写模型密钥。
+The **Server address** (`服务器地址`) in settings, also called the **Relay URL**, tells your phone which service to connect to. After installation, copy the complete `https://` address shown on your Mac. You do not need to work out an IP address or port, or enter a model API key.
 
-**Mac 需要保持开机、登录和唤醒。** 屏幕熄灭可以继续使用；Mac 真正睡眠、关机或退出 Obsidian 后，手机无法让它继续执行任务。
+**Your Mac must remain powered on, logged in, and awake.** Its display can be off. If the Mac sleeps, shuts down, or Obsidian closes, your phone cannot keep tasks running on it.
 
-## 开始前准备什么
+## Before you start
 
-| 位置 | 需要准备 |
+| Where | What you need |
 |---|---|
-| Mac | Obsidian、可正常使用的 Claudian，以及本版配套的 Remote 后台服务 |
-| 手机 | Obsidian、与 Mac 相同且已同步的仓库、Claudian Remote 插件 |
-| 连接网络 | 默认在 Mac 和手机安装 Tailscale，登录同一账号并打开连接 |
-| 安装材料 | 官方 GitHub Releases 发布的完整 Kit，以及公开的 [下载与校验说明](docs/install-verification-0.2.0.md) |
+| Mac | Obsidian, a working Claudian installation, and the matching Remote background services |
+| Phone | Obsidian, the same synchronized vault as your Mac, and the Claudian Remote plugin |
+| Network | By default, install Tailscale on both devices, sign in with the same account, and connect |
+| Installation files | The complete Kit from the official GitHub Releases, plus the public [download and verification instructions (Chinese)](docs/install-verification-0.2.0.md) |
 
-插件要求 Obsidian **1.12.3 或更新版本**，支持指定的 Claudian **2.0.4 / 2.2.6 / 2.2.7**；其中 Claudian **2.2.7 要求 Obsidian 1.13.0 或更新版本**。Claudian 本体可从 [官方 2.2.7 发布页](https://github.com/YishenTu/claudian/releases/tag/2.2.7) 获取，Remote 安装包不包含它。静态检查已确认该公开原版具备所需接口，尚未完成与 Remote 的端到端验收；不据此推定其他新版本兼容。已有可用且兼容的 Claudian 无需为本次测试更换。
+The plugin requires **Obsidian 1.12.3 or later** and supports the specified Claudian versions **2.0.4 / 2.2.6 / 2.2.7**. **Claudian 2.2.7 requires Obsidian 1.13.0 or later.** Claudian itself is available from its [official 2.2.7 release page](https://github.com/YishenTu/claudian/releases/tag/2.2.7); it is not bundled with Remote. Static inspection confirmed that this public upstream release exposes the required interfaces, but end-to-end acceptance testing with Remote is still pending. This does not establish compatibility with other newer versions. If your existing Claudian installation works and is compatible, you do not need to replace it for this test.
 
-上一版已在用户的 Mac / iPhone 环境验收；本版社区安装变更通过自动化验证，尚未完成新版本真机验收。iPad、Intel Mac 等其他组合仍需实机验证。每套安装目前绑定一个 Mac、一个仓库和一台移动设备。
+The previous version passed acceptance testing in a user's Mac / iPhone environment. This release's community installation changes passed automated verification, but real-device acceptance testing of the new version is still pending. Other combinations, including iPad and Intel Mac, also need physical-device testing. Each installation currently binds one Mac, one vault, and one mobile device.
 
-## 选择连接方式
+## Choose a connection method
 
-| 你的情况 | 选择 | 下一步 |
+| Your situation | Choose | Next step |
 |---|---|---|
-| 第一次使用，没有服务器 | **Tailscale（推荐）** | 按 [新手指南](docs/getting-started.md) 在 Mac 安装服务，再为手机配对 |
-| 已有维护者部署好的服务器 | 已有服务器连接 | 向部署者取得 HTTPS 地址，确认 Mac 已绑定同一服务，按 [服务器指南](docs/self-host-vps.md) 连接 |
-| 有一台空服务器，想从头部署 | 维护者手动部署 | 先阅读 [环境与部署步骤](docs/self-host-vps.md)；本版不提供服务器自动安装 |
+| First-time user without a server | **Tailscale (recommended)** | Follow the [getting-started guide (Chinese)](docs/getting-started.md) to install the services on your Mac, then pair your phone |
+| A maintainer has already deployed a server | Existing server connection | Obtain its HTTPS address, confirm your Mac is bound to the same service, and follow the [server guide (Chinese)](docs/self-host-vps.md) |
+| You have an empty server and want to deploy from scratch | Manual deployment by a maintainer | Read the [environment requirements and deployment steps (Chinese)](docs/self-host-vps.md); this release does not provide automated server installation |
 
-Tailscale 的安装入口见 [官方网站](https://tailscale.com/download)。个人非商业用途可按其 Personal 计划使用，适用范围与费用以 [Tailscale 当前说明](https://tailscale.com/pricing) 为准。模型服务、可选同步服务及自建服务器的费用由各服务决定，Remote 不代付这些费用。
+Download Tailscale from its [official website](https://tailscale.com/download). Its Personal plan is intended for personal, non-commercial use; check [Tailscale's current pricing and terms](https://tailscale.com/pricing) for eligibility and costs. Model services, optional sync services, and self-hosted servers have their own costs, which Remote does not cover.
 
-## 第一次使用的顺序
+## First-time setup
 
-1. **先在 Mac 检查 Claudian。** 在目标仓库发送一句话，确认能够收到完整回复。
-2. **安装并启用插件。** 从 [社区目录](https://community.obsidian.md/plugins/claudian-remote) 点击 **Add to Obsidian**，或在 Obsidian 社区插件中搜索 Claudian Remote。在 Mac 和手机的同一同步仓库中启用 0.2.0，先打开一次设置。
-3. **配置 Mac 服务。** 让本地安装助手核验完整 Kit，再按包内手册配置后台服务。安装器只核验已启用的插件，不写入插件目录。首次安装等待手机配对时继续下一步。
-4. **配对一次。** Mac 设置中点击“添加移动设备”；手机保存连接地址，再填写 8 位配对码。也可以在手机打开 Mac 生成的配对链接。
-5. **完成安装核验与首次对话。** 手机配对后，让助手恢复原安装操作并完成核验；手机显示“已就绪”后发送测试消息，确认收到完整回复。
+The steps below retain the Chinese button labels so you can find them in the current plugin interface.
 
-每一步的按钮位置、成功状态和异常分流都在 [安装与连接指南](docs/getting-started.md)。配对后会在手机本机记住设备身份，普通断线、重启和配套升级不需要重新配对。
+1. **Check Claudian on your Mac first.** Send a message in the target vault and confirm that you receive a complete reply.
+2. **Install and enable the plugin.** Click **Add to Obsidian** in the [community directory](https://community.obsidian.md/plugins/claudian-remote), or search for Claudian Remote in Obsidian's community plugins. Enable version 0.2.0 in the same synchronized vault on your Mac and phone, and open its settings once.
+3. **Set up the Mac services.** Have a local installation assistant verify the complete Kit and follow its included manual to configure the background services. The installer verifies the already-enabled plugin without writing to its directory. If a first-time installation is waiting for phone pairing, continue to the next step.
+4. **Pair once.** In the Mac settings, click Add mobile device (`添加移动设备`). Save the connection address on your phone, then enter the 8-character pairing code. You can also open the pairing link generated by your Mac on your phone.
+5. **Finish installation verification and send your first message.** After pairing, have the assistant resume the original installation operation and finish verification. Once your phone shows Ready (`已就绪`), send a test message and confirm that you receive a complete reply.
 
-## 应该下载哪个文件
+The [installation and connection guide (Chinese)](docs/getting-started.md) covers button locations, success states, and troubleshooting for each step. Once paired, your phone remembers its device identity locally. Normal disconnections, restarts, and upgrades to matching component versions do not require pairing again.
 
-插件和后台服务分开安装，版本需要匹配。
+## Which files to download
 
-| 下载文件 | 用途 |
+The plugin and background services are installed separately and must use matching versions.
+
+| Download | Purpose |
 |---|---|
-| `claudian-remote-kit-0.2.0.tar.gz` | Mac 后台服务的首次安装或升级；先安装并启用同版本插件 |
-| `main.js`、`manifest.json`、`styles.css` | Obsidian 社区插件自动下载的三份资产；手动安装时放入仓库的 `.obsidian/plugins/claudian-remote/`，保留原 `data.json` |
-| `claudian-remote-plugin-0.2.0.zip` | 同版插件便捷副本，不包含后台服务 |
-| 其余组件归档、`release-manifest.json`、`SHA256SUMS` | 安装助手与维护者使用的配套组件和校验材料 |
+| `claudian-remote-kit-0.2.0.tar.gz` | First-time installation or upgrade of the Mac background services; install and enable the matching plugin first |
+| `main.js`, `manifest.json`, `styles.css` | The three assets downloaded automatically by Obsidian's community plugin installer; for manual installation, place them in your vault's `.obsidian/plugins/claudian-remote/` and preserve the existing `data.json` |
+| `claudian-remote-plugin-0.2.0.zip` | A convenient copy of the same plugin version; does not include background services |
+| Other component archives, `release-manifest.json`, `SHA256SUMS` | Supporting components and verification materials for installation assistants and maintainers |
 
-从 [官方 GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0) 下载，按 [下载与校验说明](docs/install-verification-0.2.0.md) 先验证再解压。不要用 GitHub 自动提供的“Source code”安装。
+Download from the [official GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0). Follow the [download and verification instructions (Chinese)](docs/install-verification-0.2.0.md) before extracting the files. Do not install from GitHub's automatically generated “Source code” archives.
 
-## 用起来之后
+## After setup
 
-- **再次打开：** 保持 Mac 与连接服务在线，手机进入原仓库和远程页面，等待恢复连接。
-- **升级：** 通过 Obsidian 更新两端插件，再用同版本 Kit 更新 Mac 后台服务；原配对默认保留。升级过程中版本暂不一致会进入只读，配套更新完成后恢复。
-- **连接异常：** 点顶部状态进入“连接详情”，先看原因，再参考 [常见问题与排查](docs/troubleshooting.md)。普通离线不用删配置或重新配对。
-- **丢失手机或更换设备：** 从 Mac 的“设备”页撤销旧设备，再为新设备配对。
+- **Reopening:** Keep your Mac and connection services online, open the original vault and remote view on your phone, and wait for the connection to recover.
+- **Upgrading:** Update the plugin on both devices through Obsidian, then update the Mac background services with the matching Kit. Existing pairing is preserved by default. A temporary version mismatch during an upgrade makes Remote read-only; access resumes once all matching updates are complete.
+- **Connection problems:** Tap the status at the top to open Connection details (`连接详情`), read the reason, then consult [FAQ and troubleshooting (Chinese)](docs/troubleshooting.md). A normal offline state does not require deleting configuration or pairing again.
+- **A lost or replacement phone:** Revoke the old device from Devices (`设备`) on your Mac, then pair the new device.
 
-## 数据会经过哪里
+## Where your data goes
 
-Tailscale 路线连接到你自己的 Mac；已有服务器路线经过你管理的服务器。服务器管理员可以接触转发的内容，本版不宣称该路线端到端加密。模型请求仍按电脑端 Claudian 的配置发送给相应提供方。
+The Tailscale route connects to your own Mac; the server route passes through a server you manage. Server administrators can access the content being relayed. This release does not claim end-to-end encryption for that route. Model requests still go to the providers configured in Claudian on your computer.
 
-配对凭据保存在手机本机，不随仓库同步。插件不主动向维护者发送聊天、附件或诊断信息；需要帮助时可手动复制不含聊天正文和密钥的诊断报告。完整边界见 [安全与隐私说明](docs/security.md)。
+Pairing credentials stay on your phone and are not synchronized with the vault. The plugin does not automatically send chats, attachments, or diagnostics to its maintainer. When you need help, you can manually copy a diagnostic report that excludes chat bodies and secret keys. See the [security and privacy documentation](docs/security.md) for the full boundaries.
 
-**仓库外文件访问：** Mac 插件会从用户的 `Library/Application Support/Claudian Remote/state/` 读取一次性连接交接文件，核验仓库与身份后覆盖并删除该文件；接收附件时读取 Companion 提供的临时文件、核验大小和摘要，再导入设置指定的仓库目录。配套服务安装器另行管理应用支持目录、启动项和 macOS 钥匙串。手机端不使用这些桌面文件接口，插件不会自行下载或安装后台服务。
+**File access outside the vault:** The Mac plugin reads a one-time connection handoff file from the user's `Library/Application Support/Claudian Remote/state/` directory, verifies the vault and identity, then overwrites and deletes the file. When receiving attachments, it reads temporary files supplied by Companion, verifies their size and digest, and imports them into the vault directory specified in settings. The separate service installer manages application support files, launch agents, and the macOS Keychain. The mobile plugin does not use these desktop file interfaces, and the plugin does not download or install background services itself.
 
-## 文档入口
+## Documentation
 
-- [安装与连接指南](docs/getting-started.md)：从准备环境到首次对话、日常使用和升级。
-- [下载与校验说明](docs/install-verification-0.2.0.md)：确认官方来源、核对完整包，再解压安装。
-- [常见问题与故障排查](docs/troubleshooting.md)：费用、配对、同步、只读与连接异常。
-- [服务器部署说明](docs/self-host-vps.md)：服务器环境、操作与配置字段。
-- [本版发布说明](docs/release-notes-0.2.0.md)：改动、验收范围和下载包。
-- [安装助手手册](CLAUDIAN_REMOTE_INSTALL.md)：经过可信校验后执行的详细安装契约。
+- [Installation and connection guide (Chinese)](docs/getting-started.md): environment preparation, your first conversation, everyday use, and upgrades.
+- [Download and verification instructions (Chinese)](docs/install-verification-0.2.0.md): confirm the official source and verify the complete package before extraction and installation.
+- [FAQ and troubleshooting (Chinese)](docs/troubleshooting.md): costs, pairing, sync, read-only states, and connection problems.
+- [Server deployment guide (Chinese)](docs/self-host-vps.md): server requirements, operations, and configuration fields.
+- [Release notes (Chinese)](docs/release-notes-0.2.0.md): changes, acceptance-testing scope, and downloads.
+- [Installation assistant manual (Chinese)](CLAUDIAN_REMOTE_INSTALL.md): the detailed installation contract to follow after verifying the trusted source and package.
 
 <details>
-<summary>维护者与开发者：兼容、许可、构建及发布约束</summary>
+<summary>For maintainers and developers: compatibility, licensing, builds, and release requirements</summary>
 
-## 社区插件安装分工
+## Community plugin installation responsibilities
 
-`community` 发行由 Obsidian 管理插件资产。外部 Kit 只核验已安装、已启用且版本与摘要一致的插件，然后安装或升级后台服务。后台回退和卸载不替换、删除社区插件；需要移除插件时在 Obsidian 操作。旧 beta 安装仍可升级，但不能混用新旧组件。
+In the `community` distribution, Obsidian manages plugin assets. The external Kit verifies that the plugin is installed, enabled, and matches the required version and digests, then installs or upgrades the background services. Rolling back or uninstalling the background services does not replace or delete the community plugin; remove the plugin through Obsidian if needed. Older beta installations can still be upgraded, but old and new components must not be mixed.
 
 ## Compatibility and release contract
 
@@ -162,8 +166,8 @@ user-owned server. A server terminates TLS and can read Relay plaintext; this re
 does not claim end-to-end encryption.
 
 Connection-mode security and exact recovery limits are documented in
-[`docs/security.md`](docs/security.md). The narrow user-owned server profile is in
-[`docs/self-host-vps.md`](docs/self-host-vps.md).
+[the security guide](docs/security.md). The narrow user-owned server profile is in
+[the server deployment guide (Chinese)](docs/self-host-vps.md).
 
 ## Development gates
 
@@ -193,7 +197,7 @@ The lifecycle release asset includes the Agent guide, executable entrypoint,
 Python package, and a per-file content lock. macOS arm64 and x86_64 CPython/uv
 assets are pinned to immutable upstream release URLs and GitHub-published
 SHA-256 digests in the signed release contract. See
-[`docs/beta-checklist.md`](docs/beta-checklist.md) for the remaining maintainer
+[the beta checklist (Chinese)](docs/beta-checklist.md) for the remaining maintainer
 and real-device release gates.
 
 </details>
