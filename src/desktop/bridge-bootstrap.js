@@ -1,12 +1,12 @@
+import { Platform } from "obsidian";
+
 const BOOTSTRAP_SCHEMA = "claudian-remote.bridge-bootstrap/v1";
 const MAX_BOOTSTRAP_BYTES = 16 * 1024;
 const SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$/;
 
 function desktopRequire(name) {
-  let loader = globalThis.require;
-  if (typeof loader !== "function") {
-    try { loader = eval("require"); } catch { loader = null; }
-  }
+  if (!Platform.isDesktopApp) throw new Error("desktop_runtime_unavailable");
+  const loader = typeof require === "function" ? require : globalThis.require;
   if (typeof loader !== "function") throw new Error("desktop_runtime_unavailable");
   return loader(name);
 }

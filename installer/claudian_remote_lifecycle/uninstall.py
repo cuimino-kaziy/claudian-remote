@@ -8,7 +8,7 @@ import shutil
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
-from .runtime import RuntimeLayout
+from .runtime import RuntimeLayout, installed_community_plugin
 from .private_io import tree_digest, write_private_json
 from .provisioning import verify_bridge_bootstrap_ack
 
@@ -203,14 +203,20 @@ class OwnershipUninstaller:
         conflicts: list[str] = []
         missing: list[str] = []
         observed: set[str] = set()
+        preserve_plugin = receipt.get("plugin_update_owner") == "obsidian" or (
+            self._receipt_plugin_root is not None
+            and installed_community_plugin(self._receipt_plugin_root)
+        )
         for resource in resources:
             if not isinstance(resource, Mapping) or resource.get("owned") is not True:
                 raise ValueError("ownership_receipt_invalid")
             resource_id = str(resource.get("resource_id") or "")
-            observed.add(resource_id)
             path = Path(str(resource.get("path") or ""))
             if not self._allowed_path(resource_id, path):
                 raise ValueError("ownership_receipt_scope_invalid")
+            if preserve_plugin and resource_id.startswith("plugin_"):
+                continue
+            observed.add(resource_id)
             if not path.exists() and not path.is_symlink():
                 if require_present and not (
                     resource_id == "bridge_bootstrap"
@@ -276,14 +282,18 @@ class OwnershipUninstaller:
                 "mutation_performed": True,
             }
         resources = list(preflight["resources"])
-        for _resource_id, path, policy in sorted(resources, key=lambda item: len(item[1].parts), reverse=True):
+        removed = []
+        for resource_id, path, policy in sorted(resources, key=lambda item: len(item[1].parts), reverse=True):
+            if resource_id.startswith("plugin_") and self._receipt_plugin_root is not None and installed_community_plugin(self._receipt_plugin_root):
+                continue
             self._remove(path, policy)
+            removed.append(resource_id)
         self._mark_uninstalled()
         return {
             "state": "ready",
             "code": "uninstall_completed",
-            "mutation_performed": bool(resources),
-            "removed_resource_ids": [resource_id for resource_id, _path, _policy in resources],
+            "mutation_performed": True,
+            "removed_resource_ids": removed,
         }
 
     def purge(self, *, confirmation_verified: bool) -> dict[str, Any]:

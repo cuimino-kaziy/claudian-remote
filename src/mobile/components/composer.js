@@ -70,10 +70,9 @@ export class MobileComposer {
   clear() { this.setDraft(""); }
 
   resizeInput() {
-    this.input.style.height = "auto";
+    this.input.setCssProps({ height: "auto" });
     const height = this.input.scrollHeight || 40;
-    this.input.style.height = `${Math.min(height, 128)}px`;
-    this.input.style.overflowY = "auto";
+    this.input.setCssProps({ height: `${Math.min(height, 128)}px` });
   }
 
   canSubmit() {

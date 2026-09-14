@@ -13,7 +13,7 @@ test("connection address accepts copied HTTPS endpoints and rejects secrets or i
   assert.match(connectionErrorMessage(new Error("claim_expired")), /Mac.*添加移动设备/);
   assert.match(connectionErrorMessage(new Error("pairing_wrong_vault")), /同一个|相同/);
   assert.doesNotMatch(connectionErrorMessage(new Error("request https://user:secret@private.example failed")), /secret|private\.example/);
-  assert.match(CONNECTION_GUIDES.remote_vps.help, /尚未开放 VPS 自动部署/);
+  assert.match(CONNECTION_GUIDES.remote_vps.help, /尚未开放服务器自动部署/);
 });
 
 test("settings save only valid endpoints, preserve bound profiles, and pair through the existing controller", async () => {
@@ -43,6 +43,7 @@ test("settings save only valid endpoints, preserve bound profiles, and pair thro
     constructor() { rows.push(this); this.buttons = []; this.controlEl = new Element(); }
     setName(value) { this.name = value; return this; }
     setDesc() { return this; }
+    setHeading() { return this; }
     addText(callback) { this.text = new Control(); callback(this.text); return this; }
     addButton(callback) { const button = new Control(); this.buttons.push(button); callback(button); return this; }
     addDropdown(callback) { this.dropdown = new Control(); callback(this.dropdown); return this; }

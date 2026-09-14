@@ -7,6 +7,7 @@ from contextlib import nullcontext
 import hashlib
 import json
 import re
+import stat
 import subprocess
 import sys
 import urllib.parse
@@ -51,7 +52,7 @@ from .operation_arbitration import OperationArbitration, OperationArbitrator, _r
 from .launchd import LaunchAgentManager
 from .keychain import MacOSKeychain
 from .plan import EnvironmentDrift, PlanBuilder, PlanError, PlanStore, validate_mutation_environment
-from .runtime import BootstrapVerifiedReleaseSource, RuntimeLayout, UnavailableReleaseSource
+from .runtime import BootstrapVerifiedReleaseSource, RuntimeLayout, UnavailableReleaseSource, community_managed_plugin
 from .provisioning import SecureInputFile, verify_bridge_bootstrap_ack
 from .tailscale import TailscaleController
 from .transaction import LifecycleInterrupted, LocalTailscaleTransaction, TransactionDependencies
@@ -887,7 +888,14 @@ def _checkpoint_transition(
         recovery = RecoveryPolicy.NOT_APPLICABLE
         next_actions = ()
         cancellation = False
-    elif gate is not None or state == "prepared":
+    elif gate is not None or state == "prepared" or (
+        state == "blocked"
+        and not mutation
+        and outcome.get("code") in {
+            "community_plugin_install_required", "community_plugin_update_required",
+            "community_plugin_assets_mismatch", "community_plugin_enable_required",
+        }
+    ):
         recovery = RecoveryPolicy.RETRY_SAME_OPERATION
         cancellation = (
             not boundary
@@ -1139,6 +1147,8 @@ def _diagnostic_observation(
     observation = {
         "components": {
             "plugin": versions[0] if versions else "unknown",
+            "companion": installation.get("managed_runtime_version") if installation.get("managed_runtime_state") == "verified" else "unknown",
+            "relay": installation.get("managed_runtime_version") if installation.get("managed_runtime_state") == "verified" else "unknown",
             "claudian": str(claudian.get("version") or "unknown"),
         },
         "lifecycle": {
@@ -2330,35 +2340,44 @@ def _owned_partial_profile_generation(
     planned_snapshot: Mapping[str, Any],
     current_snapshot: Mapping[str, Any],
 ) -> str | None:
-    """Authorize only provisioning by this interrupted local update."""
+    """Prove the private journal and profile belong to this interrupted operation."""
     layout = services.layout
     transaction = services.transaction
     if (
         layout is None or transaction is None
-        or plan.get("journey") != "current_update"
-        or plan.get("pairing_identity_policy") != "preserve"
+        or plan.get("journey") not in {"fresh_install", "current_update"}
+        or (plan.get("journey") == "current_update" and plan.get("pairing_identity_policy") != "preserve")
         or plan.get("topology", {}).get("mode") != "local_tailscale"
     ):
         return None
     planned = planned_snapshot.get("installation", {})
     current = current_snapshot.get("installation", {})
-    if current.get("profile_generation_id") == planned.get("profile_generation_id"):
-        return None
     journal_path = layout.state / f"{operation_id}.transaction.json"
     profile_path = layout.config / "connection-profile.json"
     try:
         if journal_path.is_symlink() or profile_path.is_symlink() or not layout.current.is_symlink():
             return None
+        if any(not stat.S_ISREG(path.stat().st_mode) or path.stat().st_mode & 0o077
+               for path in (journal_path, profile_path)):
+            return None
         journal = _read_transaction_companion(journal_path, operation_id=operation_id,
-            plan_id=str(plan["plan_id"]), journey="current_update")
+            plan_id=str(plan["plan_id"]), journey=str(plan["journey"]),
+            plugin_update_owner="obsidian" if community_managed_plugin(plan) else "lifecycle_manager")
         prior = journal["prior_release_id"]
-        if (
-            journal["phase"] not in {"activation_started", "plugin_activated"}
-            or not journal["activation_started"] or not prior
-            or prior != planned.get("compatibility_set_id")
-            or prior != current.get("compatibility_set_id")
-            or layout.current.resolve(strict=True) != layout.release_path(prior).resolve(strict=True)
-        ):
+        if not journal["activation_started"] or prior != planned.get("compatibility_set_id"):
+            return None
+        if journal["phase"] in {"after_activation", "await_plugin_bootstrap", "await_pairing"}:
+            # Activation can precede writing the new receipt. Only this exact
+            # operation's active target can recover that temporary inconsistency.
+            active = str(plan["compatibility_set_id"])
+        elif (journal["phase"] in {"activation_started", "plugin_activated", "secure_provisioned"}
+              and plan.get("journey") == "current_update" and prior
+              and current.get("profile_generation_id") != planned.get("profile_generation_id")):
+            active = prior
+        else:
+            return None
+        if (active != current.get("compatibility_set_id")
+            or layout.current.resolve(strict=True) != layout.release_path(active).resolve(strict=True)):
             return None
         # Probe first, then read the profile so configuration changes during
         # the external probe cannot authorize a stale inspection fingerprint.

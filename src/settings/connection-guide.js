@@ -12,16 +12,16 @@ export const CONNECTION_GUIDES = {
     help: "两台设备需要处于同一个 Tailscale 网络。连接失败时先检查 Tailscale 是否已连接，以及 Mac 是否睡眠。"
   },
   remote_vps: {
-    name: "已有 VPS 服务器",
+    name: "服务器连接",
     example: "https://relay.你的域名.com",
     summary: "手机和 Mac 通过你自己的服务器连接。服务器只负责转发，Claudian 仍在 Mac 上运行。",
     steps: [
-      "准备受支持的 Linux VPS、至少 2 GiB 可用存储、你控制的域名和有效 HTTPS 证书；需要有人能够通过 SSH 管理这台服务器。",
-      "部署与插件匹配的 Relay 服务，配置域名和 HTTPS / WebSocket 转发，再把 Mac 后台服务连接到同一服务器。详细字段和现有模板见 VPS 手册。",
+      "准备符合手册系统与架构要求的 Linux 服务器（VPS、云服务器或自有主机）、至少 2 GiB 可用存储、你控制的域名和有效 HTTPS 证书；需要有人能够通过 SSH 管理这台服务器。",
+      "部署与插件匹配的 Relay 服务，配置域名和 HTTPS / WebSocket 转发，再把 Mac 后台服务连接到同一服务器。详细字段和现有模板见服务器手册。",
       "让部署者提供完整 HTTPS 连接地址。在手机填写该地址，或直接打开 Mac 生成的配对链接。不要填写 SSH 地址、服务器密码或模型 API Key。",
       "输入 Mac 上的 8 位配对码，验证通过后会自动配对并连接，再打开远程页面确认已就绪。"
     ],
-    help: "本页可连接已经部署的 VPS。当前内测安装器尚未开放 VPS 自动部署；选择此说明不会迁移现有连接。VPS 管理者能够访问经过服务器转发的内容。"
+    help: "本页可连接已经部署的服务器。当前安装器尚未开放服务器自动部署；选择此说明不会迁移现有连接。服务器管理员能够访问经过服务器转发的内容。"
   }
 };
 
@@ -52,5 +52,5 @@ export function connectionErrorMessage(error) {
     return "Mac 后台服务尚未就绪。请打开 Claudian 和已安装的后台服务，再刷新设备列表。首次使用请先完成 Mac 安装。";
   }
   if (code === "device_local_persistence_unavailable") return "本设备无法保存配对信息。请重启 Obsidian 后重试。";
-  return "操作未完成。请检查连接地址、Tailscale 或 VPS 是否可达，以及 Mac 后台服务是否运行，然后重试。";
+  return "操作未完成。请检查连接地址、Tailscale 或服务器是否可达，以及 Mac 后台服务是否运行，然后重试。";
 }

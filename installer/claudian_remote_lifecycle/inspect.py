@@ -29,6 +29,7 @@ from .model import (
     RecoveryPolicy,
 )
 from .provisioning import verify_secure_provisioning
+from .private_io import tree_digest
 from .runtime import RuntimeLayout
 
 
@@ -109,7 +110,7 @@ class LocalInspectionProbe:
 
     def vaults(self) -> Sequence[Mapping[str, Any]]:
         return [
-            {key: value for key, value in vault.items() if key != "_path"}
+            {key: value for key, value in vault.items() if not key.startswith("_")}
             for vault in self._discover_vaults()
         ]
 
@@ -196,15 +197,18 @@ class LocalInspectionProbe:
 
     def _managed_installation_status(self) -> Mapping[str, Any]:
         root = self.home / "Library" / "Application Support" / "Claudian Remote"
+        layout = RuntimeLayout(root, self.home / "Library" / "LaunchAgents")
         current = root / "current"
         compatibility_set_id = None
+        target = None
         if current.is_symlink():
             try:
-                target = current.resolve(strict=True)
+                resolved = current.resolve(strict=True)
                 releases = (root / "releases").resolve()
-                if target.parent == releases and target.name.startswith("claudian-remote-"):
+                if resolved.is_dir() and resolved.parent == releases and resolved.name.startswith("claudian-remote-"):
+                    target = resolved
                     compatibility_set_id = target.name
-            except OSError:
+            except (OSError, RuntimeError):
                 compatibility_set_id = None
 
         profile_mode = None
@@ -223,11 +227,89 @@ class LocalInspectionProbe:
                     "epoch": str(profile.get("epoch") or ""),
                 }
                 profile_generation_id = content_id("profile-generation", generation)
+        version = self._verified_managed_version(layout, target)
+        receipt = self._read_json(layout.ownership_receipt)
+        uninstalled = not layout.ownership_receipt.is_symlink() and isinstance(receipt, Mapping) and receipt.get("receipt_schema") == "claudian-remote.ownership/v1" and receipt.get("status") == "uninstalled" and receipt.get("resources") == []
+        residue = any(path.exists() or path.is_symlink() for path in (
+            layout.current, layout.previous,
+            layout.connection_profile, layout.relay_config, layout.companion_config,
+            layout.secure_provisioning, layout.availability_config,
+            layout.relay_launch_agent, layout.companion_launch_agent, layout.availability_launch_agent,
+        )) or any(path.is_symlink() for path in (layout.base, layout.config, layout.state)) or (not uninstalled and (layout.ownership_receipt.exists() or layout.ownership_receipt.is_symlink()))
+        for directory in (layout.releases, layout.runtime):
+            try:
+                residue = residue or directory.is_symlink() or (directory.exists() and (not directory.is_dir() or next(directory.iterdir(), None) is not None))
+            except OSError:
+                residue = True
         return {
             "compatibility_set_id": compatibility_set_id,
+            "managed_runtime_state": "verified" if version else "inconsistent" if residue else "absent",
+            "managed_runtime_version": version,
             "profile_mode": profile_mode,
             "profile_generation_id": profile_generation_id,
         }
+
+    def _verified_managed_version(self, layout: RuntimeLayout, target: Path | None) -> str | None:
+        """Validate backend identity without hashing the market-owned Vault plugin."""
+        if target is None:
+            return None
+        try:
+            if any(path.is_symlink() for path in (layout.base, layout.releases, layout.config, layout.state, target, layout.ownership_receipt, layout.connection_profile, target / "plugin" / "manifest.json")):
+                return None
+            version = target.name.removeprefix("claudian-remote-")
+            if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-[A-Za-z0-9.-]+)?", version) is None:
+                return None
+            if not layout.runtime.is_dir() or layout.runtime.is_symlink():
+                return None
+            if any(not (target / name).is_dir() or (target / name).is_symlink() for name in ("plugin", "companion", "relay", "installer")):
+                return None
+            receipt = self._read_json(layout.ownership_receipt)
+            if not isinstance(receipt, Mapping) or receipt.get("receipt_schema") != "claudian-remote.ownership/v1" or receipt.get("compatibility_set_id") != target.name or receipt.get("status") == "uninstalled":
+                return None
+            operation = str(receipt.get("operation_id") or "")
+            plan = str(receipt.get("plan_id") or "")
+            if re.fullmatch(r"op-[0-9a-f]{32}", operation) is None or re.fullmatch(r"plan-[0-9a-f]{64}", plan) is None:
+                return None
+            journal_path = layout.state / f"{operation}.transaction.json"
+            if journal_path.is_symlink():
+                return None
+            # Import lazily: the arbitration module also uses inspection via
+            # planning. Its reader supports current journals as well as beta.
+            from .operation_arbitration import _read_transaction_companion
+            raw_journal = self._read_json(journal_path)
+            completed = raw_journal.get("completed_phases") if isinstance(raw_journal, Mapping) else None
+            if not isinstance(completed, list) or receipt.get("plugin_update_owner") not in {None, "obsidian"}:
+                return None
+            journey = "legacy_upgrade" if "legacy_plugin_migration" in completed else "current_update"
+            journal = _read_transaction_companion(journal_path, operation_id=operation, plan_id=plan, journey=journey,
+                plugin_update_owner="obsidian" if receipt.get("plugin_update_owner") == "obsidian" else "lifecycle_manager")
+            if not isinstance(journal, Mapping) or any(journal.get(key) != value for key, value in {
+                "transaction_schema": "claudian-remote.local-transaction/v1",
+                "operation_id": operation, "plan_id": plan,
+            }.items()):
+                return None
+            # Identity can be verified before the user finishes loading the
+            # plugin or pairing. Operation arbitration still owns resumption.
+            if journal.get("phase") not in {"ready", "after_activation", "await_plugin_bootstrap", "await_pairing"} or journal.get("activation_started") is not True:
+                return None
+            resources = receipt.get("resources")
+            if not isinstance(resources, list):
+                return None
+            for resource_id, path in (("active_release", target), ("active_release_pointer", layout.current), ("connection_profile", layout.connection_profile)):
+                matches = [item for item in resources if isinstance(item, Mapping) and item.get("resource_id") == resource_id]
+                if len(matches) != 1:
+                    return None
+                item = matches[0]
+                if item.get("owned") is not True or item.get("path") != str(path) or not path.exists() or item.get("digest") != tree_digest(path):
+                    return None
+            # This manifest belongs to the receipt-verified release, not the
+            # independently updated plugin installed in the user's Vault.
+            metadata = self._read_json(target / "plugin" / "manifest.json")
+            if not isinstance(metadata, Mapping) or metadata.get("id") != "claudian-remote" or metadata.get("version") != version:
+                return None
+            return version
+        except (OSError, ValueError, TypeError, RuntimeError):
+            return None
 
     def _secure_provisioning_status(self) -> Mapping[str, Any]:
         root = self.home / "Library" / "Application Support" / "Claudian Remote"
@@ -248,9 +330,11 @@ class LocalInspectionProbe:
             }
 
     def resolve_vault(self, vault_id: str) -> Path:
-        for item in self._discover_vaults():
-            if str(item.get("vault_id")) == str(vault_id):
-                return Path(item["_path"])
+        matches = [item for item in self._discover_vaults() if str(vault_id) in {str(item.get("vault_id")), str(item.get("_registration_id"))}]
+        if len(matches) == 1:
+            return Path(matches[0]["_path"])
+        if len(matches) > 1:
+            raise ValueError("vault_identity_ambiguous")
         raise FileNotFoundError("vault_not_found")
 
     def network(self) -> Mapping[str, Any]:
@@ -296,6 +380,10 @@ class LocalInspectionProbe:
                 continue
             enabled_plugins = self._read_json(path / ".obsidian" / "community-plugins.json")
             enabled_ids = set(enabled_plugins) if isinstance(enabled_plugins, list) else set()
+            remote_preferences = path / ".obsidian" / "plugins" / "claudian-remote" / "data.json"
+            preferences = self._read_json(remote_preferences) if not remote_preferences.is_symlink() else None
+            shared_id = preferences.get("vault_id") if isinstance(preferences, Mapping) else None
+            shared_id_valid = isinstance(shared_id, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,255}", shared_id) is not None
             claudian_id = None
             claudian_version = None
             plugins_dir = path / ".obsidian" / "plugins"
@@ -315,15 +403,23 @@ class LocalInspectionProbe:
                     break
             discovered.append(
                 {
-                    "vault_id": str(vault_id),
+                    "vault_id": shared_id if shared_id_valid else str(vault_id),
+                    "remote_vault_id_ready": bool(shared_id_valid),
                     "display_name": path.name,
                     "open": bool(metadata.get("open")),
                     "claudian_version": claudian_version,
                     "claudian_enabled": bool(claudian_id and claudian_id in enabled_ids),
                     "_path": path,
+                    "_registration_id": str(vault_id),
                 }
             )
         discovered.sort(key=lambda item: item["vault_id"])
+        counts: dict[str, int] = {}
+        for item in discovered:
+            counts[item["vault_id"]] = counts.get(item["vault_id"], 0) + 1
+        for item in discovered:
+            if counts[item["vault_id"]] > 1:
+                item["remote_vault_id_ready"] = False
         self._vault_cache = discovered
         return discovered
 
@@ -413,6 +509,7 @@ class Inspector:
                 "legacy_authority_capability": installation.get(
                     "legacy_authority_capability", "not_applicable"
                 ),
+                "managed_runtime_state": installation.get("managed_runtime_state"),
             },
             prior_operation=prior_operation,
             prior_operation_terminal=prior_operation_terminal,
@@ -581,6 +678,8 @@ class Inspector:
             reasons.append("vault_not_found")
         elif len(vaults) > 1:
             reasons.append("vault_selection_required")
+        if len({vault["vault_id"] for vault in vaults}) != len(vaults):
+            reasons.append("vault_identity_ambiguous")
         return {
             "supported": not reasons,
             "required_claudian_version": SUPPORTED_CLAUDIAN_VERSION,

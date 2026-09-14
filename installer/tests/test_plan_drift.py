@@ -44,6 +44,8 @@ def _snapshot_for_journey(
     installation = {
         **original_installation(),
         "installed": journey == "current_update",
+        "managed_runtime_state": "verified" if journey == "current_update" else "absent",
+        "managed_runtime_version": "0.2.0-beta.6.7" if journey == "current_update" else None,
         "plugin_lineage": lineage,
         "legacy_authority_capability": authority_capability,
     }
@@ -64,6 +66,8 @@ def test_identical_snapshot_yields_identical_canonical_plan():
     assert first == second
     assert first["plan_id"].startswith("plan-")
     assert first["mutation_performed"] is False
+    assert first["compatibility_set_id"] == "claudian-remote-0.2.0"
+    assert "obsidian_plugin:claudian-remote" not in first["affected_resources"]
     assert first["topology"]["silent_fallback"] is False
     assert first["journey"] == "fresh_install"
     assert first["target_compatibility_set"] == {
@@ -370,3 +374,48 @@ def test_resume_accepts_only_the_plan_owned_activation_transition():
     )
     with pytest.raises(EnvironmentDrift):
         validate_mutation_environment(plan, planned, current, allow_plan_target=True)
+
+
+def test_community_plan_source_is_verified_backend_not_market_plugin():
+    snapshot = _snapshot_for_journey("current_update")
+    snapshot["installation"]["plugin_versions"] = ["0.2.0"]
+    _resign_snapshot(snapshot)
+    plan = PlanBuilder().build(snapshot, mode="local_tailscale")
+    assert plan["source_version"] == "0.2.0-beta.6.7"
+    plan["source_version"] = "0.2.0"
+    plan["plan_id"] = content_id("plan", {key: value for key, value in plan.items() if key != "plan_id"})
+    with pytest.raises(PlanError, match="plan_source_version_mismatch"):
+        validate_plan_environment(plan, snapshot)
+
+
+def test_community_plan_requires_plugin_created_shared_vault_identity():
+    snapshot = _snapshot_for_journey("fresh_install")
+    snapshot["vaults"][0]["remote_vault_id_ready"] = False
+    _resign_snapshot(snapshot)
+    plan = PlanBuilder().build(snapshot, mode="local_tailscale")
+    assert plan["source_version"] is None
+    assert "community_plugin_enable_required" in plan["blockers"]
+
+
+@pytest.mark.parametrize("journey", ["fresh_install", "current_update"])
+def test_only_proven_same_operation_can_resume_target_before_receipt(journey):
+    planned = _snapshot_for_journey(journey)
+    plan = PlanBuilder().build(planned, mode="local_tailscale")
+    current = copy.deepcopy(planned)
+    generation = "profile-generation-" + "d" * 64
+    current["installation"].update(managed_runtime_state="inconsistent", managed_runtime_version=None,
+        compatibility_set_id=plan["compatibility_set_id"], profile_mode="local_tailscale",
+        profile_generation_id=generation)
+    current["journey"].update(journey="unclassified", reason_code="managed_runtime_inconsistent")
+    _resign_snapshot(current)
+    for supplied in (None, "profile-generation-" + "e" * 64):
+        with pytest.raises(EnvironmentDrift):
+            validate_mutation_environment(plan, planned, current, allow_plan_target=True,
+                owned_profile_generation_id=supplied)
+    validate_mutation_environment(plan, planned, current, allow_plan_target=True,
+        owned_profile_generation_id=generation)
+    current["installation"]["compatibility_set_id"] = "claudian-remote-other"
+    _resign_snapshot(current)
+    with pytest.raises(EnvironmentDrift):
+        validate_mutation_environment(plan, planned, current, allow_plan_target=True,
+            owned_profile_generation_id=generation)

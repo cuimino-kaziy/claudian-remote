@@ -340,3 +340,43 @@ def test_uninstall_reports_partial_mutation_when_shutdown_fails_after_revocation
     }
     assert calls == ["revoke"]
     assert layout.runtime.exists()
+
+
+def test_beta_receipt_cannot_remove_market_owned_plugin_even_for_matching_assets(tmp_path):
+    layout = layout_for(tmp_path)
+    layout.runtime.mkdir(parents=True)
+    (layout.runtime / "python").write_text("owned runtime")
+    plugin = tmp_path / "Vault/.obsidian/plugins/claudian-remote"
+    plugin.mkdir(parents=True)
+    (plugin / "manifest.json").write_text('{"id":"claudian-remote","version":"0.2.0"}')
+    (plugin / "main.js").write_text("community code")
+    (plugin / "styles.css").write_text("unchanged shared css")
+    write_receipt(layout, [("managed_runtime", layout.runtime),
+        ("plugin_directory", plugin),
+        ("plugin_shipped_file:styles.css", plugin / "styles.css")])
+    before = {item.name: item.read_bytes() for item in plugin.iterdir()}
+    outcome = OwnershipUninstaller(layout, stop_owned_services=lambda: None,
+        revoke_credentials=lambda: None).uninstall()
+    assert outcome["state"] == "ready"
+    assert plugin.is_dir()
+    assert {item.name: item.read_bytes() for item in plugin.iterdir()} == before
+    assert all(not name.startswith("plugin_") for name in outcome["removed_resource_ids"])
+
+
+def test_uninstall_rechecks_market_ownership_after_stopping_services(tmp_path):
+    layout = layout_for(tmp_path)
+    plugin = tmp_path / "Vault/.obsidian/plugins/claudian-remote"
+    plugin.mkdir(parents=True)
+    manifest = plugin / "manifest.json"
+    manifest.write_text('{"id":"claudian-remote","version":"0.2.0-beta.6.7"}')
+    (plugin / "styles.css").write_text("shared css")
+    write_receipt(layout, [("plugin_directory", plugin),
+        ("plugin_shipped_file:styles.css", plugin / "styles.css")])
+    def market_upgrade():
+        manifest.write_text('{"id":"claudian-remote","version":"0.2.0"}')
+    outcome = OwnershipUninstaller(layout, stop_owned_services=market_upgrade,
+        revoke_credentials=lambda: None).uninstall()
+    assert outcome["state"] == "ready"
+    assert plugin.is_dir()
+    assert (plugin / "styles.css").read_text() == "shared css"
+    assert outcome["removed_resource_ids"] == []

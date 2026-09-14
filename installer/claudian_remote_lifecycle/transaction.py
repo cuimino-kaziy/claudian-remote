@@ -25,13 +25,23 @@ from .migrations import (
 )
 from .pairing import PairingIdentityTransition
 from .private_io import tree_digest, write_private_json
-from .provisioning import PairingAdminProvisioner
-from .runtime import ReleaseSource, RuntimeLayout, StagedRelease
+from .provisioning import PairingAdminProvisioner, SecureInputFile
+from .runtime import (
+    ReleaseSource, RuntimeLayout, StagedRelease, community_managed_plugin, installed_community_plugin,
+)
 from .uninstall import OwnershipUninstaller
 
 
 class LifecycleInterrupted(RuntimeError):
     pass
+
+
+def _community_preflight_failure(error: ValueError) -> dict[str, Any]:
+    outcome = {"state": "blocked", "code": str(error), "mutation_performed": False}
+    if str(error) in {"community_plugin_install_required", "community_plugin_update_required",
+        "community_plugin_assets_mismatch", "community_plugin_enable_required"}:
+        outcome["human_action"] = "在当前仓库通过 Obsidian 安装或更新 Claudian Remote 到 0.2.0 并启用，然后恢复此操作；安装器不会改写插件文件。"
+    return outcome
 
 
 def _loopback_listener_absent(port: int) -> bool:
@@ -648,7 +658,12 @@ class LocalTailscaleTransaction:
             "activation_started",
             "plugin_activated",
         }
-        if not isinstance(journal, Mapping) or set(journal) != expected_fields:
+        if community_managed_plugin(plan):
+            expected_fields.add("plugin_update_owner")
+        if (
+            not isinstance(journal, Mapping) or set(journal) != expected_fields
+            or (community_managed_plugin(plan) and journal.get("plugin_update_owner") != "obsidian")
+        ):
             valid = False
         else:
             phase = journal.get("phase")
@@ -790,6 +805,8 @@ class LocalTailscaleTransaction:
         vault_id: str,
         connection_mode: str,
     ) -> Path | None:
+        if installed_community_plugin(destination):
+            raise ValueError("community_plugin_update_owned_by_obsidian")
         destination.parent.mkdir(parents=True, exist_ok=True)
         backup = self.dependencies.layout.backups / operation_id / "plugin"
         backup.parent.mkdir(parents=True, exist_ok=True)
@@ -837,6 +854,11 @@ class LocalTailscaleTransaction:
 
     @staticmethod
     def _restore_plugin(destination: Path, backup: Path | None) -> None:
+        # A previously managed beta may be rolled back after Obsidian already
+        # installed the community plugin. Its historical backup is not authority
+        # to downgrade that independently owned installation.
+        if installed_community_plugin(destination):
+            return
         if backup and backup.exists():
             staging = destination.parent / f".{destination.name}.{backup.parent.name}.next"
             shutil.rmtree(staging, ignore_errors=True)
@@ -889,19 +911,19 @@ class LocalTailscaleTransaction:
         # data.json after activation. Record shipped files independently so a
         # later uninstall can remove exact owned code without treating user
         # settings as package tampering.
-        entries.append({
+        plugin_entries = [{
             "resource_id": "plugin_directory",
             "path": str(plugin),
             "kind": "directory",
             "owned": True,
             "removal_policy": "remove_if_empty_after_shipped_files",
-        })
+        }]
         for source in sorted((release_target / "plugin").rglob("*")):
             if not source.is_file() or source.is_symlink():
                 continue
             relative = source.relative_to(release_target / "plugin")
             destination = plugin / relative
-            entries.append({
+            plugin_entries.append({
                 "resource_id": "plugin_shipped_file:" + relative.as_posix(),
                 "path": str(destination),
                 "kind": "file",
@@ -909,6 +931,9 @@ class LocalTailscaleTransaction:
                 "owned": True,
                 "conflict_policy": "preserve_and_report_if_modified",
             })
+        community = community_managed_plugin({"compatibility_set_id": compatibility_set_id})
+        if not community:
+            entries.extend(plugin_entries)
         receipt = {
             "receipt_schema": "claudian-remote.ownership/v1",
             "operation_id": operation_id,
@@ -917,6 +942,8 @@ class LocalTailscaleTransaction:
             "plugin_root": str(plugin),
             "resources": entries,
         }
+        if community:
+            receipt["plugin_update_owner"] = "obsidian"
         write_private_json(layout.ownership_receipt, receipt)
 
     def _ownership_receipt_ready(self, plan: Mapping[str, Any]) -> bool:
@@ -945,14 +972,113 @@ class LocalTailscaleTransaction:
                         "companion_launch_agent",
                         "availability_launch_agent",
                         "availability_config",
-                        "plugin_directory",
-                        "plugin_shipped_file:manifest.json",
                     }
+                    | (set() if community_managed_plugin(plan) else {
+                        "plugin_directory", "plugin_shipped_file:manifest.json"
+                    })
                 ),
             )
         except ValueError:
             return False
         return preflight.get("state") == "ready"
+
+    def _community_rollback_files(self) -> dict[str, Path]:
+        layout = self.dependencies.layout
+        return {name: getattr(layout, name) for name in (
+            "connection_profile", "relay_config", "companion_config", "secure_provisioning",
+            "availability_config", "bridge_bootstrap_ack", "ownership_receipt",
+        )}
+
+    def _save_community_rollback_state(self, plan: Mapping[str, Any], operation_id: str, prior: Path | None) -> None:
+        if not community_managed_plugin(plan) or prior is None:
+            return
+        path = self.dependencies.layout.backups / operation_id / "runtime-state.json"
+        if path.exists() or path.is_symlink():
+            self._read_community_rollback_state(plan, operation_id, prior)
+            return
+        files = {}
+        for name, source in self._community_rollback_files().items():
+            if source.is_symlink():
+                raise ValueError("runtime_rollback_state_invalid")
+            files[name] = json.loads(source.read_text()) if source.exists() else None
+        if not isinstance(files["ownership_receipt"], Mapping) or files["ownership_receipt"].get("compatibility_set_id") != prior.name:
+            raise ValueError("runtime_rollback_state_invalid")
+        write_private_json(path, {"operation_id": operation_id, "plan_id": plan["plan_id"],
+            "prior_release_id": prior.name, "files": files}, validate_secret_free=False)
+
+    def _read_community_rollback_state(self, plan: Mapping[str, Any], operation_id: str, prior: Path) -> Mapping[str, Any]:
+        path = self.dependencies.layout.backups / operation_id / "runtime-state.json"
+        if path.is_symlink() or not self._private_owned_directory(path.parent) or path.stat().st_mode & 0o077:
+            raise ValueError("runtime_rollback_state_invalid")
+        saved = json.loads(path.read_text())
+        if (not isinstance(saved, Mapping) or set(saved) != {"operation_id", "plan_id", "prior_release_id", "files"}
+            or saved.get("operation_id") != operation_id or saved.get("plan_id") != plan["plan_id"]
+            or saved.get("prior_release_id") != prior.name or not isinstance(saved.get("files"), Mapping)
+            or set(saved["files"]) != set(self._community_rollback_files())
+            or any(value is not None and not isinstance(value, Mapping) for value in saved["files"].values())
+            or not isinstance(saved["files"]["ownership_receipt"], Mapping)
+            or saved["files"]["ownership_receipt"].get("compatibility_set_id") != prior.name):
+            raise ValueError("runtime_rollback_state_invalid")
+        return saved["files"]
+
+    def _restore_community_rollback_state(self, plan: Mapping[str, Any], operation_id: str, prior: Path | None) -> None:
+        if not community_managed_plugin(plan) or prior is None:
+            return
+        files = self._read_community_rollback_state(plan, operation_id, prior)
+        # Bootstrap envelopes contain secrets and are never copied into backups.
+        # Erase the new operation's envelope, then recover the old generation
+        # from its existing Keychain reference only when it was still waiting.
+        bootstrap = self.dependencies.layout.bridge_bootstrap_for(str(plan["vault_id"]))
+        if bootstrap.exists() or bootstrap.is_symlink():
+            if bootstrap.is_symlink():
+                raise ValueError("runtime_rollback_state_invalid")
+            envelope = json.loads(bootstrap.read_text())
+            if (not isinstance(envelope, Mapping) or envelope.get("installation_id") != plan["installation_id"]
+                or envelope.get("vault_id") != plan["vault_id"]):
+                raise ValueError("runtime_rollback_state_invalid")
+            SecureInputFile(bootstrap).discard()
+        if files["bridge_bootstrap_ack"] is None:
+            state = files["secure_provisioning"]
+            profile = files["connection_profile"]
+            if not isinstance(state, Mapping) or not isinstance(profile, Mapping):
+                raise ValueError("runtime_rollback_state_invalid")
+            SecureInputFile.create(bootstrap, {
+                "bootstrap_schema": "claudian-remote.bridge-bootstrap/v1",
+                "installation_id": profile["installation_id"], "vault_id": profile["vault_id"],
+                "endpoint": profile["endpoint"], "endpoint_audience": profile["endpoint_audience"],
+                "bridge_credential_id": state["bridge_credential_id"],
+                "bridge_secret": self.dependencies.keychain.get(state["bridge_credential_ref"]),
+                "bootstrap_generation": state["bootstrap_generation"], "expires_at": int(time.time()) + 600,
+            })
+        for name, path in self._community_rollback_files().items():
+            if path.is_symlink():
+                raise ValueError("runtime_rollback_state_invalid")
+            if files[name] is None:
+                path.unlink(missing_ok=True)
+            else:
+                write_private_json(path, files[name], validate_secret_free=False)
+
+    def _refresh_community_rollback_receipt(self, plan: Mapping[str, Any], operation_id: str, prior: Path | None) -> None:
+        if not community_managed_plugin(plan) or prior is None:
+            return
+        layout = self.dependencies.layout
+        receipt = dict(self._read_community_rollback_state(plan, operation_id, prior)["ownership_receipt"])
+        # The verified new release stays cached after rollback. Only these
+        # operation-owned paths changed; all other original hashes remain gates.
+        changed = {"managed_runtime": layout.runtime, "managed_release_store": layout.releases,
+            "availability_config": layout.availability_config,
+            "bridge_bootstrap": layout.bridge_bootstrap_for(str(plan["vault_id"]))}
+        resources = []
+        for item in receipt["resources"]:
+            path = changed.get(item.get("resource_id"))
+            if path is not None:
+                if item.get("path") != str(path) or path.is_symlink():
+                    raise ValueError("runtime_rollback_state_invalid")
+                if path.exists():
+                    item = {**item, "digest": tree_digest(path)}
+            resources.append(item)
+        receipt["resources"] = resources
+        write_private_json(layout.ownership_receipt, receipt)
 
     def _already_ready(self, target: Path, plan: Mapping[str, Any]) -> bool:
         layout = self.dependencies.layout
@@ -978,6 +1104,15 @@ class LocalTailscaleTransaction:
         )
 
     def verify(self, plan: Mapping[str, Any]) -> dict[str, Any]:
+        if community_managed_plugin(plan):
+            try:
+                self.dependencies.release_source.verify(plan)
+                self.dependencies.release_source.verify_installed_plugin(
+                    self._plugin_destination(str(plan.get("vault_id") or "")),
+                    vault_id=str(plan.get("vault_id") or ""),
+                )
+            except ValueError as exc:
+                return _community_preflight_failure(exc)
         self._legacy_migration(
             str(plan.get("vault_id") or ""),
             str(plan.get("topology", {}).get("mode") or "local_tailscale"),
@@ -1092,8 +1227,13 @@ class LocalTailscaleTransaction:
         if runtime_mutated:
             self.dependencies.launchd.remove_local_agents()
             self.dependencies.tailscale.remove_serve()
-            if plugin_activated or backup.exists():
+            if not community_managed_plugin(plan) and (plugin_activated or backup.exists()):
                 self._restore_plugin(plugin, backup if backup.exists() else None)
+            try:
+                self._restore_community_rollback_state(plan, operation_id, prior_target)
+            except (OSError, ValueError):
+                return {"state": "recovery_required", "code": "runtime_rollback_state_invalid",
+                    "mutation_performed": True, "restored_previous": False}
             if prior_target:
                 self._activate(prior_target)
                 python = layout.environment_python(prior_target.name)
@@ -1109,6 +1249,7 @@ class LocalTailscaleTransaction:
                 self.dependencies.tailscale.activate_serve(8787)
             else:
                 layout.current.unlink(missing_ok=True)
+            self._refresh_community_rollback_receipt(plan, operation_id, prior_target)
         self._legacy_migration(
             str(plan.get("vault_id") or ""),
             plan_id=str(plan.get("plan_id") or ""),
@@ -1176,6 +1317,18 @@ class LocalTailscaleTransaction:
         pairing_policy = str(plan.get("pairing_identity_policy") or "not_applicable")
         if not compatibility_set_id or not installation_id or not vault_id:
             raise ValueError("incomplete_install_plan")
+        community = community_managed_plugin(plan)
+        if community:
+            # Fail before staging, identity capture, or any service mutation.
+            try:
+                verified = self.dependencies.release_source.verify(plan)
+                if verified.get("plugin_update_owner") != "obsidian":
+                    raise ValueError("release_contract_mismatch")
+                self.dependencies.release_source.verify_installed_plugin(
+                    self._plugin_destination(vault_id), vault_id=vault_id,
+                )
+            except ValueError as exc:
+                return _community_preflight_failure(exc)
         pairing_transition = self._pairing_identity_transition()
         if journey == "current_update":
             if pairing_policy not in {"preserve", "rotate"}:
@@ -1231,6 +1384,15 @@ class LocalTailscaleTransaction:
         expected_audience = f"claudian-remote:local_tailscale:{installation_id}"
         target = self.dependencies.layout.release_path(compatibility_set_id)
         operation_file = self.dependencies.layout.state / f"{operation_id}.transaction.json"
+        if community and journey == "current_update" and not operation_file.exists():
+            prior = self._active_target()
+            baseline = OwnershipUninstaller(self.dependencies.layout,
+                stop_owned_services=lambda: None, revoke_credentials=lambda: None,
+                expected_compatibility_set_id=prior.name if prior else "missing",
+                expected_plugin_root=self._plugin_destination(vault_id)).preflight(require_present=True)
+            if baseline.get("state") != "ready":
+                return {"state": "blocked", "code": str(baseline.get("code") or "ownership_receipt_invalid"),
+                    "mutation_performed": False}
         # An already healthy runtime still needs to finish its waiting journal.
         awaiting_activation = operation_file.is_file() and json.loads(
             operation_file.read_text(encoding="utf-8")
@@ -1332,6 +1494,7 @@ class LocalTailscaleTransaction:
                 operation_file,
                 {
                     "transaction_schema": "claudian-remote.local-transaction/v1",
+                    **({"plugin_update_owner": "obsidian"} if community else {}),
                     "operation_id": operation_id,
                     "plan_id": plan["plan_id"],
                     "phase": name,
@@ -1350,7 +1513,7 @@ class LocalTailscaleTransaction:
         plugin_destination = self._plugin_destination(vault_id)
         backup_candidate = layout.backups / operation_id / "plugin"
         plugin_backup: Path | None = backup_candidate if backup_candidate.exists() else None
-        plugin_activated = plugin_activated or resumed_after_activation
+        plugin_activated = not community and (plugin_activated or resumed_after_activation)
 
         def compensate(code: str, completed: list[str]) -> dict[str, Any]:
             if pairing_rotation_committed:
@@ -1393,7 +1556,7 @@ class LocalTailscaleTransaction:
                 if runtime_mutated:
                     self.dependencies.launchd.remove_local_agents()
                     self.dependencies.tailscale.remove_serve()
-                    if plugin_activated or backup_candidate.exists():
+                    if not community and (plugin_activated or backup_candidate.exists()):
                         self._restore_plugin(
                             plugin_destination,
                             backup_candidate if backup_candidate.exists() else plugin_backup,
@@ -1407,6 +1570,7 @@ class LocalTailscaleTransaction:
                     ):
                         raise RuntimeError("pairing_rotation_already_committed")
                 if runtime_mutated:
+                    self._restore_community_rollback_state(plan, operation_id, prior_target)
                     if prior_target:
                         self._activate(prior_target)
                         prior_python = layout.environment_python(prior_target.name)
@@ -1422,31 +1586,12 @@ class LocalTailscaleTransaction:
                         self.dependencies.tailscale.activate_serve(8787)
                     else:
                         layout.current.unlink(missing_ok=True)
+                    self._refresh_community_rollback_receipt(plan, operation_id, prior_target)
                 shutil.rmtree(layout.staging / f"{operation_id}.partial", ignore_errors=True)
-                write_private_json(operation_file, {
-                    "transaction_schema": "claudian-remote.local-transaction/v1",
-                    "operation_id": operation_id,
-                    "plan_id": plan["plan_id"],
-                    "phase": "rolled_back",
-                    "completed_phases": completed,
-                    "prior_availability_vault": prior_availability_vault,
-                    "prior_release_id": prior_target.name if prior_target else None,
-                    "activation_started": activation_started,
-                    "plugin_activated": plugin_activated,
-                })
+                persist("rolled_back", completed)
                 return {"state": "rolled_back", "code": code, "mutation_performed": True}
             except Exception:
-                write_private_json(operation_file, {
-                    "transaction_schema": "claudian-remote.local-transaction/v1",
-                    "operation_id": operation_id,
-                    "plan_id": plan["plan_id"],
-                    "phase": "recovery_required",
-                    "completed_phases": completed,
-                    "prior_availability_vault": prior_availability_vault,
-                    "prior_release_id": prior_target.name if prior_target else None,
-                    "activation_started": activation_started,
-                    "plugin_activated": plugin_activated,
-                })
+                persist("recovery_required", completed)
                 return {
                     "state": "recovery_required",
                     "code": "installation_compensation_failed",
@@ -1548,6 +1693,7 @@ class LocalTailscaleTransaction:
             try:
                 activation_started = True
                 persist("activation_started", completed)
+                self._save_community_rollback_state(plan, operation_id, prior_target)
                 self._set_previous(prior_target)
                 if not target.exists():
                     partial.replace(target)
@@ -1561,26 +1707,28 @@ class LocalTailscaleTransaction:
                 if provisioning.get("secure_provisioning_available") is not True:
                     raise RuntimeError("secure_provisioning_failed")
                 completed.append("secure_provisioning")
-                plugin_backup = self._activate_plugin(
-                    target / "plugin",
-                    plugin_destination,
-                    operation_id,
-                    vault_id=vault_id,
-                    connection_mode="local_tailscale",
-                )
-                plugin_activated = True
-                persist("plugin_activated", completed)
-                migration.activate_new(
-                    operation_id=operation_id,
-                    destination=plugin_destination,
-                )
+                if not community:
+                    plugin_backup = self._activate_plugin(
+                        target / "plugin",
+                        plugin_destination,
+                        operation_id,
+                        vault_id=vault_id,
+                        connection_mode="local_tailscale",
+                    )
+                    plugin_activated = True
+                persist("secure_provisioned" if community else "plugin_activated", completed)
+                if not community:
+                    migration.activate_new(
+                        operation_id=operation_id,
+                        destination=plugin_destination,
+                    )
                 self._activate(target)
                 self.dependencies.launchd.install_local_agents(
                     staged.python_executable,
                     vault_name=Path(self.dependencies.vault_path(vault_id)).name,
                 )
                 self.dependencies.tailscale.activate_serve(8787)
-                completed.extend(["plugin_activation", "launchd", "tailscale_serve"])
+                completed.extend(["launchd", "tailscale_serve"] if community else ["plugin_activation", "launchd", "tailscale_serve"])
                 phase("after_activation", completed)
             except LifecycleInterrupted:
                 raise
@@ -1603,17 +1751,7 @@ class LocalTailscaleTransaction:
             vault_id=vault_id,
         )
         if not self._wait_bridge_ready():
-            write_private_json(operation_file, {
-                "transaction_schema": "claudian-remote.local-transaction/v1",
-                "operation_id": operation_id,
-                "plan_id": plan["plan_id"],
-                "phase": "await_plugin_bootstrap",
-                "completed_phases": completed,
-                "prior_availability_vault": prior_availability_vault,
-                "prior_release_id": prior_target.name if prior_target else None,
-                "activation_started": activation_started,
-                "plugin_activated": plugin_activated,
-            })
+            persist("await_plugin_bootstrap", completed)
             availability_state = str(
                 self.dependencies.launchd.status().get("availability") or "launch_pending"
             )
@@ -1695,17 +1833,7 @@ class LocalTailscaleTransaction:
                     "recovery_action": "resume",
                     "re_pair_required": False,
                 }
-            write_private_json(operation_file, {
-                "transaction_schema": "claudian-remote.local-transaction/v1",
-                "operation_id": operation_id,
-                "plan_id": plan["plan_id"],
-                "phase": "await_pairing",
-                "completed_phases": completed,
-                "prior_availability_vault": prior_availability_vault,
-                "prior_release_id": prior_target.name if prior_target else None,
-                "activation_started": activation_started,
-                "plugin_activated": plugin_activated,
-            })
+            persist("await_pairing", completed)
             return {
                 "state": "blocked",
                 "code": str(pairing_result.get("code") or "pairing_approval_required"),
@@ -1733,15 +1861,5 @@ class LocalTailscaleTransaction:
                     "resume_reference": operation_id,
                 },
             }
-        write_private_json(operation_file, {
-            "transaction_schema": "claudian-remote.local-transaction/v1",
-            "operation_id": operation_id,
-            "plan_id": plan["plan_id"],
-            "phase": "ready",
-            "completed_phases": completed + ["paired"],
-            "prior_availability_vault": prior_availability_vault,
-            "prior_release_id": prior_target.name if prior_target else None,
-            "activation_started": activation_started,
-            "plugin_activated": plugin_activated,
-        })
+        persist("ready", completed + ["paired"])
         return {"state": "ready", "code": "installation_ready", "mutation_performed": True}

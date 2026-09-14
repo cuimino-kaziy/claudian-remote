@@ -9,6 +9,7 @@ import test from "node:test";
 import {
   canonicalJson,
   publicKeyFingerprint,
+  releaseTagForVersion,
   resolveRuntimeAssets,
   sha256Bytes,
   sha256File,
@@ -49,7 +50,7 @@ function runtimeFixture() {
   };
 }
 
-function fixture() {
+function fixture(distributionChannel = "community") {
   const directory = mkdtempSync(join(tmpdir(), "claudian-release-contract-"));
   const assetDir = join(directory, "assets");
   mkdirSync(assetDir);
@@ -79,11 +80,11 @@ function fixture() {
   });
   const manifest = {
     schema_version: 1,
-    release_tag: `v${pluginManifest.version}`,
+    release_tag: distributionChannel === "community" ? pluginManifest.version : `v${pluginManifest.version}`,
     release_version: pluginManifest.version,
-    source_ref: `refs/tags/v${pluginManifest.version}`,
-    distribution_channel: "private_beta",
-    plugin_update_owner: "lifecycle_manager",
+    source_ref: `refs/tags/${distributionChannel === "community" ? pluginManifest.version : `v${pluginManifest.version}`}`,
+    distribution_channel: distributionChannel,
+    plugin_update_owner: distributionChannel === "community" ? "obsidian" : "lifecycle_manager",
     compatibility_set: {
       id: supportMatrix.components.compatibility_set_id,
       plugin: { id: "claudian-remote", version: pluginManifest.version, minimum_obsidian_version: pluginManifest.minAppVersion },
@@ -117,14 +118,15 @@ test("an exact signed compatibility set is accepted", () => {
   assert.equal(validateReleaseContract(manifest, context), true);
 });
 
-test("beta 6 signed upgrade capabilities bind every supported journey boundary", () => {
-  assert.equal(pluginManifest.version, "0.2.0-beta.6.7");
-  assert.equal(supportMatrix.components.compatibility_set_id, "claudian-remote-0.2.0-beta.6.7");
+test("community signed upgrade capabilities preserve every supported beta journey", () => {
+  assert.equal(pluginManifest.version, "0.2.0");
+  assert.equal(supportMatrix.components.compatibility_set_id, "claudian-remote-0.2.0");
   assert.equal(versions["0.2.0-beta.5"], "1.12.3");
   assert.equal(versions["0.2.0-beta.6.7"], "1.12.3");
+  assert.equal(versions["0.2.0"], "1.12.3");
   assert.deepEqual(
     supportMatrix.upgrade_contract.supported_legacy_lineages.filter((row) => row.journey === "current_update").map((row) => row.version),
-    ["0.2.0-beta.4", "0.2.0-beta.5", "0.2.0-beta.6", "0.2.0-beta.6.1", "0.2.0-beta.6.2", "0.2.0-beta.6.3", "0.2.0-beta.6.4", "0.2.0-beta.6.5", "0.2.0-beta.6.6"]
+    ["0.2.0-beta.4", "0.2.0-beta.5", "0.2.0-beta.6", "0.2.0-beta.6.1", "0.2.0-beta.6.2", "0.2.0-beta.6.3", "0.2.0-beta.6.4", "0.2.0-beta.6.5", "0.2.0-beta.6.6", "0.2.0-beta.6.7"]
   );
   assert.deepEqual(supportMatrix.upgrade_contract.journey_capabilities, [
     "fresh_install", "current_update", "legacy_upgrade"
@@ -199,9 +201,49 @@ test("tag, plugin, versions, and lock drift are rejected", () => {
   }
 });
 
+test("community tags are plain versions while private beta tags retain their prefix", () => {
+  assert.equal(releaseTagForVersion("0.2.0", "community"), "0.2.0");
+  assert.equal(releaseTagForVersion("0.2.0-beta.6.7", "private_beta"), "v0.2.0-beta.6.7");
+  assert.throws(() => releaseTagForVersion("0.2.0-beta.6.7", "community"), /version|channel/);
+  assert.throws(() => releaseTagForVersion("0.2.0", "unknown"), /version|channel/);
+  for (const channel of ["community", "private_beta"]) {
+    const valid = fixture(channel);
+    assert.equal(validateReleaseContract(valid.manifest, valid.context), true);
+    const wrongTag = fixture(channel);
+    wrongTag.manifest.release_tag = channel === "community" ? `v${pluginManifest.version}` : pluginManifest.version;
+    wrongTag.manifest.source_ref = `refs/tags/${wrongTag.manifest.release_tag}`;
+    wrongTag.context.expectedTag = wrongTag.manifest.release_tag;
+    assert.throws(() => validateReleaseContract(wrongTag.manifest, wrongTag.context), /release tag/);
+    const wrongRef = fixture(channel);
+    wrongRef.manifest.source_ref = "refs/heads/main";
+    assert.throws(() => validateReleaseContract(wrongRef.manifest, wrongRef.context), /source_ref/);
+  }
+});
+
+test("manifest preparation selects the channel owner and rejects mismatched tags", () => {
+  for (const channel of ["community", "private_beta"]) {
+    const subject = fixture(channel);
+    const prepare = (tag) => execFileSync(process.execPath, [
+      "release/packaging/prepare-manifest.mjs", tag, subject.context.assetDir
+    ], {
+      cwd: root,
+      env: { ...process.env, CLAUDIAN_RELEASE_CHANNEL: channel },
+      stdio: "pipe"
+    });
+    const wrongTag = channel === "community" ? `v${pluginManifest.version}` : pluginManifest.version;
+    assert.throws(() => prepare(wrongTag), /release tag/);
+    prepare(subject.manifest.release_tag);
+    const prepared = JSON.parse(readFileSync(join(subject.context.assetDir, "release-manifest.unsigned.json"), "utf8"));
+    assert.equal(prepared.release_tag, subject.manifest.release_tag);
+    assert.equal(prepared.source_ref, subject.manifest.source_ref);
+    assert.equal(prepared.distribution_channel, channel);
+    assert.equal(prepared.plugin_update_owner, subject.manifest.plugin_update_owner);
+  }
+});
+
 test("manifest or asset tampering and unknown or revoked keys are rejected", () => {
   const manifestTamper = fixture();
-  manifestTamper.manifest.plugin_update_owner = "obsidian";
+  manifestTamper.manifest.plugin_update_owner = "lifecycle_manager";
   assert.throws(() => validateReleaseContract(manifestTamper.manifest, manifestTamper.context));
 
   const assetTamper = fixture();
@@ -268,16 +310,16 @@ test("runtime asset preparation is reproducible without external release variabl
   }
 });
 
-test("old plugin id is migration-only and beta update ownership is fixed", () => {
+test("old plugin id is migration-only and each channel has one update owner", () => {
   assert.deepEqual(supportMatrix.plugin.migration_source_ids, ["whale-agent-bridge"]);
   assert.equal(supportMatrix.plugin.legacy_id_may_coexist, false);
 
-  const invalidBeta = fixture();
+  const invalidBeta = fixture("private_beta");
   invalidBeta.manifest.plugin_update_owner = "obsidian";
   assert.throws(() => validateReleaseContract(invalidBeta.manifest, invalidBeta.context), /update owner/);
 
   const invalidCommunity = fixture();
-  invalidCommunity.manifest.distribution_channel = "community";
+  invalidCommunity.manifest.plugin_update_owner = "lifecycle_manager";
   assert.throws(() => validateReleaseContract(invalidCommunity.manifest, invalidCommunity.context), /update owner/);
 });
 
@@ -310,7 +352,7 @@ test("source boundary excludes release virtual environments from publishable sou
 
 test("release schema and support matrix pin the public contract", () => {
   const schema = JSON.parse(readFileSync(join(root, "release/release-manifest.schema.json"), "utf8"));
-  assert.equal(schema.$defs.compatibilitySet.properties.id.const, "claudian-remote-0.2.0-beta.6.7");
+  assert.equal(schema.$defs.compatibilitySet.properties.id.const, "claudian-remote-0.2.0");
   assert.equal(schema.$defs.compatibilitySet.properties.claudian.properties.exact_version.const, "2.2.6");
   assert.deepEqual(schema.$defs.compatibilitySet.properties.claudian.properties.supported_versions.const, ["2.0.4", "2.2.6", "2.2.7"]);
   assert.equal(pluginManifest.id, "claudian-remote");
@@ -500,7 +542,7 @@ exec python3 -m installer --release-dir "\${release_root}"
     "release/packaging/prepare-manifest.mjs",
     `v${pluginManifest.version}`,
     directory
-  ], { cwd: root, stdio: "pipe" });
+  ], { cwd: root, env: { ...process.env, CLAUDIAN_RELEASE_CHANNEL: "private_beta" }, stdio: "pipe" });
   const { publicKey, privateKey } = generateKeyPairSync("ed25519");
   const publicKeyPem = publicKey.export({ type: "spki", format: "pem" });
   const fingerprint = publicKeyFingerprint(publicKeyPem);

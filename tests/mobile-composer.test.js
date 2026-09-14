@@ -7,6 +7,7 @@ class FakeElement extends EventTarget {
     super();
     Object.assign(this, { tagName: tag.toUpperCase(), children: [], attributes: {}, style: {}, value: "", hidden: false, disabled: false, scrollHeight: 40 });
   }
+  setCssProps(props) { Object.assign(this.style, props); }
   append(...children) { this.children.push(...children); }
   replaceChildren(...children) { this.children = children; }
   setAttribute(key, value) { this.attributes[key] = String(value); }
@@ -172,11 +173,9 @@ test("draft growth is capped and clearing or disposing leaves no active transmis
   composer.input.scrollHeight = 220;
   type(composer, "长草稿");
   assert.equal(composer.input.style.height, "128px");
-  assert.equal(composer.input.style.overflowY, "auto");
   composer.input.scrollHeight = 40;
   composer.clear();
   assert.equal(composer.input.style.height, "40px");
-  assert.equal(composer.input.style.overflowY, "auto");
   assert.equal(composer.send.disabled, true);
   composer.setDraft("关闭之后");
   composer.dispose();

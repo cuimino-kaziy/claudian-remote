@@ -5,7 +5,16 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import test from "node:test";
 
-import { consumeBridgeBootstrap, defaultBridgeBootstrapPath } from "../src/desktop/bridge-bootstrap.js";
+import { build } from "esbuild";
+import vm from "node:vm";
+
+const platform = { isDesktopApp: true };
+const loader = createRequire(import.meta.url);
+const { outputFiles } = await build({ entryPoints: ["src/desktop/bridge-bootstrap.js"], bundle: true, write: false, format: "cjs", platform: "node", external: ["obsidian"], logLevel: "silent" });
+const compiled = { exports: {} };
+vm.runInNewContext(outputFiles[0].text, { module: compiled, exports: compiled.exports, URL, Uint8Array, process,
+  require: (name) => name === "obsidian" ? { Platform: platform } : loader(name) });
+const { consumeBridgeBootstrap, defaultBridgeBootstrapPath } = compiled.exports;
 
 function fixture(overrides = {}) {
   return {
@@ -62,4 +71,10 @@ test("default bootstrap path is Vault-scoped so another open Vault cannot consum
     if (priorRequire === undefined) delete globalThis.require;
     else globalThis.require = priorRequire;
   }
+});
+
+test("mobile never loads desktop runtime modules", () => {
+  platform.isDesktopApp = false;
+  try { assert.throws(() => defaultBridgeBootstrapPath("vault-a"), /desktop_runtime_unavailable/); }
+  finally { platform.isDesktopApp = true; }
 });

@@ -168,9 +168,11 @@ export class MobileViewportController {
     // Obsidian Mobile already resizes/pans its WKWebView for the keyboard.
     // Moving the composer by the same occlusion a second time fights native
     // focus handling and can leave the textarea off-screen or unfocusable.
-    this.root.style.setProperty("--cr-keyboard-occlusion", "0px");
-    this.root.style.setProperty("--cr-visible-top", `${Math.round(metrics.visibleTop - hostRect.top)}px`);
-    this.root.style.setProperty("--cr-visible-height", `${Math.round(metrics.visibleHeight)}px`);
+    this.root.setCssProps({
+      "--cr-keyboard-occlusion": "0px",
+      "--cr-visible-top": `${Math.round(metrics.visibleTop - hostRect.top)}px`,
+      "--cr-visible-height": `${Math.round(metrics.visibleHeight)}px`
+    });
     this.captureGeometry();
   }
 

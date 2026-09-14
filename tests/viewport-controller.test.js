@@ -44,6 +44,8 @@ class FakeElement extends FakeEventTarget {
     };
   }
 
+  setCssProps(props) { for (const [name, value] of Object.entries(props)) this.style.setProperty(name, value); }
+
   getBoundingClientRect() {
     return { ...this.rect };
   }

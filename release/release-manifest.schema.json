@@ -7,9 +7,9 @@
   "required": ["schema_version", "release_tag", "release_version", "source_ref", "distribution_channel", "plugin_update_owner", "compatibility_set", "assets", "signature"],
   "properties": {
     "schema_version": {"const": 1},
-    "release_tag": {"type": "string", "pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
+    "release_tag": {"type": "string", "pattern": "^v?[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
     "release_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
-    "source_ref": {"type": "string", "pattern": "^refs/tags/v"},
+    "source_ref": {"type": "string", "pattern": "^refs/tags/v?[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
     "distribution_channel": {"enum": ["private_beta", "community"]},
     "plugin_update_owner": {"enum": ["lifecycle_manager", "obsidian"]},
     "compatibility_set": {"$ref": "#/$defs/compatibilitySet"},
@@ -21,6 +21,22 @@
     },
     "signature": {"$ref": "#/$defs/signature"}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"distribution_channel": {"const": "community"}}},
+      "then": {"properties": {
+        "release_version": {"pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "release_tag": {"pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "source_ref": {"pattern": "^refs/tags/[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "plugin_update_owner": {"const": "obsidian"}
+      }},
+      "else": {"properties": {
+        "release_tag": {"pattern": "^v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
+        "source_ref": {"pattern": "^refs/tags/v[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
+        "plugin_update_owner": {"const": "lifecycle_manager"}
+      }}
+    }
+  ],
   "$defs": {
     "semver": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:-[0-9A-Za-z.-]+)?$"},
     "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
@@ -35,7 +51,7 @@
       "additionalProperties": false,
       "required": ["id", "plugin", "companion", "relay", "installer", "protocol", "configuration_schema", "claudian", "runtime", "upgrade_contract"],
       "properties": {
-        "id": {"const": "claudian-remote-0.2.0-beta.6.7"},
+        "id": {"const": "claudian-remote-0.2.0"},
         "plugin": {
           "type": "object",
           "additionalProperties": false,
@@ -123,8 +139,8 @@
         "proof_schema_versions": {"const": ["claudian-remote.legacy-retirement-proof/v1"]},
         "supported_legacy_lineages": {
           "type": "array",
-          "minItems": 10,
-          "maxItems": 10,
+          "minItems": 11,
+          "maxItems": 11,
           "items": {"$ref": "#/$defs/legacyLineage"}
         },
         "supported_profiles": {"const": ["local_tailscale"]},
@@ -162,7 +178,7 @@
       "required": ["plugin_id", "version", "journey"],
       "properties": {
         "plugin_id": {"enum": ["claudian-remote", "whale-agent-bridge"]},
-        "version": {"enum": ["0.2.0-beta.4", "0.2.0-beta.5", "0.2.0-beta.6", "0.2.0-beta.6.1", "0.2.0-beta.6.2", "0.2.0-beta.6.3", "0.2.0-beta.6.4", "0.2.0-beta.6.5", "0.2.0-beta.6.6", "recognized-dogfood-lineage"]},
+        "version": {"enum": ["0.2.0-beta.4", "0.2.0-beta.5", "0.2.0-beta.6", "0.2.0-beta.6.1", "0.2.0-beta.6.2", "0.2.0-beta.6.3", "0.2.0-beta.6.4", "0.2.0-beta.6.5", "0.2.0-beta.6.6", "0.2.0-beta.6.7", "recognized-dogfood-lineage"]},
         "journey": {"enum": ["current_update", "legacy_upgrade"]}
       }
     },
@@ -183,9 +199,9 @@
       "required": ["pairing_identity_policy", "plugin", "companion", "installer"],
       "properties": {
         "pairing_identity_policy": {"enum": ["preserve", "rotate"]},
-        "plugin": {"const": "0.2.0-beta.6.7"},
-        "companion": {"const": "0.2.0-beta.6.7"},
-        "installer": {"const": "0.2.0-beta.6.7"}
+        "plugin": {"const": "0.2.0"},
+        "companion": {"const": "0.2.0"},
+        "installer": {"const": "0.2.0"}
       }
     },
     "adapterRow": {
@@ -203,7 +219,7 @@
       "required": ["component", "name", "source_path", "delivery", "sha256"],
       "properties": {
         "component": {"const": "legacy_retirement_helper"},
-        "name": {"const": "claudian-remote-legacy-retirement-helper-0.2.0-beta.6.7.py"},
+        "name": {"const": "claudian-remote-legacy-retirement-helper-0.2.0.py"},
         "source_path": {"const": "gateway/relay/legacy_retirement.py"},
         "delivery": {"const": "signed_kit_asset"},
         "sha256": {"$ref": "#/$defs/sha256"}

@@ -38,7 +38,7 @@ def write_release(
     *,
     name=None,
     component="plugin",
-    version="0.2.0-beta.6.7",
+    version="0.2.0",
 ):
     release = tmp_path / "release"
     assets = release / "assets"
@@ -91,10 +91,10 @@ def write_release(
     manifest = {
         "schema_version": 1,
         "release_version": version,
-        "release_tag": f"v{version}",
-        "source_ref": f"refs/tags/v{version}",
-        "distribution_channel": "private_beta",
-        "plugin_update_owner": "lifecycle_manager",
+        "release_tag": version,
+        "source_ref": f"refs/tags/{version}",
+        "distribution_channel": "community",
+        "plugin_update_owner": "obsidian",
         "compatibility_set": {
             "id": f"claudian-remote-{version}",
             "plugin": {
@@ -218,12 +218,12 @@ def test_manifest_signature_is_verified_by_lifecycle_not_a_forgeable_receipt(tmp
         source(release, trust, signature_valid=False).verify(plan)
 
 
-def test_installer_accepts_only_the_exact_beta5_signed_upgrade_contract(tmp_path):
+def test_installer_accepts_only_the_exact_community_signed_upgrade_contract(tmp_path):
     release, trust, plan = write_release(tmp_path)
 
     verified = source(release, trust).verify(plan)
 
-    assert verified == {"verified": True, "release_version": "0.2.0-beta.6.7"}
+    assert verified == {"verified": True, "release_version": "0.2.0", "plugin_update_owner": "obsidian"}
 
 
 def test_installer_rejects_private_key_material_anywhere_in_manifest(tmp_path):
@@ -315,7 +315,7 @@ def test_installer_rejects_missing_mixed_or_substituted_beta5_assets(tmp_path):
     helper_path = (
         helper_release
         / "assets"
-        / "claudian-remote-legacy-retirement-helper-0.2.0-beta.6.7.py"
+        / "claudian-remote-legacy-retirement-helper-0.2.0.py"
     )
     helper_path.write_text("substituted helper", encoding="utf-8")
     with pytest.raises(ReleaseValidationError, match="release_asset_digest_mismatch"):

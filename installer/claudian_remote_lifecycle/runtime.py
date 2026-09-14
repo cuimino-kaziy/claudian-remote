@@ -34,7 +34,7 @@ class ReleaseValidationError(ValueError):
 
 REQUIRED_RUNTIME_VERSIONS = {"python": "3.12.11", "uv": "0.10.12"}
 REQUIRED_RUNTIME_TARGETS = {("darwin", "arm64"), ("darwin", "x86_64")}
-REQUIRED_RELEASE_VERSION = "0.2.0-beta.6.7"
+REQUIRED_RELEASE_VERSION = "0.2.0"
 RELEASE_COMPONENTS = (
     "plugin",
     "companion",
@@ -43,6 +43,19 @@ RELEASE_COMPONENTS = (
     "legacy_retirement_helper",
 )
 SHA256_PATTERN = re.compile(r"[a-f0-9]{64}")
+
+
+def community_managed_plugin(plan: Mapping[str, Any]) -> bool:
+    return plan.get("compatibility_set_id") == f"claudian-remote-{REQUIRED_RELEASE_VERSION}"
+
+
+def installed_community_plugin(destination: Path) -> bool:
+    """A deletion veto only; never used to authorize code or claim ownership."""
+    try:
+        value = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+        return isinstance(value, Mapping) and value.get("id") == "claudian-remote" and value.get("version") == REQUIRED_RELEASE_VERSION
+    except (OSError, ValueError):
+        return False
 
 
 def _canonical_json(value: Any) -> str:
@@ -295,6 +308,8 @@ class StagedRelease:
 class ReleaseSource(Protocol):
     def verify(self, plan: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
+    def verify_installed_plugin(self, destination: Path, *, vault_id: str) -> None: ...
+
     def stage(
         self,
         plan: Mapping[str, Any],
@@ -476,6 +491,11 @@ def _validate_upgrade_contract(
                 "journey": "current_update",
             },
             {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.6.7",
+                "journey": "current_update",
+            },
+            {
                 "plugin_id": "whale-agent-bridge",
                 "version": "recognized-dogfood-lineage",
                 "journey": "legacy_upgrade",
@@ -562,10 +582,10 @@ def _validate_release_metadata(
         manifest.get("schema_version") != 1
         or version != REQUIRED_RELEASE_VERSION
         or matrix.get("release_version") != version
-        or manifest.get("release_tag") != f"v{version}"
-        or manifest.get("source_ref") != f"refs/tags/v{version}"
-        or manifest.get("distribution_channel") != "private_beta"
-        or manifest.get("plugin_update_owner") != "lifecycle_manager"
+        or manifest.get("release_tag") != version
+        or manifest.get("source_ref") != f"refs/tags/{version}"
+        or manifest.get("distribution_channel") != "community"
+        or manifest.get("plugin_update_owner") != "obsidian"
     ):
         raise ReleaseValidationError("release_contract_mismatch")
     compatibility = manifest.get("compatibility_set")
@@ -787,7 +807,65 @@ class BootstrapVerifiedReleaseSource:
             ):
                 raise ReleaseValidationError("release_asset_digest_mismatch")
         self._manifest = manifest
-        return {"verified": True, "release_version": actual_version}
+        return {"verified": True, "release_version": actual_version,
+            "plugin_update_owner": manifest["plugin_update_owner"]}
+
+    def verify_installed_plugin(self, destination: Path, *, vault_id: str) -> None:
+        """Compare Obsidian's files with the signed asset without extracting it."""
+        manifest = self._manifest or {}
+        if manifest.get("plugin_update_owner") != "obsidian":
+            raise ReleaseValidationError("release_contract_mismatch")
+        files = ("manifest.json", "main.js", "styles.css")
+        if destination.is_symlink() or not destination.is_dir() or any(
+            (destination / name).is_symlink() or not (destination / name).is_file()
+            for name in files
+        ):
+            raise ReleaseValidationError("community_plugin_install_required")
+        try:
+            installed = json.loads((destination / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise ReleaseValidationError("community_plugin_update_required") from exc
+        if not isinstance(installed, Mapping) or installed.get("id") != "claudian-remote" or installed.get("version") != manifest.get("release_version"):
+            raise ReleaseValidationError("community_plugin_update_required")
+        asset = next((item for item in manifest.get("assets", []) if item.get("component") == "plugin"), None)
+        if asset is None:
+            raise ReleaseValidationError("plugin_asset_missing")
+        archive = self.directory / "assets" / str(asset["name"])
+        if archive.is_symlink() or sha256_file(archive) != asset.get("sha256"):
+            raise ReleaseValidationError("release_asset_digest_mismatch")
+        with tarfile.open(archive, "r:*") as bundle:
+            expected = {}
+            for member in bundle.getmembers():
+                name = _archive_path(member.name).as_posix()
+                if name not in files:
+                    continue
+                if name in expected or not member.isfile():
+                    raise ReleaseValidationError("release_archive_unsafe_member")
+                stream = bundle.extractfile(member)
+                if stream is None:
+                    raise ReleaseValidationError("plugin_asset_missing")
+                with stream:
+                    digest = hashlib.sha256()
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                expected[name] = digest.hexdigest()
+            if set(expected) != set(files):
+                raise ReleaseValidationError("plugin_asset_missing")
+        if any(sha256_file(destination / name) != expected[name] for name in files):
+            raise ReleaseValidationError("community_plugin_assets_mismatch")
+        try:
+            data_path = destination / "data.json"
+            enabled_path = destination.parent.parent / "community-plugins.json"
+            if data_path.is_symlink() or enabled_path.is_symlink():
+                raise ValueError("unsafe plugin state")
+            preferences = json.loads(data_path.read_text(encoding="utf-8"))
+            enabled = json.loads(enabled_path.read_text(encoding="utf-8"))
+            if not isinstance(enabled, list) or "claudian-remote" not in enabled or not isinstance(preferences, Mapping) or not preferences.get("vault_id"):
+                raise ValueError("plugin not enabled")
+        except (OSError, ValueError) as exc:
+            raise ReleaseValidationError("community_plugin_enable_required") from exc
+        if preferences.get("vault_id") != vault_id:
+            raise ReleaseValidationError("plugin_vault_binding_mismatch")
 
     def _runtime_descriptor(self) -> Mapping[str, Any]:
         manifest = self._manifest or {}

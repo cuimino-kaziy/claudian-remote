@@ -1,13 +1,14 @@
 import { readFileSync, statSync, writeFileSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { resolveRuntimeAssets, sha256File } from "./release-contract.mjs";
+import { releaseTagForVersion, resolveRuntimeAssets, sha256File } from "./release-contract.mjs";
 
 const root = resolve(import.meta.dirname, "../..");
 const tag = process.argv[2];
 const dist = resolve(process.argv[3] ?? join(root, "dist"));
 const plugin = JSON.parse(readFileSync(join(root, "manifest.json"), "utf8"));
 const matrix = JSON.parse(readFileSync(join(root, "release/support-matrix.json"), "utf8"));
-if (tag !== `v${plugin.version}`) throw new Error("release tag must equal the plugin version");
+const channel = process.env.CLAUDIAN_RELEASE_CHANNEL ?? "community";
+if (tag !== releaseTagForVersion(plugin.version, channel)) throw new Error("release tag must match the plugin version and distribution channel");
 
 const lock = (path) => ({ path, sha256: sha256File(join(root, path)) });
 const descriptions = [
@@ -34,8 +35,8 @@ const manifest = {
   release_tag: tag,
   release_version: plugin.version,
   source_ref: `refs/tags/${tag}`,
-  distribution_channel: "private_beta",
-  plugin_update_owner: "lifecycle_manager",
+  distribution_channel: channel,
+  plugin_update_owner: channel === "community" ? "obsidian" : "lifecycle_manager",
   compatibility_set: {
     id: matrix.components.compatibility_set_id,
     plugin: { id: plugin.id, version: plugin.version, minimum_obsidian_version: plugin.minAppVersion },

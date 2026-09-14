@@ -66,7 +66,7 @@ def test_guide_explains_product_defaults_to_tailscale_and_minimizes_questions():
     text = GUIDE.read_text(encoding="utf-8")
     assert "Claudian 的移动端远程客户端" in text
     assert "类似在手机上使用 Codex" in text
-    assert "默认使用免费的 Tailscale" in text
+    assert "默认使用 Tailscale 建立私有连接" in text
     assert "是否拥有并希望使用一台受支持的 VPS" not in text
     assert "由 Agent 继续操作" in text
     assert "我自己操作" in text

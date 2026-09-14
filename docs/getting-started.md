@@ -2,7 +2,7 @@
 
 Claudian Remote 让你在 iPhone 或 iPad 上，继续使用 Mac 里的 Claudian：发送消息、阅读回复、添加附件和查看历史。模型调用、笔记读写和工具操作仍由 Mac 上的 Claudian 完成。产品介绍见 [README](../README.md)。
 
-**Remote 公开测试版免费下载。** 从 [官方 GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/v0.2.0-beta.6.7) 下载本次完整安装包，并按 [下载与校验说明](install-verification-0.2.0-beta.6.7.md) 核验。尚未上架 Obsidian 插件市场。模型、VPS 及可选同步服务等外部费用另计。
+当前为 **0.2.0**，已建立 Obsidian 社区插件目录草稿，尚未上架。插件与后台服务分别安装，发行文件和校验说明见 [GitHub Release](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0) 与 [下载说明](install-verification-0.2.0.md)。
 
 ## 先认识四个名称
 
@@ -27,31 +27,26 @@ Claudian Remote 让你在 iPhone 或 iPad 上，继续使用 Mac 里的 Claudian
 | 你的情况 | 选择与下一步 |
 |---|---|
 | 没有自己的服务器，希望先用起来 | **Tailscale 私有连接。** 在 Mac 和手机安装 Tailscale，登录同一个账号并打开连接，再进行下一节的 Mac 安装。 |
-| 已有维护好的 VPS 和域名 | **VPS 连接。** 先让部署者完成匹配版本的 Relay 和 Mac 后台配置，再取得完整 HTTPS 地址；具体见 [VPS 环境与部署说明](self-host-vps.md)。 |
+| 已有维护好的服务器和域名 | **服务器连接。** 先让部署者完成匹配版本的 Relay 和 Mac 后台配置，再取得完整 HTTPS 地址；具体见 [服务器环境与部署说明](self-host-vps.md)。 |
 
 Tailscale 从 [官方网站](https://tailscale.com/download) 安装，首次使用可参考 [官方入门说明](https://tailscale.com/docs/how-to/quickstart)。两台设备连接的是同一个 Tailscale 网络，不要求连接同一个 Wi-Fi。登录和系统 VPN 权限在官方 App 或系统界面中完成。
 
-VPS 目前没有面向普通用户的自动部署入口，需要能管理服务器的人准备 Linux 环境、域名、HTTPS 证书及配套服务。仅购买服务器、填写网址或展开“VPS 设置帮助”都不会完成部署。服务器管理员能够访问经它转发的内容。
+服务器目前没有面向普通用户的自动部署入口，需要能管理服务器的人准备 Linux 环境、域名、HTTPS 证书及配套服务。仅购买服务器、填写网址或展开“服务器设置帮助”都不会完成部署。服务器管理员能够访问经它转发的内容。
 
-**此时应看到：** Tailscale 路线的两台设备均已连接；或 VPS 部署者已确认服务器及 Mac 配套服务就绪。两种方式都仍需要 Mac 在线。
+**此时应看到：** Tailscale 路线的两台设备均已连接；或服务器部署者已确认服务器及 Mac 配套服务就绪。两种方式都仍需要 Mac 在线。
 
-## 3. 在 Mac 安装完整包
+## 3. 先启用插件，再安装 Mac 服务
 
-本次使用的完整包精确名称为：
+在 Mac 的目标仓库安装并启用 **Claudian Remote 0.2.0**，打开一次设置。审核通过后可从 Obsidian 社区插件目录搜索安装；审核期间使用发行页上的 `main.js`、`manifest.json`、`styles.css`，放入仓库 `.obsidian/plugins/claudian-remote/`，保留原 `data.json`，不要删除插件目录重装。等待仓库身份同步到手机。
 
-```text
-claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz
-```
+后台服务使用 **`claudian-remote-kit-0.2.0.tar.gz`**。三个插件文件或插件 ZIP 不包含后台服务。按 [下载与校验说明](install-verification-0.2.0.md) 确认官方仓库和精确版本，先用系统工具核对完整包，通过后才解压，继续验证组件签名。
 
-使用这份修复后的完整包；不要换成同版本旧 Kit、GitHub 的 “Source code”、插件 ZIP 或三个独立插件文件。插件文件本身不包含 Mac 后台服务。包内手册若使用通用名称 `claudian-remote-beta-kit-<version>.tar.gz`，本次对应的是上面这份 recovery-kit。
-
-**先核验，再解压和运行。** 按 [下载与校验说明](install-verification-0.2.0-beta.6.7.md) 确认官方仓库、版本和文件名。让安装助手用系统工具核对完整包，通过后才解压，并继续验证签名。无需私聊领取材料。
-
-已签名包与手册中的 `private_beta`／“内测”是既有安装器通道名称，不表示需要邀请。旧手册中私发或独立渠道校验说明的要求，以本次 [公测补充说明](install-verification-0.2.0-beta.6.7.md) 为准；其余安装与核验步骤不变，不修改通道值、原签名、固定指纹或更新器。
+安装器核验现有插件的版本、摘要、启用状态和仓库身份，安装配套服务。社区插件文件由 Obsidian 管理，安装器不会代为覆盖或启用；若检查失败，先按提示在 Obsidian 完成插件安装。
 
 首次安装目前需要能够在这台 Mac 上操作的安装助手或维护者。可以把已下载的包和上面的公开校验说明交给本地助手，复制下面这段请求：
 
-> 请帮我安装 Claudian Remote。我已下载 claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz。请先阅读官方仓库 cuimino-kaziy/claudian-remote 中的 docs/install-verification-0.2.0-beta.6.7.md，确认官方来源和精确版本，用系统 shasum 核对完整包，通过后才解压。旧手册关于私发校验说明的要求以该公测补充说明为准，其余按包内 CLAUDIAN_REMOTE_INSTALL.md 操作。先只读检查当前 Obsidian、Claudian、目标仓库和连接环境，再按检查结果安装；默认使用 Tailscale。若已有安装，请升级并保留配对。登录和系统授权由我在官方界面完成。安装等待手机配对时，请指导我操作；配对后恢复原安装操作，再完成核验。
+> 请帮我安装 Claudian Remote 0.2.0。我已在 Mac 的目标仓库启用同版插件，并下载 claudian-remote-kit-0.2.0.tar.gz。请按官方 cuimino-kaziy/claudian-remote 仓库的 docs/install-verification-0.2.0.md 确认来源并核对完整包，通过后解压，按包内 CLAUDIAN_REMOTE_INSTALL.md 操作。先只读检查环境；默认使用 Tailscale。已有后台服务时请升级并保留配对，不覆盖 Obsidian 管理的插件。登录和系统授权由我完成。等待手机配对时指导我操作，配对后恢复原操作并核验。
+
 
 安装助手按 [安装与连接手册](../CLAUDIAN_REMOTE_INSTALL.md) 检查环境、确定仓库、安装并核验后台服务。多个仓库时，需要你指定使用哪一个。Tailscale 路线可能提示启用 MagicDNS 和 HTTPS；由你在官方界面完成对应确认。无需自行填写 Python 路径、IP 或端口，也不要把账号密码、验证码或 API Key 发给助手。
 
@@ -61,7 +56,7 @@ claudian-remote-recovery-kit-0.2.0-beta.6.7.tar.gz
 
 1. 在手机 Obsidian 打开同一个 iCloud 仓库，等待插件文件和仓库共享设置同步完成。安装助手应确认同步包含 `.obsidian/plugins/claudian-remote/`，不需要你手工编辑这个目录。
 2. 首次进入 **Obsidian 设置 → 第三方插件 → Claudian Remote**，确认插件已启用，再打开它的设置。
-3. 点击顶部 **帮助**，查看“安装包与插件”一行，应显示 **当前版本 0.2.0-beta.6.7**。这是手机实际加载的版本；Mac 已更新不能代替这一步。
+3. 点击顶部 **帮助**，查看“安装包与插件”一行，应显示 **当前版本 0.2.0**。这是手机实际加载的版本；Mac 已更新不能代替这一步。
 4. 回到 **连接**。首次使用显示“尚未配对”是正常状态，接下来绑定这台手机。
 
 如果手机还找不到插件或仍显示旧版本，先核对仓库，等待 iCloud 同步完成后再重新打开 Obsidian、重新加载插件。同步时间没有固定保证。不要为了刷新版本删除仓库、清空 Obsidian 数据或重建同名仓库。
@@ -82,7 +77,7 @@ iCloud 负责同步笔记、插件文件和必要的共享设置；**手机的�
 
 | 手机要填的内容 | 从哪里取得 |
 |---|---|
-| 服务器地址 | Mac 连接页的完整 `https://` 地址；VPS 使用部署者提供且已与 Mac 配置一致的地址。 |
+| 服务器地址 | Mac 连接页的完整 `https://` 地址；服务器使用部署者提供且已与 Mac 配置一致的地址。 |
 | 8 位配对码 | Mac 刚生成的一次性短码，5 分钟内有效，只能用一次。 |
 
 不要填写模型接口、SSH 地址、服务器密码或长期 Token。示例网址不能当作真实地址使用。配对码或链接过期后，在 Mac 重新生成；不要公开分享它们。
@@ -93,7 +88,7 @@ iCloud 负责同步笔记、插件文件和必要的共享设置；**手机的�
 
 ## 6. 发出第一条消息
 
-1. 在“连接”页点击 **打开远程页面**。以后也可以使用 Obsidian 的 **打开 Claudian Remote** 命令进入。
+1. 在“连接”页点击 **打开远程页面**。以后也可以使用 Obsidian 的 **Claudian Remote: 打开远程页面** 命令进入。
 2. 等顶部状态显示 **已就绪**。只有“已配对”还不能说明 Mac 在线。
 3. 在底部输入：`请只回复：连接正常。`，点击 **发送**。
 4. 等待完整回复，并确认 Mac 上也能看到这次会话。
@@ -111,15 +106,15 @@ iCloud 负责同步笔记、插件文件和必要的共享设置；**手机的�
 
 普通断网或重新打开 App 后，先打开原来的仓库和远程页面，等待连接恢复。若没有恢复，点击顶部连接状态，在 **连接详情** 中选择 **重新连接**；也可以从这里进入 **连接设置**。
 
-Tailscale 路线先检查两端是否连接同一个 Tailscale 网络；再检查 Mac 是否唤醒、Obsidian 与 Claudian 是否打开。手动退出过 Mac Obsidian 时，需要重新打开它。VPS 路线由部署者检查服务器状态。
+Tailscale 路线先检查两端是否连接同一个 Tailscale 网络；再检查 Mac 是否唤醒、Obsidian 与 Claudian 是否打开。手动退出过 Mac Obsidian 时，需要重新打开它。服务器路线由部署者检查服务器状态。
 
 Mac 离线时可以查看已有缓存和编辑草稿，恢复连接前不能发送。正常断网、重启或短码到期，不需要重新配对。
 
 ## 升级时保留现有配对
 
-之后从官方 GitHub Releases 取得新版完整包，按该版本的公开下载与校验说明核验，再按包内手册的**升级**流程处理。告诉助手这是现有安装，需要保留原仓库、连接身份和设备配对；不要卸载重装或只替换手机的三个文件。
+先在 Obsidian 更新两端插件，再从官方 GitHub Releases 取得同版本 Kit，核验后按包内手册更新 Mac 后台服务。告诉助手保留原仓库、连接身份和设备配对，不要卸载重装。插件先更新而服务尚未更新时会暂时只读。
 
-Mac 核验通过后，再等待 iCloud 把插件同步到手机。在手机“帮助 → 安装包与插件”确认目标版本已加载，然后测试连接和一条消息往返。Mac 与手机插件、后台服务应使用匹配版本。
+若使用 iCloud 同步插件文件，等待同步完成；在手机“帮助 → 安装包与插件”确认目标版本已加载，再测试连接和消息往返。后台回退不会替换社区插件，回退后应按对应发行说明恢复匹配版本。
 
 同一套连接的正常升级会保留配对；换手机、清除本机数据、撤销设备或更换服务器身份后，需要重新配对。不要通过复制另一台设备的凭据来恢复。
 

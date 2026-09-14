@@ -18,7 +18,7 @@ credential, or fall back automatically after a failure.
   closes when the interface or recorded network fingerprint changes. It must
   remain unavailable for release until U9 real-device and traffic-inspection
   evidence confirms that no credential or content is sent in plaintext.
-- VPS mode uses a user-owned host. Only HTTPS and WSS conversation routes are
+- Server mode (`remote_vps`) uses a user-owned host. Only HTTPS and WSS conversation routes are
   public; management, database, and health access stay private.
 
 Persistent credentials bind their role, installation, Vault, device,
@@ -56,7 +56,7 @@ contain the raw credential.
 Relay is a recovery buffer, not conversation history. The compatibility set's
 support matrix is the only limit source:
 
-| Policy | Beta value |
+| Policy | Current value |
 |---|---:|
 | Terminal recovery events | 1 hour |
 | Stale in-flight turns | 6 hours from last event/heartbeat |
@@ -76,9 +76,9 @@ backups.
 
 ## Privacy and trust disclosure
 
-For the public beta, first-time users confirm the official GitHub publisher
+For this release, first-time users confirm the official GitHub publisher
 `cuimino-kaziy/claudian-remote`, then check the exact whole-Kit SHA-256 with a
-system tool before extraction. The versioned [download verification guide](install-verification-0.2.0-beta.6.7.md)
+system tool before extraction. The versioned [download verification guide](install-verification-0.2.0.md)
 replaces the old private handoff requirement. This is a GitHub-account trust
 model, not an independent channel and not protection against that account being
 compromised. The pinned Ed25519 key, manifest signature, exact-version checks,
@@ -89,6 +89,6 @@ The plugin sends no telemetry, diagnostic data, message or attachment content,
 paths, network identities, or credentials to the maintainer. Diagnostic export
 is a separate explicit action and uses an allowlist.
 
-A user-owned VPS terminates TLS and can read conversation and attachment
-content handled by Relay. This beta does not claim end-to-end encryption for
-that deployment. Users must trust and administer the VPS they select.
+A user-owned server terminates TLS and can read conversation and attachment
+content handled by Relay. This release does not claim end-to-end encryption for
+that deployment. Users must trust and administer the server they select.

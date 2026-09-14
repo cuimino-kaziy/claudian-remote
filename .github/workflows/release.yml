@@ -2,7 +2,7 @@ name: Release
 
 on:
   push:
-    tags: ["v*"]
+    tags: ["v*", "[0-9]*.[0-9]*.[0-9]*"]
 
 permissions:
   contents: read
@@ -24,7 +24,18 @@ jobs:
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           test "${GITHUB_REF}" = "refs/tags/${RELEASE_TAG}"
-          test "${RELEASE_TAG}" = "v$(node -p "require('./package.json').version")"
+          release_channel=community
+          case "${RELEASE_TAG}" in v*) release_channel=private_beta ;; esac
+          export CLAUDIAN_RELEASE_CHANNEL="${release_channel}"
+          node --input-type=module <<'JS'
+          import { readFileSync } from 'node:fs';
+          import { releaseTagForVersion } from './release/packaging/release-contract.mjs';
+          const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          if (process.env.RELEASE_TAG !== releaseTagForVersion(version, process.env.CLAUDIAN_RELEASE_CHANNEL)) {
+            throw new Error('Release tag does not match the version and channel');
+          }
+          JS
+          printf '%s\n' "CLAUDIAN_RELEASE_CHANNEL=${release_channel}" >> "${GITHUB_ENV}"
       - name: Install and verify locked dependencies
         run: |
           npm ci --ignore-scripts
@@ -56,8 +67,17 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set --
+          if [ "${CLAUDIAN_RELEASE_CHANNEL}" = private_beta ]; then
+            set -- --prerelease
+          elif [ "${CLAUDIAN_RELEASE_CHANNEL}" = community ]; then
+            set -- "dist/CLAUDIAN_REMOTE_INSTALL_VERIFICATION-${GITHUB_REF_NAME}.md"
+            test -f "$1"
+          else
+            exit 64
+          fi
           gh release create "${GITHUB_REF_NAME}" \
             dist/*.tar.gz dist/*.zip dist/claudian-remote-legacy-retirement-helper-*.py \
             dist/main.js dist/manifest.json dist/styles.css dist/release-manifest.json \
-            --verify-tag --prerelease --title "Claudian Remote ${GITHUB_REF_NAME}" \
-            --notes "Public beta release. First installation requires the signed beta kit and Mac services. Follow the repository download verification guide before extraction. Plugin ZIP and standalone files are convenience copies; verify against the signed plugin archive."
+            --verify-tag "$@" --title "Claudian Remote ${GITHUB_REF_NAME}" \
+            --notes "Claudian Remote ${GITHUB_REF_NAME}. Plugin assets: main.js, manifest.json, styles.css. Mac services require the matching signed installation kit. Follow the repository installation and download verification guides."

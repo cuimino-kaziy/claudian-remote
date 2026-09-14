@@ -294,6 +294,7 @@
   background: var(--background-secondary);
 }
 .claudian-remote-composer-input {
+  overflow-y: auto;
   flex: 1 1 auto;
   min-width: 0;
   min-height: 44px;
@@ -612,7 +613,7 @@
   border-radius: 10px;
 }
 .claudian-remote-settings .claudian-remote-settings-panel > .claudian-remote-settings-group:first-child { margin-top: 0; }
-.claudian-remote-settings .claudian-remote-settings-group h3 {
+.claudian-remote-settings .claudian-remote-settings-group > .setting-item-heading {
   margin: 0;
   padding: 0 0 14px;
   border-bottom: 1px solid var(--background-modifier-border);
@@ -627,7 +628,7 @@
   padding: 16px 0;
   border: 0;
 }
-.claudian-remote-settings .setting-item + .setting-item { border-top: 1px solid var(--background-modifier-border); }
+.claudian-remote-settings .setting-item:not(.setting-item-heading) + .setting-item { border-top: 1px solid var(--background-modifier-border); }
 .claudian-remote-settings .setting-item-info { min-width: 0; }
 .claudian-remote-settings .setting-item-description { overflow-wrap: anywhere; }
 .claudian-remote-settings .setting-item-control {

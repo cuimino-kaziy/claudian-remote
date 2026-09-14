@@ -6,7 +6,16 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { deterministicVaultPath, importFileIntoVault, safeDisplayName, safeVaultDirectory } from "../src/desktop/vault-import.js";
+import { build } from "esbuild";
+import vm from "node:vm";
+
+const platform = { isDesktopApp: true };
+const loader = createRequire(import.meta.url);
+const { outputFiles } = await build({ entryPoints: ["src/desktop/vault-import.js"], bundle: true, write: false, format: "cjs", platform: "node", external: ["obsidian"], logLevel: "silent" });
+const compiled = { exports: {} };
+vm.runInNewContext(outputFiles[0].text, { module: compiled, exports: compiled.exports, URL, Uint8Array, process,
+  require: (name) => name === "obsidian" ? { Platform: platform } : loader(name) });
+const { deterministicVaultPath, importFileIntoVault, safeDisplayName, safeVaultDirectory } = compiled.exports;
 
 test("display names and Vault directories cannot traverse", () => {
   assert.equal(safeDisplayName("../../Report.md"), "Report.md");
@@ -18,7 +27,7 @@ test("display names and Vault directories cannot traverse", () => {
 test("upload identity always produces one deterministic conflict-safe Vault path", async () => {
   const adapter = { async exists() { return false; } };
   const selected = await deterministicVaultPath(adapter, "Uploads", "Report.md", "upload-12345678");
-  assert.deepEqual(selected, { path: "Uploads/Report-upload-1.md", existed: false });
+  assert.deepEqual({ ...selected }, { path: "Uploads/Report-upload-1.md", existed: false });
 });
 
 test("desktop import verifies hash and repeated delivery does not duplicate Vault file", async (t) => {

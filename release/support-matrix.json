@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release_version": "0.2.0-beta.6.7",
+  "release_version": "0.2.0",
   "beta_scope": {
     "invited_users_min": 5,
     "invited_users_max": 10,
@@ -28,11 +28,11 @@
     }
   },
   "components": {
-    "compatibility_set_id": "claudian-remote-0.2.0-beta.6.7",
-    "plugin": "0.2.0-beta.6.7",
-    "companion": "0.2.0-beta.6.7",
-    "relay": "0.2.0-beta.6.7",
-    "installer": "0.2.0-beta.6.7",
+    "compatibility_set_id": "claudian-remote-0.2.0",
+    "plugin": "0.2.0",
+    "companion": "0.2.0",
+    "relay": "0.2.0",
+    "installer": "0.2.0",
     "configuration_schema": 1
   },
   "protocol": {
@@ -147,6 +147,11 @@
         "journey": "current_update"
       },
       {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.6.7",
+        "journey": "current_update"
+      },
+      {
         "plugin_id": "whale-agent-bridge",
         "version": "recognized-dogfood-lineage",
         "journey": "legacy_upgrade"
@@ -164,15 +169,15 @@
     "current_update_pairing_rows": [
       {
         "pairing_identity_policy": "preserve",
-        "plugin": "0.2.0-beta.6.7",
-        "companion": "0.2.0-beta.6.7",
-        "installer": "0.2.0-beta.6.7"
+        "plugin": "0.2.0",
+        "companion": "0.2.0",
+        "installer": "0.2.0"
       },
       {
         "pairing_identity_policy": "rotate",
-        "plugin": "0.2.0-beta.6.7",
-        "companion": "0.2.0-beta.6.7",
-        "installer": "0.2.0-beta.6.7"
+        "plugin": "0.2.0",
+        "companion": "0.2.0",
+        "installer": "0.2.0"
       }
     ],
     "adapter_rows": [
@@ -188,7 +193,7 @@
     "helper_rows": [
       {
         "component": "legacy_retirement_helper",
-        "name": "claudian-remote-legacy-retirement-helper-0.2.0-beta.6.7.py",
+        "name": "claudian-remote-legacy-retirement-helper-0.2.0.py",
         "source_path": "gateway/relay/legacy_retirement.py",
         "delivery": "signed_kit_asset",
         "sha256": "ec6a3abbdc7c98812e5ee885b7e58d7b8f3fbcf81614cea321eaf8d5123d0b66"

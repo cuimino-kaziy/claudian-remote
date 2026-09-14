@@ -9,21 +9,25 @@
 | Mac | Obsidian 1.12.3 或更新版本、Claudian 2.0.4 / 2.2.6 / 2.2.7、能正常对话的仓库；Claudian 2.2.7 要求 Obsidian 1.13.0 或更新版本 | 安装包检查并绑定这一个仓库，启动后台服务 |
 | iPhone / iPad | Obsidian、同一个已同步仓库、已启用 Claudian Remote | 可以打开远程页面和连接设置 |
 | Tailscale 路线 | 两台设备安装 Tailscale、同一账号、已连接 | Mac 提供以 `https://` 开头的私有连接地址 |
-| 已部署 VPS 路线 | 已部署的服务器和 HTTPS 域名、已配置好的 Mac 后台服务 | 部署者提供以 `https://` 开头的服务器地址 |
+| 已部署服务器路线 | 已部署的服务器和 HTTPS 域名、已配置好的 Mac 后台服务 | 部署者提供以 `https://` 开头的服务器地址 |
 
-**下载：** 打开维护者提供的 [GitHub Release](https://github.com/cuimino-kaziy/claudian-remote/releases)，选择约定版本，下载 `claudian-remote-beta-kit-<version>.tar.gz`，不要下载 “Source code”。在 Mac 先按维护者独立交付的可信校验说明验证 Kit，成功后再解压到新目录；首次安装使用完整 Kit，更新沿用现有安装流程。当前仍为内测分发，Obsidian 市场上架是后续发布步骤。
+**先安装插件：** 在 Mac 与手机的同一同步仓库中安装并启用 Claudian Remote **0.2.0**，先打开一次设置，使仓库共享身份生成并同步。审核通过后，从 Obsidian 的“设置 → 第三方插件 → 浏览”搜索安装；审核期间从 [0.2.0 发行页](https://github.com/cuimino-kaziy/claudian-remote/releases/tag/0.2.0) 取得同版 `main.js`、`manifest.json`、`styles.css`，放入仓库的 `.obsidian/plugins/claudian-remote/`，保留原有 `data.json`。
 
-发布附件还提供 `claudian-remote-plugin-<version>.zip` 和独立的 `main.js`、`manifest.json`、`styles.css`。ZIP 解压后为 `claudian-remote/` 文件夹，只包含插件和许可证，不含 Mac 服务。它们是签名插件归档的便捷副本，当前内测仍使用完整 Kit 安装和更新。此候选版已完成产物生成配置，是否已上传以实际 GitHub Release 为准。
+**再安装后台服务：** 从同一发行页下载 `claudian-remote-kit-0.2.0.tar.gz`，按 [公开下载与校验说明](https://github.com/cuimino-kaziy/claudian-remote/blob/0.2.0/docs/install-verification-0.2.0.md) 用系统工具核验完整 Kit，成功后解压到新目录。无需私聊领取材料，不要下载 “Source code”。Kit 仍需验证签名与固定指纹；Kit 内自带校验器不能单独证明整个下载来源可信。
+
+**安装分工：** 社区发行使用 `community` 通道，插件资产由 Obsidian 管理。Kit 只读核验三份插件资产、启用状态及非秘密仓库身份；缺失或版本／摘要不匹配时，先在 Obsidian 安装、更新或启用正确版本，再检查。Kit 不会覆盖插件目录或自动启用插件，只管理配套服务和一次性交接文件。后台回退或卸载也不会回退或删除社区插件；若回退后组件版本不同，保持只读，按对应发行说明配套处理。
+
+从 beta.6.7 升级时，先更新两端插件至 0.2.0，再用本版 Kit 的更新流程升级后台，保留原配对。中间暂时只读属于版本门禁；不要清除设备数据或重配。已安装插件但尚无后台服务时，安装器按首次安装后台处理。
 
 **没有服务器：选择 Tailscale。** 两台设备从官方渠道安装 Tailscale，登录同一个账号并打开连接。随后在 Mac 完成下面的安装流程；过程中按提示启用 MagicDNS / HTTPS。最后复制 Mac“连接设置”显示的地址，例如 `https://你的Mac名称.你的网络.ts.net`。不需要填写 Tailscale 的 IP，也不需要开启公开分享。
 
-**已有 VPS：** 先看 [VPS 环境、部署与字段说明](docs/self-host-vps.md)。当前 Kit 尚未开放 VPS 自动部署；已测试的服务器连接可以继续使用，选择 VPS 引导不会替你迁移配置。服务器和 Mac 必须已指向同一套连接，不能仅在手机填一个网址就完成服务器安装。
+**已有服务器：** 先看 [服务器环境、部署与字段说明](https://github.com/cuimino-kaziy/claudian-remote/blob/0.2.0/docs/self-host-vps.md)。当前 Kit 尚未开放服务器自动部署；已测试的服务器连接可以继续使用，选择服务器引导不会替你迁移配置。服务器和 Mac 必须已指向同一套连接，不能仅在手机填一个网址就完成服务器安装。
 
 **手机应该填什么：**
 
 | 手机字段 | 填写内容 | 从哪里获得 |
 |---|---|---|
-| 连接服务器地址（Relay） | 完整 HTTPS 地址，保留 `https://` | 复制 Mac 的连接设置；VPS 使用部署者给出的域名地址 |
+| 连接服务器地址（Relay） | 完整 HTTPS 地址，保留 `https://` | 复制 Mac 的连接设置；服务器使用部署者给出的域名地址 |
 | 8 位配对码 | Mac 新生成的一次性短码 | Mac → Claudian Remote 连接设置 → 添加移动设备 |
 | 其他密码 / Token / API Key | 不需要填写 | 配对码验证通过后自动保存到手机本机 |
 
@@ -53,10 +57,10 @@ Relay 就是帮助手机和 Mac 传递消息的服务。地址不是 SSH 登录�
 
 随后直接告知当前版本的运行条件和默认方案：
 
-> 当前内测仅支持 macOS + iPhone。Mac 必须开机、已登录并处于唤醒状态；屏幕可以熄灭。
+> 上一版已在现有 Mac / iPhone 环境验收；本版社区安装仍需对应的新装和真机验证。Mac 必须开机、已登录并处于唤醒状态；屏幕可以熄灭。
 > 安装完成后 Claudian Remote 会在登录时启动后台服务，并尝试打开已绑定的 Obsidian Vault。
-> 默认使用免费的 Tailscale 建立私有连接；如果你明确要求使用自己的 VPS，我会解释高级方案，
-> 但本内测尚未开放 `remote_vps` 自动部署。
+> 默认使用 Tailscale 建立私有连接；如果你明确要求使用自己的服务器，我会解释高级方案，
+> 但本版尚未开放 `remote_vps` 自动部署。
 
 Claudian Remote 的差异不是“换一个更强的模型”，而是把 Mac 上现有的 Claudian 工作环境延伸到
 手机：同一 Vault、同一套本地工具和同一套权限边界。它目前不能在 Mac 真正睡眠、关机或未登录时
@@ -67,12 +71,12 @@ Claudian Remote 的差异不是“换一个更强的模型”，而是把 Mac �
 主动退出 Obsidian，需要自行重新打开。需要长期息屏使用时，由用户在 macOS 系统设置中自行决定
 电源策略，安装 Agent 不得代为更改。
 
-> 本文是安装 Agent 的唯一对话入口。先将内测 Kit 解压到一个新目录并进入该目录；
+> 本文是安装 Agent 的唯一对话入口。先将本版 Kit 解压到一个新目录并进入该目录；
 > 只执行其中的 `./bin/claudian-remote-lifecycle`，不要从仓库分支、聊天文本或
-> 服务器返回值执行命令。Kit 必须先经过维护者独立分发的可信 bootstrap 验证；
+> 服务器返回值执行命令。Kit 必须先按官方 GitHub 精确版本的公开校验说明验证整体 SHA-256；
 > Kit 内自带的公钥和校验器不能独立证明 Kit 本身可信。
 
-## 默认连接：免费 Tailscale
+## 默认连接：Tailscale 私有网络
 
 选择 `local_tailscale` 前，Mac 与 iPhone 都要安装 Tailscale，并登录同一个 Tailnet：
 
@@ -125,8 +129,8 @@ Agent 必须先读取 `state`、`code` 和 `data.snapshot`，再决定下一步�
    rollback、uninstall 等安全操作，禁止安装、更新或 Remote 写操作。
    2.2.6 / 2.2.7 的“立即插话”取决于当前提供方能力；Claude 不支持插话，但仍可普通发送和排队。
 3. 若检查到多个 Vault，只问“要为哪个 Vault 安装？”；不得猜测。
-4. 不询问用户是否有 Mac、iPhone、VPS 或 NAS。直接默认 `local_tailscale`；只有用户主动提出
-   自有 VPS 时才解释 `remote_vps`，并明确当前内测尚未开放该自动部署路径。
+4. 不询问用户是否有 Mac、iPhone、服务器或 NAS。直接默认 `local_tailscale`；只有用户主动提出
+   自有服务器时才解释 `remote_vps`，并明确当前版本尚未开放该自动部署路径。
 5. `local_lan` 与 `remote_vps` 当前都不是可发布写入路径，不得执行、绕过或自动回退。
 6. 人工说“完成了”不代表门禁通过。必须运行 resume 并由 lifecycle 的外部 probe 验证。
 7. 未知或未识别的 command、state、code 或 schema 一律失败关闭：停止操作并运行 diagnose，
@@ -140,18 +144,18 @@ Agent 必须先读取 `state`、`code` 和 `data.snapshot`，再决定下一步�
 
 ## 2. 生成不可变计划
 
-当前内测只生成 Tailscale 计划；命令会重新进行只读检查并产生确定性的 `plan_id`：
+当前版本只生成 Tailscale 计划；命令会重新进行只读检查并产生确定性的 `plan_id`：
 
 ```bash
 ./bin/claudian-remote-lifecycle plan --mode local_tailscale --vault-id <non-secret-vault-id>
 ```
 
 `remote_vps` 与 `local_lan` 名称保留在生命周期协议中供兼容性诊断，但本版写操作会失败关闭；
-Agent 不得因为用户有 VPS 就声称该路径已经可用。
+Agent 不得因为用户有服务器就声称该路径已经可用。
 
 相同 inspection snapshot 与选择必须生成相同 plan。执行写操作前必须重新检查环境并
 验证 `environment_fingerprint`；Vault、Claudian、endpoint、profile 或 generation 漂移时
-停止，重新 inspect/plan。不要手工编辑 plan。
+停止写操作。已有未完成操作时先查询原 status 和 diagnose，按返回动作恢复；只有原操作安全结束或确认没有进行中操作，才重新 inspect/plan。不要手工编辑 plan。
 
 ## 3. 生命周期命令
 
@@ -174,15 +178,15 @@ Agent 不得因为用户有 VPS 就声称该路径已经可用。
 ./bin/claudian-remote-lifecycle purge --plan-id <plan-id>
 ```
 
-正式内测的 `claudian-remote-beta-kit-<version>.tar.gz` 解压后包含本手册、入口、已签名
+本版的 `claudian-remote-kit-0.2.0.tar.gz` 解压后包含本手册、入口、已签名
 `release-manifest.json` 和精确 `assets/`；执行其中 `bin/claudian-remote-lifecycle` 时会自动把
 该目录交给 lifecycle。开发者直接调用 Python 模块时，必须把同样结构的目录作为全局
 `--release-dir <verified-release-directory>` 参数传入；缺失验签交接凭据时
 安装必须返回 `verified_release_unavailable`，不得从工作树、分支或网络“最新版”回退。
 
 不要使用 shell 拼接远端输入，不要使用 `curl | shell`，不要把秘密放进参数、环境变量、
-URL、聊天或诊断。GitHub 访问在维护者向测试者交付 Kit 之前完成，lifecycle 不会代为登录
-或执行发行权限 probe。Tailscale、App Store、VPS 与系统权限的敏感输入必须留在对应的
+URL、聊天或诊断。GitHub 下载与来源核验在运行 Kit 之前完成，lifecycle 不会代为登录
+或执行发行权限 probe。Tailscale、App Store、服务器与系统权限的敏感输入必须留在对应的
 系统界面或 lifecycle 所有的临时安全通道中。
 
 ## 4. 外部门禁：Agent 操作或用户操作
@@ -257,22 +261,27 @@ Agent 会话丢失后先运行：
 | code | 含义 | Agent 动作 |
 |---|---|---|
 | `inspection_ready` | 支持的只读快照已产生 | 单 Vault 直接生成 Tailscale plan；多 Vault 只询问目标 Vault |
-| `unsupported_desktop_os` | 非本内测支持的 macOS | 停止；仅 diagnose |
+| `unsupported_desktop_os` | 非本版支持的 macOS | 停止；仅 diagnose |
 | `unsupported_claudian_version` | Claudian 不是 2.0.4、2.2.6 或 2.2.7 | 提示安装受支持版本后重新 inspect |
 | `claudian_not_enabled` | Claudian 未启用 | 让用户在 Obsidian 启用后重新 inspect |
 | `vault_not_found` | 未发现 Vault | 让用户在 Obsidian 打开目标 Vault 后重新 inspect |
 | `vault_selection_required` | 多 Vault 有歧义 | 一次只问用户选择哪个 Vault，再 plan |
+| `community_plugin_install_required` | 未找到完整社区插件 | 在 Obsidian 安装同版插件后再检查，Kit 不写插件目录 |
+| `community_plugin_update_required` / `community_plugin_assets_mismatch` | 社区插件版本或摘要不匹配 | 更新同版三份资产，保留 data.json，不关闭校验 |
+| `community_plugin_enable_required` | 插件未启用或尚未生成共享仓库身份 | 启用插件并打开一次设置，再恢复原操作 |
+| `plugin_vault_binding_mismatch` | 插件共享仓库身份与所选绑定不一致 | 停止并核对仓库，不手工改共享身份 |
+| `managed_runtime_inconsistent` | 后台记录与文件不能验证为同一安装 | 查看原 status／diagnose，保留现场，不按首次安装覆盖 |
 | `plan_prepared` | 确定性 plan 已生成 | 保存 plan_id；进入对应写操作 |
 | `operation_status` | checkpoint 已读取 | 按 phase/gate 执行 resume 或恢复动作 |
 | `human_action_required` | 外部动作未通过 probe | 解释 exact_action；完成后 resume |
 | `resume_prepared` | 门禁 probe 已验证 | 用同一 operation_id 继续 |
 | `operation_not_found` | operation_id 无 checkpoint | 停止；diagnose，不猜测或重装 |
 | `lifecycle_operation_busy` | 另一写操作持锁 | 等待其 status 到安全状态后重试 |
-| `environment_drift` | 环境与 plan 不一致 | 停止写操作；重新 inspect 和 plan |
+| `environment_drift` | 环境与 plan 不一致 | 停止写操作，查询原 status／diagnose，按返回动作恢复原操作；未完成时不另建 plan |
 | `secure_provisioning_missing` | 缺少可验证的安全配置桥 | 保持阻塞；不得把秘密写入 localStorage 或聊天 |
 | `tailscale_install_required` | Mac 未发现可调用的 Tailscale App | 引导用户从官方渠道安装图形版 App；不要要求单独安装 CLI integration |
 | `tailscale_update_required` | 已安装的 Tailscale 低于受支持版本 | 在官方 App 中更新后，用同一 operation_id resume |
-| `trusted_lan_not_release_eligible` | 本内测尚无真机抓包与网络切换证据，LAN 模式不可发布 | 不得启用或回退明文 LAN；改选 Tailscale 或 VPS |
+| `trusted_lan_not_release_eligible` | 本版尚无真机抓包与网络切换证据，LAN 模式不可发布 | 不得启用或回退明文 LAN；改选 Tailscale 或服务器 |
 | `obsidian_close_for_migration_required` | 旧插件仍在且 Obsidian 正运行 | 完全退出 Obsidian，再用同一 operation_id resume |
 | `legacy_credential_revocation_unavailable` | 该旧 lineage 没有受支持的可验证退休适配器，尚未 staging | 停止；保留旧插件与旧凭据，不改动旧安装；联系维护者确认 lineage |
 | `legacy_credential_revocation_required` | 退休尝试未返回可验证结果，staging 已清理且旧凭据保留 | 停止；不假定已撤销；用同一 operation 的 status 读取 typed 结果并只执行返回的 recovery action |
@@ -281,7 +290,7 @@ Agent 会话丢失后先运行：
 | `legacy_authority_authorization_required` | 需要人工授权属于本安装的旧凭据退休 | 解释重配对影响，用同一 operation resume 并完成授权 |
 | `retirement_outcome_unknown` | 退休请求已派发但 authority 结果未知 | 保持锁定；只执行同一 operation 的只读对账或 manual recovery |
 | `post_retirement_finish_forward_required` | 退休已确认，需向前完成激活与重新配对 | 用同一 operation_id finish_forward；禁止回滚或另开安装 |
-| `verified_release_unavailable` | 缺少已验签发行目录或 bootstrap 回执 | 停止；重新获取同一私有发行资产 |
+| `verified_release_unavailable` | 缺少已验签发行目录或 bootstrap 回执 | 停止；重新获取同一官方发行资产 |
 | `manifest_signature_unverified` | bootstrap 验签回执无效 | 停止；不得安装或改用源码 |
 | `installation_ready` | 本地 Relay、Companion、插件与 Tailscale Serve 均通过验证 | 执行 verify，再进行真机配对验收 |
 | `verification_ready` | 已安装集合仍满足本地健康检查 | 进入真机验收或正常使用 |
@@ -300,7 +309,7 @@ Agent 会话丢失后先运行：
 | `operation_not_implemented` | 当前构建尚未提供该操作 | 不得宣称成功；安装更新的已验证发行版 |
 | `invalid_lifecycle_input` | 输入或结构未通过验证 | 停止；检查命令表并 diagnose |
 
-当前内测切片已交付 `local_tailscale` 的事务 install/update、验签资产、按兼容集隔离且依赖锁定的
+当前版本切片已交付 `local_tailscale` 的事务 install/update、验签资产、按兼容集隔离且依赖锁定的
 managed runtime、动态 LaunchAgent、Keychain 安全配置、Pairing Admin Companion 代理、
 verify/resume/rollback/revoke-device/diagnose/export-diagnostics/uninstall/purge。
 `remote_vps` 与 `local_lan` 写操作仍必须返回 `operation_not_implemented` 或模式专用阻塞码，
@@ -308,7 +317,7 @@ Agent 不得绕过或声称 ready。
 
 ### 旧凭据退休的 typed 结果与恢复/取消边界
 
-Beta 5 不再循环追问“撤销旧凭据”。退休请求派发后，结果只收敛到三种 typed 状态之一，Agent 按
+旧版本迁移不再循环追问“撤销旧凭据”。退休请求派发后，结果只收敛到三种 typed 状态之一，Agent 按
 `effect_summary.credential_effect` 和 `ambiguity_state` 读取，不按自然语言推测：
 
 - `not_applied`：authority 证明旧凭据未变更且 generation 未推进，可退回派发前的保留路径。
@@ -327,9 +336,9 @@ Beta 5 不再循环追问“撤销旧凭据”。退休请求派发后，结果�
 
 流程只能以 `ready`、`prepared`、`blocked`、`rolled_back` 或 `recovery_required` 之一结束。
 `running` 仅表示非终态的 status 快照，不能当作流程完成。
-安装后必须执行 verify 并从 iPhone 蜂窝网络验证文本流、附件、停止、立即插队、历史与重连；
+安装后必须执行 verify 并从 iPhone 蜂窝网络验证文本流、附件、停止、历史与重连；提供方支持时再验证立即插队；
 Mac 必须保持唤醒并已登录。显示器可以熄灭；后台服务会随登录启动，并尝试打开绑定 Vault。
 该自动打开是登录时一次性动作，不会在用户主动退出 Obsidian 后循环拉起，也不会改变系统睡眠策略。
 
-普通卸载不删除 Vault 与 Claudian 对话。purge 额外删除 Remote 凭据、缓存、数据库、日志和
+社区版后台卸载不删除插件资产；需要移除插件时在 Obsidian 操作。普通卸载不删除 Vault 与 Claudian 对话。purge 额外删除 Remote 凭据、缓存、数据库、日志和
 备份，必须经过 `purge_confirmation_required`。任何自动诊断上传或维护者遥测都不存在。

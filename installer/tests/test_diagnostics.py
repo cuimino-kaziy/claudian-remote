@@ -546,7 +546,8 @@ def test_diagnose_reports_recovery_checkpoint_instead_of_hardcoded_zero(tmp_path
     transaction_path.write_text(
         json.dumps(
             {
-                "transaction_schema": "claudian-remote.local-transaction/v1",
+                    "transaction_schema": "claudian-remote.local-transaction/v1",
+                    "plugin_update_owner": "obsidian",
                 "operation_id": checkpoint["operation_id"],
                 "plan_id": plan["plan_id"],
                 "phase": "recovery_required",

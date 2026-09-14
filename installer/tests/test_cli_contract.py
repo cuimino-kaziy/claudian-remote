@@ -9,6 +9,9 @@ from installer.claudian_remote_lifecycle.cli import (
     LifecycleArgumentError,
     LifecycleServices,
     _run_mutation,
+    _checkpoint_transition,
+    _diagnostic_observation,
+    _owned_partial_profile_generation,
     build_parser,
     main,
 )
@@ -25,6 +28,7 @@ from installer.claudian_remote_lifecycle.model import COMMANDS, RESULT_SCHEMA, P
 from installer.claudian_remote_lifecycle.operation_arbitration import OperationArbitrator
 from installer.claudian_remote_lifecycle.plan import PlanBuilder, PlanStore
 from installer.claudian_remote_lifecycle.transaction import LocalTailscaleTransaction
+from installer.claudian_remote_lifecycle.private_io import write_private_json
 from installer.tests.test_compatibility_decode import _artifact_set
 from installer.tests.test_inspect import FakeProbe
 from installer.tests.test_operation_arbitration import (
@@ -32,6 +36,80 @@ from installer.tests.test_operation_arbitration import (
     _write_transaction,
 )
 from installer.tests.test_runtime_transaction import dependencies
+
+
+@pytest.mark.parametrize("code", ["community_plugin_install_required", "community_plugin_update_required", "community_plugin_assets_mismatch", "community_plugin_enable_required"])
+@pytest.mark.parametrize("boundary", [False, True])
+def test_community_plugin_wait_can_resume_the_same_operation(code, boundary):
+    transition = _checkpoint_transition(
+        {"command": "install", "journey": "fresh_install", "irreversible_boundary_crossed": boundary, "ambiguity_state": "not_applicable"},
+        {"state": "blocked", "code": code, "mutation_performed": False, "human_action": "Install through Obsidian and resume."},
+        LifecycleServices(FakeProbe(), {}),
+    )
+    assert transition["state"] == "blocked"
+    assert transition["recovery_policy"].value == "retry_same_operation"
+    assert [action.command for action in transition["next_actions"]] == (["resume"] if boundary else ["resume", "cancel"])
+    assert transition["cancellation_available"] is (not boundary)
+
+
+def test_diagnostics_keep_market_plugin_and_background_versions_separate():
+    services = LifecycleServices(FakeProbe(), {})
+    snapshot = Inspector(FakeProbe()).snapshot()
+    snapshot["installation"].update({"plugin_versions": ["0.2.0"], "managed_runtime_state": "verified", "managed_runtime_version": "0.2.0-beta.6.7"})
+    components = _diagnostic_observation(snapshot, services)["components"]
+    assert components["plugin"] == "0.2.0"
+    assert components["companion"] == components["relay"] == "0.2.0-beta.6.7"
+
+
+@pytest.mark.parametrize("journey", ["fresh_install", "current_update"])
+@pytest.mark.parametrize("damage", [None, "operation", "owner", "target", "profile", "public_journal"])
+def test_resume_profile_proof_binds_community_activation_to_original_operation(tmp_path, journey, damage):
+    deps, _ = dependencies(tmp_path)
+    layout = deps.layout
+    operation = "op-" + "c" * 32
+    plan = {"plan_id": "plan-" + "d" * 64, "journey": journey,
+        "pairing_identity_policy": "preserve" if journey == "current_update" else "not_applicable",
+        "compatibility_set_id": "claudian-remote-0.2.0", "installation_id": "installation-a",
+        "vault_id": "vault-shared-phone-id", "topology": {"mode": "local_tailscale"}}
+    prior = "claudian-remote-0.2.0-beta.6.7" if journey == "current_update" else None
+    target = layout.release_path(plan["compatibility_set_id"])
+    target.mkdir(parents=True)
+    layout.current.symlink_to(target)
+    profile = {"schema_version": 1, "mode": "local_tailscale", "installation_id": plan["installation_id"],
+        "vault_id": plan["vault_id"], "endpoint": deps.tailscale.preflight()["endpoint"],
+        "endpoint_audience": "claudian-remote:local_tailscale:installation-a",
+        "companion_credential_ref": "installation-a:local_tailscale:companion",
+        "mobile_credential_ref": "installation-a:local_tailscale:mobile", "cursor": 0, "epoch": "new-epoch"}
+    write_private_json(layout.connection_profile, profile)
+    journal_path = layout.state / f"{operation}.transaction.json"
+    journal = {"transaction_schema": "claudian-remote.local-transaction/v1", "operation_id": operation,
+        "plan_id": plan["plan_id"], "phase": "after_activation", "plugin_update_owner": "obsidian",
+        "completed_phases": ["staging", "secure_provisioning", "launchd", "tailscale_serve"],
+        "prior_availability_vault": None, "prior_release_id": prior,
+        "activation_started": True, "plugin_activated": False}
+    write_private_json(journal_path, journal)
+    generation = content_id("profile-generation", {key: profile[key] for key in
+        ("mode", "installation_id", "vault_id", "endpoint", "endpoint_audience", "epoch")})
+    planned = {"installation": {"compatibility_set_id": prior, "profile_generation_id": None}}
+    current = {"installation": {"compatibility_set_id": target.name,
+        "managed_runtime_state": "inconsistent", "profile_generation_id": generation}}
+    if damage == "operation":
+        journal["operation_id"] = "op-" + "f" * 32
+        write_private_json(journal_path, journal)
+    elif damage == "owner":
+        journal.pop("plugin_update_owner")
+        write_private_json(journal_path, journal)
+    elif damage == "target":
+        other = layout.release_path("claudian-remote-other")
+        other.mkdir()
+        layout.current.unlink(); layout.current.symlink_to(other)
+    elif damage == "profile":
+        profile["vault_id"] = "local-registration-id"
+        write_private_json(layout.connection_profile, profile)
+    elif damage == "public_journal":
+        journal_path.chmod(0o644)
+    services = LifecycleServices(FakeProbe(), {}, transaction=LocalTailscaleTransaction(deps), layout=layout)
+    assert _owned_partial_profile_generation(services, operation, plan, planned, current) == (None if damage else generation)
 
 
 def test_every_contract_command_is_parseable_and_unimplemented_mutations_fail_closed(tmp_path):
@@ -364,7 +442,9 @@ def test_ready_v2_operation_cannot_be_rolled_back_after_commit(tmp_path):
     assert transaction.calls == []
 
 
-def test_explicit_rollback_closes_only_owned_fresh_bootstrap_gate(tmp_path):
+def test_explicit_rollback_closes_only_owned_fresh_bootstrap_gate(tmp_path, monkeypatch):
+    import installer.claudian_remote_lifecycle.cli as cli_module
+    monkeypatch.setattr(cli_module, "PlanBuilder", lambda: PlanBuilder(compatibility_set_id="claudian-remote-0.2.0-beta.6.7"))
     deps, _ = dependencies(tmp_path, bridge_ready=False)
     state_dir = deps.layout.base / "lifecycle"
     services = LifecycleServices(
@@ -1138,7 +1218,9 @@ def test_local_relay_health_bypasses_system_web_proxy(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("older_failed_checkpoint", [False, True])
-def test_pairing_resume_preserves_progress_on_drift_and_accepts_own_installation(tmp_path, older_failed_checkpoint):
+def test_pairing_resume_preserves_progress_on_drift_and_accepts_own_installation(tmp_path, monkeypatch, older_failed_checkpoint):
+    import installer.claudian_remote_lifecycle.cli as cli_module
+    monkeypatch.setattr(cli_module, "PlanBuilder", lambda: PlanBuilder(compatibility_set_id="claudian-remote-0.2.0-beta.6.7"))
     deps, _ = dependencies(tmp_path)
     paired = False
     deps.pairing_probe = lambda: paired
@@ -1150,6 +1232,8 @@ def test_pairing_resume_preserves_progress_on_drift_and_accepts_own_installation
             return original_installation()
         return {
             **original_installation(), "installed": True,
+            "managed_runtime_state": "verified",
+            "managed_runtime_version": "0.2.0",
             "compatibility_set_id": PlanStore(state_dir).read(plan_id)[0]["compatibility_set_id"],
             "profile_mode": "local_tailscale", "profile_generation_id": "profile-generation-" + "b" * 64,
             "plugin_lineage": {
@@ -1215,6 +1299,10 @@ def test_status_preserves_only_cancellation_allowed_by_transaction(tmp_path, act
     "endpoint_audience", "companion_credential_ref", "prior_release_id", "claudian_version",
     "journal_operation", "journal_plan", "journal_pre_activation", "profile_symlink", "snapshot_race"])
 def test_resume_after_provisioning_accepts_only_owned_profile_change(tmp_path, monkeypatch, drift):
+    # Preserve this regression's pre-market activation boundary. Community
+    # installs deliberately never call the plugin activation hook.
+    import installer.claudian_remote_lifecycle.cli as cli_module
+    monkeypatch.setattr(cli_module, "PlanBuilder", lambda: PlanBuilder(compatibility_set_id="claudian-remote-0.2.0-beta.6.7"))
     deps, _ = dependencies(tmp_path)
     layout = deps.layout
     state_dir = layout.base / "lifecycle"
@@ -1235,6 +1323,7 @@ def test_resume_after_provisioning_accepts_only_owned_profile_change(tmp_path, m
     def installation():
         profile = json.loads(profile_path.read_text())
         return {**original_installation, "installed": True,
+            "managed_runtime_state": "verified", "managed_runtime_version": "0.2.0-beta.6.5",
             "compatibility_set_id": layout.current.resolve().name, "profile_mode": profile["mode"],
             "profile_generation_id": content_id("profile-generation", {key: profile[key] for key in
                 ("mode", "installation_id", "vault_id", "endpoint", "endpoint_audience", "epoch")}),

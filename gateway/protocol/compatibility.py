@@ -6,10 +6,10 @@ from typing import Any, Dict, Mapping
 
 
 COMPATIBILITY_SET: Dict[str, Any] = {
-    "id": "claudian-remote-0.2.0-beta.6.7",
-    "plugin": "0.2.0-beta.6.7",
-    "companion": "0.2.0-beta.6.7",
-    "relay": "0.2.0-beta.6.7",
+    "id": "claudian-remote-0.2.0",
+    "plugin": "0.2.0",
+    "companion": "0.2.0",
+    "relay": "0.2.0",
     "protocol": "claudian.remote.v2",
     "configuration_schema": 1,
 }

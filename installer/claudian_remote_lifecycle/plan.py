@@ -12,6 +12,7 @@ from typing import Any, Mapping
 
 from .inspect import SUPPORTED_CLAUDIAN_VERSION, SUPPORTED_CLAUDIAN_VERSIONS, content_id, validate_snapshot
 from .model import PLAN_SCHEMA, SNAPSHOT_SCHEMA
+from .runtime import community_managed_plugin
 
 
 SUPPORTED_MODES = frozenset({"local_tailscale"})
@@ -76,14 +77,25 @@ def _authority_context(snapshot: Mapping[str, Any], journey: str) -> dict[str, s
     return {"adapter": adapter, "capability": capability}
 
 
-def _affected_resources(journey: str) -> list[str]:
+def _source_version(snapshot: Mapping[str, Any], journey: str) -> str | None:
+    if journey != "current_update":
+        return None
+    installation = snapshot.get("installation", {})
+    version = installation.get("managed_runtime_version")
+    if installation.get("managed_runtime_state") != "verified" or not isinstance(version, str) or not version:
+        raise PlanError("managed_runtime_identity_unverified")
+    return version
+
+
+def _affected_resources(journey: str, compatibility_set_id: str) -> list[str]:
     resources = [
         "device_local_state",
         "mac_companion",
-        "obsidian_plugin:claudian-remote",
         "pairing_identity",
         "relay_runtime",
     ]
+    if not community_managed_plugin({"compatibility_set_id": compatibility_set_id}):
+        resources.insert(2, "obsidian_plugin:claudian-remote")
     if journey == "legacy_upgrade":
         resources.extend(
             (
@@ -132,7 +144,7 @@ def _recommended_action(blockers: list[str], journey: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class PlanBuilder:
-    compatibility_set_id: str = "claudian-remote-0.2.0-beta.6.7"
+    compatibility_set_id: str = "claudian-remote-0.2.0"
     current_update_pairing_identity_policy: str = "preserve"
 
     def build(
@@ -173,6 +185,9 @@ class PlanBuilder:
             if reason not in {"vault_selection_required", "secure_provisioning_missing"}
         ]
         selected_vault = next(item for item in snapshot.get("vaults", []) if str(item.get("vault_id")) == vault_id)
+        community = community_managed_plugin({"compatibility_set_id": self.compatibility_set_id})
+        if community and selected_vault.get("remote_vault_id_ready") is False:
+            hard_blockers.append("community_plugin_enable_required")
         if "claudian_version" in selected_vault:
             hard_blockers = [reason for reason in hard_blockers if reason != "unsupported_claudian_version"]
             if selected_vault.get("claudian_version") not in SUPPORTED_CLAUDIAN_VERSIONS:
@@ -234,7 +249,7 @@ class PlanBuilder:
             "gates": gates,
             "human_gates": gates,
             "blockers": hard_blockers,
-            "affected_resources": _affected_resources(journey),
+            "affected_resources": _affected_resources(journey, self.compatibility_set_id),
             "irreversible_boundary": _irreversible_boundary(journey),
             "recovery_policy": "rollback_pre_boundary",
             "pairing_identity_policy": pairing_identity_policy,
@@ -245,6 +260,8 @@ class PlanBuilder:
             "rollback_boundary": "previous_locally_coherent_compatibility_set",
             "mutation_performed": False,
         }
+        if community:
+            body["source_version"] = _source_version(snapshot, journey)
         body["plan_id"] = content_id("plan", body)
         return body
 
@@ -295,6 +312,10 @@ def _validate_plan_binding(plan: Mapping[str, Any], snapshot: Mapping[str, Any])
         raise PlanError("plan_authority_mismatch")
 
     compatibility_set_id = str(plan.get("compatibility_set_id") or "")
+    if community_managed_plugin(plan) and (
+        "source_version" not in plan or plan.get("source_version") != _source_version(snapshot, journey)
+    ):
+        raise PlanError("plan_source_version_mismatch")
     expected_target = {
         "compatibility_set_id": compatibility_set_id,
         "final_topology": "local_tailscale",
@@ -316,7 +337,7 @@ def _validate_plan_binding(plan: Mapping[str, Any], snapshot: Mapping[str, Any])
             raise PlanError("current_update_pairing_identity_policy_required")
     elif pairing_policy != "not_applicable":
         raise PlanError("pairing_identity_policy_not_applicable")
-    if plan.get("affected_resources") != _affected_resources(journey):
+    if plan.get("affected_resources") != _affected_resources(journey, compatibility_set_id):
         raise PlanError("affected_resources_mismatch")
     if plan.get("irreversible_boundary") != _irreversible_boundary(journey):
         raise PlanError("irreversible_boundary_mismatch")
@@ -397,9 +418,28 @@ def validate_mutation_environment(
     )
     if planned_vault is None or current_vault is None:
         raise EnvironmentDrift("environment_drift")
+    current_installation = current_snapshot.get("installation", {})
+    owned_target_activation = bool(
+        allow_plan_target and owned_profile_generation_id
+        and current_installation.get("profile_generation_id") == owned_profile_generation_id
+        and current_installation.get("compatibility_set_id") == plan.get("compatibility_set_id")
+        and current_installation.get("profile_mode") == plan.get("topology", {}).get("mode")
+        and plan.get("journey") in {"fresh_install", "current_update"}
+    )
     try:
         planned_journey = _journey_context(planned_snapshot)
-        current_journey = _journey_context(current_snapshot)
+        try:
+            current_journey = _journey_context(current_snapshot)
+        except PlanError:
+            # A crash can leave this operation's target active before its new
+            # ownership receipt is written. The caller must prove the private
+            # journal, target and live connection profile belong to this op.
+            decision = current_snapshot.get("journey", {})
+            if not (owned_target_activation
+                and decision.get("reason_code") == "managed_runtime_inconsistent"
+                and decision.get("prior_operation_terminal") is True):
+                raise
+            current_journey = planned_journey
         planned_authority = _authority_context(
             planned_snapshot, str(planned_journey["journey"])
         )
@@ -432,13 +472,15 @@ def validate_mutation_environment(
     planned_installation = planned_snapshot.get("installation", {})
     current_installation = current_snapshot.get("installation", {})
     drifted_installation_fields: list[str] = []
-    for field in ("compatibility_set_id", "profile_mode", "profile_generation_id"):
+    for field in ("compatibility_set_id", "profile_mode", "profile_generation_id", "managed_runtime_state", "managed_runtime_version"):
         planned_value = planned_installation.get(field)
         if planned_value is not None and planned_value != current_installation.get(field):
             drifted_installation_fields.append(field)
     if not drifted_installation_fields:
         return
     if allow_plan_target:
+        if owned_target_activation:
+            return
         if (
             drifted_installation_fields == ["profile_generation_id"]
             and owned_profile_generation_id

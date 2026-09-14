@@ -7,20 +7,20 @@
 Relay 是在手机和 Mac 之间转发消息的服务。这里填写它的完整 HTTPS 地址，不是模型 API 地址、SSH 登录地址、服务器密码或配对码。
 
 - **Tailscale 连接：** 从 Mac 的 Claudian Remote“连接”设置复制地址，形式类似 `https://你的Mac名称.你的网络.ts.net`。
-- **已有 VPS：** 使用部署者提供的地址，例如 `https://relay.你的域名.com`。
+- **已有服务器：** 使用部署者提供的地址，例如 `https://relay.你的域名.com`。
 - 在手机打开 Mac 生成的配对链接，地址会自动带入；手填时保留 `https://`，不要附带密码或问号后的参数。
 
 地址在浏览器中显示空白或 404 不一定是故障；它不是普通网站。以远程页面的状态和消息往返为准。
 
 ## 我已经安装手机插件，为什么还不能连接？
 
-手机插件只是操作界面。Mac 还需要安装配套后台服务，并打开已绑定的 Obsidian 仓库和 Claudian。Tailscale 需要两台设备都安装、登录同一网络并连接；VPS 需要部署者先完成服务器及 Mac 配置。
+手机插件只是操作界面。Mac 还需要安装配套后台服务，并打开已绑定的 Obsidian 仓库和 Claudian。Tailscale 需要两台设备都安装、登录同一网络并连接；服务器需要部署者先完成服务器及 Mac 配置。
 
-首次安装按 [入门引导](getting-started.md) 使用完整安装包。单独的插件 ZIP、三个插件文件或 GitHub 的 “Source code” 都不能代替后台服务安装。当前自动安装路径是 Tailscale；[VPS 手册](self-host-vps.md) 面向已有服务或能管理服务器的用户。
+首次安装按 [入门引导](getting-started.md) 使用完整安装包。单独的插件 ZIP、三个插件文件或 GitHub 的 “Source code” 都不能代替后台服务安装。当前自动安装路径是 Tailscale；[服务器手册](self-host-vps.md) 面向已有服务或能管理服务器的用户。
 
 ## Mac 必须一直开着吗？手机锁屏会停止任务吗？
 
-Mac 需要开机、已登录并保持唤醒，Obsidian 的目标仓库和 Claudian 也要打开。屏幕可以熄灭或锁定，但系统真正睡眠、关机或退出登录后就不能继续远程操作；换成 VPS 也不能替代 Mac 运行 Claudian。本版本不能远程唤醒 Mac，也不会自行更改电源设置。
+Mac 需要开机、已登录并保持唤醒，Obsidian 的目标仓库和 Claudian 也要打开。屏幕可以熄灭或锁定，但系统真正睡眠、关机或退出登录后就不能继续远程操作；换成服务器也不能替代 Mac 运行 Claudian。本版本不能远程唤醒 Mac，也不会自行更改电源设置。
 
 手机锁屏、切到后台或断网会中断手机连接，不会主动停止 Mac 上的任务。回到前台会重新连接并校准状态。要停止当前生成，应在连接可用时点输入栏的“停止”，并确认任务状态更新；它不是关闭后台服务的按钮。
 
@@ -43,8 +43,8 @@ Mac 需要开机、已登录并保持唤醒，Obsidian 的目标仓库和 Claudi
 | 页面提示 | 含义与下一步 |
 |---|---|
 | 需要配对 | 本机没有可用配对凭据。首次使用按引导配对；原来能用则先确认是否换了仓库、清过本机数据或被撤销。 |
-| Remote 未连接 | 先检查手机网络、连接地址，以及 Tailscale 或 VPS 服务是否可达，再点“重新连接”。 |
-| Mac 离线 | 唤醒 Mac，确认已登录、Obsidian / Claudian 和后台服务已打开；VPS 模式也需要检查 Mac。 |
+| Remote 未连接 | 先检查手机网络、连接地址，以及 Tailscale 或服务器服务是否可达，再点“重新连接”。 |
+| Mac 离线 | 唤醒 Mac，确认已登录、Obsidian / Claudian 和后台服务已打开；服务器模式也需要检查 Mac。 |
 | 目标 Vault 未打开 | 在 Mac 打开安装时绑定的那个 Obsidian 仓库及 Claudian。 |
 | 正在校准 | 正在恢复消息和状态，暂时只读。稍等后仍不恢复，可重新连接并复制诊断报告。 |
 | 组件版本不匹配 | 手机插件、Mac 插件及后台服务没有使用匹配版本。按同一份发布说明完成更新，不要只替换其中一个文件。 |
@@ -69,13 +69,13 @@ iCloud 同步完成只说明文件传到了设备，不代表手机已经加载�
 
 ## 哪些地方可能产生费用？
 
-费用需要分开确认：Claudian 所用模型服务的订阅或 API 用量、自有 VPS 的租用与域名，以及所选网络和仓库同步服务的套餐。安装 Remote 不会替你购买或包含这些外部服务。
+费用需要分开确认：Claudian 所用模型服务的订阅或 API 用量、自有服务器的租用与域名，以及所选网络和仓库同步服务的套餐。安装 Remote 不会替你购买或包含这些外部服务。
 
 Tailscale 当前提供面向非商业个人用途的 Personal 免费计划，商业用途、试用和付费计划条件不同；请按自己的用途查看 [Tailscale 官方定价](https://tailscale.com/pricing)。若旧版安装手册笼统写“免费 Tailscale”，应以上述用途条件和官方套餐为准。
 
-## 用 VPS 后，谁能看到我的内容？
+## 用服务器后，谁能看到我的内容？
 
-VPS 由你选择并管理，管理员能够访问经 Relay 转发的会话和附件内容。本版本不宣称 VPS 部署具有端到端加密。模型调用仍由 Mac 上的 Claudian 及你选择的模型服务处理。
+服务器由你选择并管理，管理员能够访问经 Relay 转发的会话和附件内容。本版本不宣称服务器部署具有端到端加密。模型调用仍由 Mac 上的 Claudian 及你选择的模型服务处理。
 
 Remote 不会自动向维护者上传遥测、聊天或诊断数据。配对码和配对链接能让新设备加入，不应公开分享；设备遗失时可在 Mac 的设备列表撤销该设备。详细边界见 [安全说明](security.md)。
 
@@ -84,7 +84,7 @@ Remote 不会自动向维护者上传遥测、聊天或诊断数据。配对码�
 可以在 [GitHub Issues](https://github.com/cuimino-kaziy/claudian-remote/issues) 反馈问题。请写明版本、设备、连接方式、复现步骤和预期结果；先搜索是否已有相同问题。Issue 对所有人可见，配对材料和私人配置不要贴进去。
 
 1. 先复现一次问题，再打开“连接详情”→“复制诊断报告”，把报告交给维护者。
-2. 补充出现问题的操作、页面提示、使用 Tailscale 还是 VPS，以及 Mac 是否唤醒。输入框问题可先复现键盘弹出，再复制报告。
+2. 补充出现问题的操作、页面提示、使用 Tailscale 还是服务器，以及 Mac 是否唤醒。输入框问题可先复现键盘弹出，再复制报告。
 3. 报告包含版本、连接状态、错误类型、计数、会话标识的摘要和布局尺寸，不含对话正文、附件正文或凭据。分享前仍请检查自己额外附加的截图和文字。
 
 不要发送配置文件、数据库、完整私人路径、配对码 / 链接 / 二维码、Token、API Key、SSH 私钥或带密码的网址。若诊断报告无法复制，先提供版本、操作和错误提示即可，不必改发整份配置。
@@ -98,6 +98,11 @@ Remote 不会自动向维护者上传遥测、聊天或诊断数据。配对码�
 | `unsupported_claudian_version` | 核对支持矩阵；目前为 2.0.4 / 2.2.6 / 2.2.7。不要绕过版本门禁执行安装或 Remote 写操作。 |
 | `vault_selection_required` | 明确目标仓库。已有操作先查询其状态，不要另起一个操作覆盖绑定。 |
 | `human_action_required` | 完成返回的 `exact_action`，再用原 `operation_id` 执行 `resume`，由真实检查确认通过；口头“完成”不等于通过。 |
+| `community_plugin_install_required` | 在目标仓库安装同版 Claudian Remote 的三份插件文件，再启用插件；Kit 不代装插件。 |
+| `community_plugin_update_required` / `community_plugin_assets_mismatch` | 在 Obsidian 更新到 Kit 对应版本，确认三份资产来自同一发行版；保留 `data.json`，不要关闭摘要检查。 |
+| `community_plugin_enable_required` | 在目标仓库启用插件并打开一次设置，让共享仓库身份生成后再恢复操作。 |
+| `plugin_vault_binding_mismatch` | 停止写入，核对目标仓库与现有安装绑定；不要手工改共享身份或复制另一设备的凭据。 |
+| `managed_runtime_inconsistent` | 受管后台记录与实际文件不一致；查看原操作状态和诊断，保留现场，不按首次安装覆盖。 |
 | `lifecycle_operation_busy` | 查询正在持锁的原操作，不要并行重装、删锁或创建重复服务。 |
 | `environment_drift` | 先查看原操作状态和只读诊断，保留其已执行步骤；按返回动作恢复计划绑定的环境，再恢复原操作。不能直接新建 plan 取代未完成操作。只有确认没有进行中操作或原操作已安全结束后，才重新检查并计划。 |
 | `secure_provisioning_missing` | 检查 Companion 安全配置交接与系统安全存储的真实检查结果；不要手填长期凭据或直接写 WebView localStorage。 |
@@ -108,4 +113,4 @@ Remote 不会自动向维护者上传遥测、聊天或诊断数据。配对码�
 
 `recovery_required` 或未知 schema / state / code 出现时，先停止写操作并诊断。取消、回退或继续安装必须遵循原操作实际提供的 `next_actions`；跨越不可逆边界后不能假定仍可回退。`diagnose` 不导出文件，`export-diagnostics` 是另有明确人工确认的操作。
 
-不删除 Vault、Claudian 对话、配对数据库或共享系统工具来“清理重装”；不执行可变分支、服务器返回的命令或 `curl | shell`。Tailscale 失败也不会自动切换到公网或 VPS。详细恢复流程见 [安装手册](../CLAUDIAN_REMOTE_INSTALL.md)。
+不删除 Vault、Claudian 对话、配对数据库或共享系统工具来“清理重装”；不执行可变分支、服务器返回的命令或 `curl | shell`。Tailscale 失败也不会自动切换到公网或服务器。详细恢复流程见 [安装手册](../CLAUDIAN_REMOTE_INSTALL.md)。

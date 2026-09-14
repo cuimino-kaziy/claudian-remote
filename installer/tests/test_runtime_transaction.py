@@ -1,6 +1,8 @@
 import hashlib
 import json
 import subprocess
+import io
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -28,6 +30,9 @@ from installer.claudian_remote_lifecycle.transaction import (
 
 BETA4_VERSION = "0.2.0-beta.4"
 BETA4_SET_ID = f"claudian-remote-{BETA4_VERSION}"
+
+COMMUNITY_VERSION = "0.2.0"
+COMMUNITY_SET_ID = f"claudian-remote-{COMMUNITY_VERSION}"
 
 
 class FixtureRetirementService(LegacyCredentialRetirementService):
@@ -167,10 +172,13 @@ class FixtureReleaseSource:
         destination.mkdir(parents=True, exist_ok=False)
         (destination / "gateway").mkdir()
         (destination / "gateway" / "runtime.txt").write_text("signed runtime\n")
+        for component in ("companion", "relay", "installer"):
+            (destination / component).mkdir()
         plugin = destination / "plugin"
         plugin.mkdir()
+        version = str(plan["compatibility_set_id"]).removeprefix("claudian-remote-")
         (plugin / "manifest.json").write_text(
-            json.dumps({"id": "claudian-remote", "version": BETA4_VERSION})
+            json.dumps({"id": "claudian-remote", "version": version})
         )
         python = runtime_root / "environments" / str(plan["compatibility_set_id"]) / "bin" / "python"
         python.parent.mkdir(parents=True, exist_ok=True)
@@ -180,7 +188,7 @@ class FixtureReleaseSource:
         uv.parent.mkdir(parents=True, exist_ok=True)
         uv.write_text("fixture uv")
         uv.chmod(0o700)
-        return StagedRelease(destination, plugin, python, uv, BETA4_VERSION)
+        return StagedRelease(destination, plugin, python, uv, version)
 
 
 class FakeTailscale:
@@ -1622,3 +1630,302 @@ def test_failed_plugin_activation_and_failed_restore_require_recovery(tmp_path, 
     assert not destination.exists()
     assert {path.name: path.read_text() for path in backup.iterdir()} == original
     assert result["state"] == "recovery_required"
+
+
+class FixtureCommunityReleaseSource(FixtureReleaseSource):
+    """A verified fixture whose installed-plugin check uses production code."""
+
+    verify_installed_plugin = BootstrapVerifiedReleaseSource.verify_installed_plugin
+
+    def __init__(self, directory):
+        super().__init__()
+        self.directory = directory
+        self.files = {
+            "manifest.json": json.dumps({"id": "claudian-remote", "version": COMMUNITY_VERSION}).encode(),
+            "main.js": b"community plugin code\n",
+            "styles.css": b".community { color: inherit; }\n",
+        }
+        (directory / "assets").mkdir(parents=True)
+        archive = directory / "assets" / "plugin.tar.gz"
+        with tarfile.open(archive, "w:gz") as bundle:
+            for name, contents in self.files.items():
+                member = tarfile.TarInfo(name)
+                member.size = len(contents)
+                bundle.addfile(member, io.BytesIO(contents))
+        self._manifest = {"release_version": COMMUNITY_VERSION,
+            "distribution_channel": "community", "plugin_update_owner": "obsidian",
+            "assets": [{"component": "plugin", "name": archive.name,
+                "sha256": hashlib.sha256(archive.read_bytes()).hexdigest(), "size": archive.stat().st_size}]}
+
+    def verify(self, _plan):
+        return {"verified": True, "release_version": COMMUNITY_VERSION,
+            "plugin_update_owner": "obsidian"}
+
+    def stage(self, plan, destination, runtime_root):
+        staged = super().stage(plan, destination, runtime_root)
+        for name, contents in self.files.items():
+            (destination / "plugin" / name).write_bytes(contents)
+        return staged
+
+    def install_market_plugin(self, deps):
+        plugin = deps.vault_path("vault-a") / ".obsidian/plugins/claudian-remote"
+        plugin.mkdir(parents=True)
+        for name, contents in self.files.items():
+            (plugin / name).write_bytes(contents)
+        (plugin / "data.json").write_text(json.dumps({"vault_id": "vault-a", "notifications_enabled": False}))
+        (plugin.parent.parent / "community-plugins.json").write_text('["claudian-remote"]')
+        return plugin
+
+
+def community_plan(*, journey="fresh_install"):
+    return {**plan(), "compatibility_set_id": COMMUNITY_SET_ID, "journey": journey,
+        "pairing_identity_policy": "preserve" if journey == "current_update" else "not_applicable"}
+
+
+def plugin_bytes(plugin):
+    return {file.name: file.read_bytes() for file in plugin.iterdir() if file.is_file()}
+
+
+def test_community_service_install_leaves_market_plugin_unowned_and_unchanged(tmp_path):
+    from installer.claudian_remote_lifecycle.uninstall import OwnershipUninstaller
+    from installer.claudian_remote_lifecycle.operation_arbitration import _read_transaction_companion
+    source = FixtureCommunityReleaseSource(tmp_path / "release")
+    deps, _ = dependencies(tmp_path, source=source)
+    plugin = source.install_market_plugin(deps)
+    before = plugin_bytes(plugin)
+    op = "op-" + "e" * 32
+    result = LocalTailscaleTransaction(deps).install(community_plan(), operation_id=op)
+    assert result["state"] == "ready"
+    journal = _read_transaction_companion(deps.layout.state / f"{op}.transaction.json",
+        operation_id=op, plan_id=community_plan()["plan_id"], journey="fresh_install")
+    assert journal["plugin_update_owner"] == "obsidian"
+    assert journal["plugin_activated"] is False
+    assert "plugin_activation" not in journal["completed_phases"]
+    assert plugin_bytes(plugin) == before
+    assert not (deps.layout.backups / op / "plugin").exists()
+    receipt = json.loads(deps.layout.ownership_receipt.read_text())
+    assert receipt["plugin_update_owner"] == "obsidian"
+    assert not any(item["resource_id"].startswith("plugin_") for item in receipt["resources"])
+    outcome = OwnershipUninstaller(deps.layout, stop_owned_services=lambda: None,
+        revoke_credentials=lambda: None).uninstall()
+    assert outcome["state"] == "ready"
+    assert plugin_bytes(plugin) == before
+
+
+@pytest.mark.parametrize("damage,code", [
+    ("missing", "community_plugin_install_required"),
+    ("old", "community_plugin_update_required"),
+    ("modified", "community_plugin_assets_mismatch"),
+    ("disabled", "community_plugin_enable_required"),
+])
+def test_community_missing_or_wrong_plugin_refuses_before_any_service_mutation(tmp_path, damage, code):
+    source = FixtureCommunityReleaseSource(tmp_path / "release")
+    deps, launchctl = dependencies(tmp_path, source=source)
+    plugin = source.install_market_plugin(deps)
+    if damage == "missing":
+        (plugin / "main.js").unlink()
+    elif damage == "old":
+        (plugin / "manifest.json").write_text('{"id":"claudian-remote","version":"0.2.0-beta.6.7"}')
+    elif damage == "modified":
+        (plugin / "styles.css").write_text("modified")
+    else:
+        (plugin.parent.parent / "community-plugins.json").write_text("[]")
+    before = plugin_bytes(plugin)
+    result = LocalTailscaleTransaction(deps).install(community_plan(), operation_id="op-" + "d" * 32)
+    assert result["state"] == "blocked"
+    assert result["code"] == code
+    assert result["mutation_performed"] is False
+    assert plugin_bytes(plugin) == before
+    assert source.calls == 0
+    assert not deps.layout.base.exists()
+    assert not launchctl.loaded
+
+
+@pytest.mark.parametrize("bootstrap_consumed", [False, True])
+def test_community_beta67_update_preserves_pairing_and_market_assets_through_rollback(tmp_path, bootstrap_consumed):
+    from installer.claudian_remote_lifecycle.inspect import LocalInspectionProbe
+    from installer.claudian_remote_lifecycle.private_io import write_private_json
+    from installer.claudian_remote_lifecycle.provisioning import SecureInputFile
+    deps, _ = dependencies(tmp_path)
+    tx = LocalTailscaleTransaction(deps)
+    old = {**plan(), "compatibility_set_id": "claudian-remote-0.2.0-beta.6.7"}
+    assert tx.install(old, operation_id="op-" + "1" * 32)["state"] == "ready"
+    old_target = deps.layout.current.resolve()
+    if bootstrap_consumed:
+        provisioning = json.loads(deps.layout.secure_provisioning.read_text())
+        write_private_json(deps.layout.bridge_bootstrap_ack, {
+            "ack_schema": "claudian-remote.bridge-bootstrap-ack/v1",
+            **{key: provisioning[key] for key in ("bootstrap_generation", "installation_id", "vault_id", "bridge_credential_id")},
+        })
+        SecureInputFile(deps.layout.bridge_bootstrap_for("vault-a")).discard()
+    old_receipt = deps.layout.ownership_receipt.read_bytes()
+    source = FixtureCommunityReleaseSource(tmp_path / "release")
+    deps.release_source = source
+    plugin = deps.vault_path("vault-a") / ".obsidian/plugins/claudian-remote"
+    for name, contents in source.files.items():
+        (plugin / name).write_bytes(contents)
+    before = plugin_bytes(plugin)
+    original_devices = set(deps.active_pairing_device_ids())
+    op = "op-" + "2" * 32
+    update = community_plan(journey="current_update")
+    assert tx.install(update, operation_id=op)["state"] == "ready"
+    assert set(deps.active_pairing_device_ids()) == original_devices
+    assert plugin_bytes(plugin) == before
+    assert tx.rollback(update, operation_id=op)["state"] == "rolled_back"
+    assert deps.layout.current.resolve() == old_target
+    restored = json.loads(deps.layout.ownership_receipt.read_text())
+    assert all(restored[key] == json.loads(old_receipt)[key] for key in ("operation_id", "plan_id", "compatibility_set_id"))
+    assert LocalInspectionProbe(home=tmp_path)._verified_managed_version(deps.layout, old_target) == "0.2.0-beta.6.7"
+    assert set(deps.active_pairing_device_ids()) == original_devices
+    assert plugin_bytes(plugin) == before
+    from installer.claudian_remote_lifecycle.uninstall import OwnershipUninstaller
+    assert deps.layout.bridge_bootstrap_for("vault-a").exists() is (not bootstrap_consumed)
+    uninstall = OwnershipUninstaller(deps.layout, stop_owned_services=lambda: None, revoke_credentials=lambda: None)
+    assert uninstall.preflight()["state"] == "ready"
+    assert uninstall.uninstall()["state"] == "ready"
+    assert plugin_bytes(plugin) == before
+
+
+def test_community_failed_activation_rolls_back_services_without_restoring_plugin(tmp_path):
+    from installer.claudian_remote_lifecycle.inspect import LocalInspectionProbe
+    deps, _ = dependencies(tmp_path)
+    tx = LocalTailscaleTransaction(deps)
+    assert tx.install(plan(), operation_id="op-" + "4" * 32)["state"] == "ready"
+    prior = deps.layout.current.resolve()
+    source = FixtureCommunityReleaseSource(tmp_path / "release")
+    deps.release_source = source
+    plugin = deps.vault_path("vault-a") / ".obsidian/plugins/claudian-remote"
+    for name, contents in source.files.items():
+        (plugin / name).write_bytes(contents)
+    before = plugin_bytes(plugin)
+    deps.health_probe = lambda: False
+    result = tx.install(community_plan(journey="current_update"), operation_id="op-" + "5" * 32)
+    assert result["state"] == "rolled_back"
+    assert deps.layout.current.resolve() == prior
+    assert plugin_bytes(plugin) == before
+    assert LocalInspectionProbe(home=tmp_path)._verified_managed_version(deps.layout, prior) == BETA4_VERSION
+    assert deps.active_pairing_device_ids() == {"iphone-a"}
+    from installer.claudian_remote_lifecycle.uninstall import OwnershipUninstaller
+    assert OwnershipUninstaller(deps.layout, stop_owned_services=lambda: None,
+        revoke_credentials=lambda: None).preflight()["state"] == "ready"
+
+
+def test_community_incomplete_plugin_does_not_query_or_change_existing_pairing(tmp_path):
+    source = FixtureCommunityReleaseSource(tmp_path / "release")
+    deps, _ = dependencies(tmp_path, source=source)
+    source.install_market_plugin(deps).joinpath("main.js").unlink()
+    def forbidden_inventory():
+        raise AssertionError("queried pairing before plugin preflight")
+    deps.active_pairing_device_ids = forbidden_inventory
+    outcome = LocalTailscaleTransaction(deps).install(community_plan(journey="current_update"), operation_id="op-" + "6" * 32)
+    assert outcome["code"] == "community_plugin_install_required"
+    assert "Obsidian" in outcome["human_action"]
+    assert not deps.layout.base.exists()
+
+
+@pytest.mark.parametrize("final_phase", ["ready", "await_plugin_bootstrap", "await_pairing", "rolled_back", "recovery_required"])
+def test_community_actual_journal_stays_readable_through_wait_and_compensation(tmp_path, monkeypatch, final_phase):
+    from installer.claudian_remote_lifecycle import transaction as transaction_module
+    from installer.claudian_remote_lifecycle.operation_arbitration import _read_transaction_companion
+    source = FixtureCommunityReleaseSource(tmp_path / "release")
+    deps, _ = dependencies(tmp_path, source=source)
+    plugin = source.install_market_plugin(deps)
+    before = plugin_bytes(plugin)
+    deps.bridge_ready_probe = lambda: final_phase != "await_plugin_bootstrap"
+    deps.pairing_probe = lambda: final_phase != "await_pairing"
+    deps.health_probe = lambda: final_phase not in {"rolled_back", "recovery_required"}
+    if final_phase == "recovery_required":
+        def fail_cleanup():
+            raise RuntimeError("fixture cleanup failed")
+        deps.launchd.remove_local_agents = fail_cleanup
+    snapshots = []
+    op = "op-" + "7" * 32
+    original_write = transaction_module.write_private_json
+    def capture(path, value, **kwargs):
+        original_write(path, value, **kwargs)
+        if path.name == f"{op}.transaction.json":
+            snapshots.append(json.loads(path.read_text()))
+    monkeypatch.setattr(transaction_module, "write_private_json", capture)
+    tx = LocalTailscaleTransaction(deps)
+    tx.install(community_plan(), operation_id=op)
+    assert snapshots[-1]["phase"] == final_phase
+    assert {"activation_started", "secure_provisioned", "after_activation"} <= {item["phase"] for item in snapshots}
+    captured = tmp_path / "captured.json"
+    for journal in snapshots:
+        captured.write_text(json.dumps(journal))
+        assert _read_transaction_companion(captured, operation_id=op,
+            plan_id=community_plan()["plan_id"], journey="fresh_install", plugin_update_owner="obsidian") == journal
+        with pytest.raises(ValueError, match="invalid_transaction_companion_owner"):
+            _read_transaction_companion(captured, operation_id=op,
+                plan_id=community_plan()["plan_id"], journey="fresh_install", plugin_update_owner="lifecycle_manager")
+    if final_phase in {"await_plugin_bootstrap", "await_pairing"}:
+        deps.bridge_ready_probe = deps.pairing_probe = lambda: True
+        assert tx.install(community_plan(), operation_id=op)["state"] == "ready"
+        assert source.calls == 1
+    assert plugin_bytes(plugin) == before
+
+
+def test_shared_vault_identity_installs_services_waits_and_resumes_without_plugin_writes(tmp_path):
+    from installer.claudian_remote_lifecycle.inspect import Inspector, LocalInspectionProbe
+    from installer.claudian_remote_lifecycle.plan import PlanBuilder
+    from installer.tests.test_inspect import FakeProbe
+    local = LocalInspectionProbe(home=tmp_path)
+    source = FixtureCommunityReleaseSource(tmp_path / "release")
+    deps, launchctl = dependencies(tmp_path, source=source, bridge_ready=False)
+    deps.layout = RuntimeLayout(tmp_path / "Library/Application Support/Claudian Remote", tmp_path / "Library/LaunchAgents")
+    deps.launchd = LaunchAgentManager(deps.layout, runner=launchctl)
+    vault = tmp_path / "Notes"
+    plugin = vault / ".obsidian/plugins/claudian-remote"
+    plugin.mkdir(parents=True)
+    for name, data in source.files.items():
+        (plugin / name).write_bytes(data)
+    (plugin / "data.json").write_text('{"vault_id":"vault-shared-phone-uuid"}')
+    (vault / ".obsidian/community-plugins.json").write_text('["claudian", "claudian-remote"]')
+    claudian = vault / ".obsidian/plugins/claudian"
+    claudian.mkdir()
+    (claudian / "manifest.json").write_text('{"id":"claudian","version":"2.2.7"}')
+    registry = tmp_path / "Library/Application Support/obsidian/obsidian.json"
+    registry.parent.mkdir(parents=True)
+    registry.write_text(json.dumps({"vaults": {"different-local-registration": {"path": str(vault)}}}))
+    fake = FakeProbe(claudian_version="2.2.7")
+    fake.vaults = local.vaults
+    fake.installation = local.installation
+    local._secure_provisioning_status = lambda: {"secure_provisioning_available": True, "secure_provisioning_probe": "fixture"}
+    deps.vault_path = local.resolve_vault
+    before = plugin_bytes(plugin)
+    snapshot = Inspector(fake).snapshot()
+    target = PlanBuilder().build(snapshot, mode="local_tailscale")
+    assert target["journey"] == "fresh_install"
+    assert target["vault_id"] == "vault-shared-phone-uuid"
+    assert target["blockers"] == []
+    tx = LocalTailscaleTransaction(deps)
+    op = "op-" + "8" * 32
+    assert tx.install(target, operation_id=op)["code"] == "desktop_plugin_bootstrap_required"
+    pending = Inspector(fake).snapshot()
+    assert pending["installation"]["managed_runtime_state"] == "verified"
+    deps.bridge_ready_probe = lambda: True
+    assert tx.install(target, operation_id=op)["state"] == "ready"
+    assert tx.verify(target)["state"] == "ready"
+    profile = json.loads(deps.layout.connection_profile.read_text())
+    assert profile["vault_id"] == "vault-shared-phone-uuid"
+    assert source.calls == 1
+    assert plugin_bytes(plugin) == before
+
+
+def test_community_update_refuses_modified_existing_runtime_before_extending_receipt_ownership(tmp_path):
+    deps, _ = dependencies(tmp_path)
+    tx = LocalTailscaleTransaction(deps)
+    assert tx.install(plan(), operation_id="op-" + "a" * 32)["state"] == "ready"
+    (deps.layout.runtime / "foreign-file").write_text("user-owned content")
+    source = FixtureCommunityReleaseSource(tmp_path / "release")
+    deps.release_source = source
+    plugin = deps.vault_path("vault-a") / ".obsidian/plugins/claudian-remote"
+    for name, contents in source.files.items():
+        (plugin / name).write_bytes(contents)
+    before = plugin_bytes(plugin)
+    result = tx.install(community_plan(journey="current_update"), operation_id="op-" + "b" * 32)
+    assert result["code"] == "owned_resource_modified"
+    assert result["mutation_performed"] is False
+    assert source.calls == 0
+    assert plugin_bytes(plugin) == before
+    assert (deps.layout.runtime / "foreign-file").read_text() == "user-owned content"

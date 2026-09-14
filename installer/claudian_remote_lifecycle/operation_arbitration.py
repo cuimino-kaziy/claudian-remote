@@ -19,6 +19,7 @@ from .model import CHECKPOINT_SCHEMA, CHECKPOINT_SCHEMA_V1, LifecyclePhase
 from .migrations import inspect_legacy_retirement_journal
 from .plan import PlanStore
 from .pairing import PairingIdentityTransition
+from .runtime import community_managed_plugin
 
 
 _CHECKPOINT_NAME = re.compile(r"(op-[0-9a-f]{32})\.json")
@@ -409,6 +410,7 @@ class OperationArbitrator:
             operation_id=str(current["operation_id"]),
             plan_id=str(current["plan_id"]),
             journey=str(plan["journey"]),
+            plugin_update_owner="obsidian" if community_managed_plugin(plan) else "lifecycle_manager",
         )
         transaction_phase = str(transaction["phase"])
         checkpoint_state = str(current["state"])
@@ -917,6 +919,7 @@ def _read_transaction_companion(
     operation_id: str,
     plan_id: str,
     journey: str,
+    plugin_update_owner: str | None = None,
 ) -> dict[str, Any]:
     try:
         value = json.loads(
@@ -926,8 +929,15 @@ def _read_transaction_companion(
         )
     except (OSError, ValueError, TypeError) as exc:
         raise ValueError("invalid_transaction_companion") from exc
-    if not isinstance(value, Mapping) or set(value) != _TRANSACTION_FIELDS:
+    if not isinstance(value, Mapping):
         raise ValueError("invalid_transaction_companion")
+    community = value.get("plugin_update_owner") == "obsidian"
+    expected_fields = _TRANSACTION_FIELDS | ({"plugin_update_owner"} if community else set())
+    if set(value) != expected_fields:
+        raise ValueError("invalid_transaction_companion")
+    actual_owner = "obsidian" if community else "lifecycle_manager"
+    if plugin_update_owner is not None and actual_owner != plugin_update_owner:
+        raise ValueError("invalid_transaction_companion_owner")
     transaction = dict(value)
     if (
         transaction.get("transaction_schema")
@@ -937,13 +947,21 @@ def _read_transaction_companion(
     ):
         raise ValueError("invalid_transaction_companion_binding")
     phase = transaction.get("phase")
-    if phase not in set(_TRANSACTION_PHASE_PREFIXES) | {
+    prefixes = dict(_TRANSACTION_PHASE_PREFIXES)
+    if community:
+        del prefixes["plugin_activated"]
+        prefixes["secure_provisioned"] = 2
+        for name in ("after_activation", "await_plugin_bootstrap", "await_pairing", "ready"):
+            prefixes[name] -= 1
+    if phase not in set(prefixes) | {
         "rolled_back",
         "recovery_required",
     }:
         raise ValueError("invalid_transaction_companion_phase")
     completed = transaction.get("completed_phases")
     completed_sequence = _TRANSACTION_COMPLETED_PHASES
+    if community:
+        completed_sequence = tuple(item for item in completed_sequence if item != "plugin_activation")
     if journey == "legacy_upgrade":
         completed_sequence = (
             completed_sequence[:1]
@@ -955,8 +973,8 @@ def _read_transaction_companion(
         or completed != list(completed_sequence[: len(completed)])
     ):
         raise ValueError("invalid_transaction_companion_progress")
-    if phase in _TRANSACTION_PHASE_PREFIXES:
-        expected_length = _TRANSACTION_PHASE_PREFIXES[phase]
+    if phase in prefixes:
+        expected_length = prefixes[phase]
         if journey == "legacy_upgrade" and phase not in {
             "before_staging", "before_legacy_migration",
         }:
@@ -966,6 +984,8 @@ def _read_transaction_companion(
     activation_started = transaction.get("activation_started")
     plugin_activated = transaction.get("plugin_activated")
     if not isinstance(activation_started, bool) or not isinstance(plugin_activated, bool):
+        raise ValueError("invalid_transaction_companion_activation")
+    if community and plugin_activated:
         raise ValueError("invalid_transaction_companion_activation")
     if plugin_activated and not activation_started:
         raise ValueError("invalid_transaction_companion_activation")
@@ -979,11 +999,12 @@ def _read_transaction_companion(
         raise ValueError("invalid_transaction_companion_activation")
     if phase in {
         "plugin_activated",
+        "secure_provisioned",
         "after_activation",
         "await_plugin_bootstrap",
         "await_pairing",
         "ready",
-    } and (activation_started is not True or plugin_activated is not True):
+    } and (activation_started is not True or plugin_activated is not (not community)):
         raise ValueError("invalid_transaction_companion_activation")
     availability = transaction.get("prior_availability_vault")
     if availability is not None and (

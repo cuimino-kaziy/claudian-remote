@@ -99,6 +99,8 @@ def _write_v2_plan(state, *, journey="fresh_install", pairing_policy="preserve")
         installation = {
             **probe.installation(),
             "installed": True,
+            "managed_runtime_state": "verified",
+            "managed_runtime_version": "0.2.0-beta.6.7",
             "plugin_lineage": {
                 "current": {"present": True, "enabled": True, "recognized": True},
                 "legacy": {"present": False, "enabled": False, "recognized": True},
@@ -120,6 +122,7 @@ def _write_v2_plan(state, *, journey="fresh_install", pairing_policy="preserve")
         probe.installation = lambda: installation
     snapshot = Inspector(probe).snapshot()
     plan = PlanBuilder(
+        compatibility_set_id="claudian-remote-0.2.0-beta.6.7",
         current_update_pairing_identity_policy=pairing_policy
     ).build(snapshot, mode="local_tailscale")
     PlanStore(state).write(plan, snapshot)

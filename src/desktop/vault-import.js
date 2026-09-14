@@ -1,3 +1,5 @@
+import { Platform } from "obsidian";
+
 const SAFE_UPLOAD_ID = /^[A-Za-z0-9-]{8,80}$/;
 
 export function safeDisplayName(value) {
@@ -27,7 +29,9 @@ export async function deterministicVaultPath(adapter, directory, displayName, up
 }
 
 function nodeModules() {
-  const loader = globalThis.require || (0, eval)("require");
+  if (!Platform.isDesktopApp) throw new Error("desktop_runtime_unavailable");
+  const loader = typeof require === "function" ? require : globalThis.require;
+  if (typeof loader !== "function") throw new Error("desktop_runtime_unavailable");
   return { fs: loader("fs"), path: loader("path"), crypto: loader("crypto") };
 }
 

@@ -64,7 +64,7 @@ export class RemoteSettingsTab extends PluginSettingTab {
 
   group(parent, title) {
     const group = parent.createDiv({ cls: "claudian-remote-settings-group" });
-    group.createEl("h3", { text: title });
+    new Setting(group).setName(title).setHeading();
     return group;
   }
 
@@ -146,7 +146,7 @@ export class RemoteSettingsTab extends PluginSettingTab {
     )));
     const help = this.help(connection, "连接地址设置帮助");
     help.createEl("p", { text: "Relay 是在手机与 Mac 之间转发消息的连接服务。这里填写它的 HTTPS 地址，不是模型地址、SSH 地址或配对码。" });
-    help.createEl("pre").createEl("code", { text: `Tailscale：${CONNECTION_GUIDES.local_tailscale.example}\nVPS：${CONNECTION_GUIDES.remote_vps.example}` });
+    help.createEl("pre").createEl("code", { text: `Tailscale：${CONNECTION_GUIDES.local_tailscale.example}\n服务器：${CONNECTION_GUIDES.remote_vps.example}` });
     help.createEl("p", { text: "示例不能直接连接。更换服务器需在 Mac 重新配置并配对，不能只改手机地址。首次安装的环境和步骤请查看“帮助”。" });
     const preferences = this.group(panel, "使用偏好");
     new Setting(preferences)
@@ -250,22 +250,22 @@ export class RemoteSettingsTab extends PluginSettingTab {
     const downloads = new Setting(installation).setName("安装包与插件").setDesc(`当前版本 ${COMPATIBILITY_SET.plugin}。Mac 后台服务与插件需使用匹配版本。`);
     downloads.controlEl.createEl("a", { text: "打开下载页", href: "https://github.com/cuimino-kaziy/claudian-remote/releases", attr: { target: "_blank", rel: "noopener noreferrer" } });
     for (const [mode, guide] of Object.entries(CONNECTION_GUIDES)) {
-      const help = this.help(installation, mode === "remote_vps" ? "VPS 设置帮助" : "Tailscale 设置帮助");
+      const help = this.help(installation, mode === "remote_vps" ? "服务器设置帮助" : "Tailscale 设置帮助");
       help.createEl("p", { text: guide.summary });
       const steps = help.createEl("ol");
       for (const step of guide.steps) steps.createEl("li", { text: step });
       help.createEl("pre").createEl("code", { text: guide.example });
       help.createEl("p", { text: guide.help });
       help.createEl("a", {
-        text: mode === "remote_vps" ? "VPS 环境、部署与字段说明" : "完整安装与配对手册",
-        href: `https://github.com/cuimino-kaziy/claudian-remote/blob/v${COMPATIBILITY_SET.plugin}/${mode === "remote_vps" ? "docs/self-host-vps.md" : "CLAUDIAN_REMOTE_INSTALL.md"}`,
+        text: mode === "remote_vps" ? "服务器环境、部署与字段说明" : "完整安装与配对手册",
+        href: `https://github.com/cuimino-kaziy/claudian-remote/blob/${COMPATIBILITY_SET.plugin.includes("-") ? "v" : ""}${COMPATIBILITY_SET.plugin}/${mode === "remote_vps" ? "docs/self-host-vps.md" : "CLAUDIAN_REMOTE_INSTALL.md"}`,
         attr: { target: "_blank", rel: "noopener noreferrer" }
       });
     }
     const troubleshooting = this.group(panel, "使用与排查");
     const help = this.help(troubleshooting, "连接异常排查帮助");
     help.createEl("p", { text: "Mac 需要保持开机、登录和唤醒，并运行 Obsidian、Claudian 与后台服务。Mac 离线时，手机只能阅读已同步内容。" });
-    help.createEl("p", { text: "Tailscale 连接请先检查两台设备是否已连接同一个 Tailscale 网络；VPS 连接请检查域名、HTTPS 和 Relay 服务。打开远程页面后，点击顶部连接状态可查看具体原因。" });
+    help.createEl("p", { text: "Tailscale 连接请先检查两台设备是否已连接同一个 Tailscale 网络；服务器连接请检查域名、HTTPS 和 Relay 服务。打开远程页面后，点击顶部连接状态可查看具体原因。" });
   }
 
 }
@@ -286,7 +286,7 @@ export default class ClaudianRemotePlugin extends Plugin {
       });
     });
     this.registerView(MOBILE_VIEW_TYPE, (leaf) => new ClaudianRemoteMobileView(leaf, this));
-    this.addCommand({ id: "open-claudian-remote", name: "打开 Claudian Remote", callback: () => void this.openMobileView() });
+    this.addCommand({ id: "open-remote", name: "打开远程页面", callback: () => void this.openMobileView() });
     this.remoteSettingsTab = new RemoteSettingsTab(this.app, this);
     this.addSettingTab(this.remoteSettingsTab);
     if (Platform.isMobileApp) this.addRibbonIcon("message-circle", "Claudian Remote", () => void this.openMobileView());

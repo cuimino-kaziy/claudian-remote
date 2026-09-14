@@ -6,11 +6,17 @@ export const FINAL_PLUGIN_ID = "claudian-remote";
 export const LEGACY_PLUGIN_ID = "whale-agent-bridge";
 export const REQUIRED_CLAUDIAN_VERSION = "2.2.6";
 export const SUPPORTED_CLAUDIAN_VERSIONS = Object.freeze(["2.0.4", "2.2.6", "2.2.7"]);
-export const REQUIRED_RELEASE_VERSION = "0.2.0-beta.6.7";
+export const REQUIRED_RELEASE_VERSION = "0.2.0";
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMPONENTS = ["plugin", "companion", "relay", "installer"];
 const ASSET_COMPONENTS = [...COMPONENTS, "legacy_retirement_helper"];
 const RUNTIME_TARGETS = ["darwin/arm64", "darwin/x86_64"];
+
+export function releaseTagForVersion(version, channel) {
+  if (channel === "community" && /^[0-9]+\.[0-9]+\.[0-9]+$/.test(version)) return version;
+  if (channel === "private_beta" && /^[0-9]+\.[0-9]+\.[0-9]+(?:-[0-9A-Za-z.-]+)?$/.test(version)) return `v${version}`;
+  throw new Error("release version is invalid for distribution channel");
+}
 
 function expectedAssetName(component, version) {
   if (component === "installer") return `claudian-remote-lifecycle-${version}.tar.gz`;
@@ -36,6 +42,7 @@ function expectedUpgradeContract(version, helperDigest) {
       { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.4", journey: "current_update" },
       { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.5", journey: "current_update" },
       { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.6", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.7", journey: "current_update" },
       { plugin_id: LEGACY_PLUGIN_ID, version: "recognized-dogfood-lineage", journey: "legacy_upgrade" }
     ],
     supported_profiles: ["local_tailscale"],
@@ -261,7 +268,13 @@ export function validateReleaseContract(manifest, context) {
   if (containsPrivateKeyMaterial(manifest)) errors.push("private key material must not be included in a release manifest");
   if (manifest?.schema_version !== 1) errors.push("schema_version must be 1");
   if (manifest?.release_version !== REQUIRED_RELEASE_VERSION) errors.push(`release version must be ${REQUIRED_RELEASE_VERSION}`);
-  if (manifest?.release_tag !== `v${manifest?.release_version}`) errors.push("release tag and release version disagree");
+  try {
+    if (manifest?.release_tag !== releaseTagForVersion(manifest?.release_version, manifest?.distribution_channel)) {
+      errors.push("release tag and release version disagree");
+    }
+  } catch (error) {
+    errors.push(error.message);
+  }
   if (manifest?.source_ref !== `refs/tags/${manifest?.release_tag}`) errors.push("source_ref must be the exact release tag");
   if (context.expectedTag && manifest?.release_tag !== context.expectedTag) errors.push("workflow tag and manifest tag disagree");
   if (plugin.id !== FINAL_PLUGIN_ID || pluginManifest.id !== FINAL_PLUGIN_ID) errors.push("final plugin id is required");

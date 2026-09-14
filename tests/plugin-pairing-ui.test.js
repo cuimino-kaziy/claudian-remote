@@ -28,6 +28,7 @@ async function mobileSettings({ nativeSettings = false, requestUrl } = {}) {
   class Setting {
     setName() { return this; }
     setDesc() { return this; }
+    setHeading() { return this; }
     addDropdown(callback) { callback(new Control()); return this; }
     addText(callback) { const control = new Control(); inputs.push(control); callback(control); return this; }
     addButton(callback) { const control = new Control(); buttons.push(control); callback(control); return this; }

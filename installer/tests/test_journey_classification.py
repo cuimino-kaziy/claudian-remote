@@ -21,6 +21,7 @@ def _observation(entry):
     current = plugins.get("claudian-remote")
     legacy = plugins.get("whale-agent-bridge")
     return {
+        "managed_runtime_state": "verified" if current is not None else "absent",
         "current": {
             "present": current is not None,
             "enabled": "claudian-remote" in enabled,
@@ -156,3 +157,32 @@ def test_two_inactive_plugin_directories_are_ambiguous_not_fresh():
     assert decision.journey == "coexistence_conflict"
     assert decision.reason_code == "plugin_lineage_ambiguous"
     assert decision.blocked is True
+
+
+@pytest.mark.parametrize(("state", "journey", "blocked"), [
+    ("absent", "fresh_install", False),
+    ("verified", "current_update", False),
+    ("inconsistent", "unclassified", True),
+])
+def test_market_plugin_does_not_determine_background_installation(state, journey, blocked):
+    observation = _observation(_fixture("current"))
+    observation["managed_runtime_state"] = state
+    decision = classify_journey(observation)
+    assert decision.journey == journey
+    assert decision.blocked is blocked
+
+
+def test_background_residue_without_plugin_is_not_a_fresh_install():
+    observation = _observation(_fixture("clean"))
+    observation["managed_runtime_state"] = "inconsistent"
+    decision = classify_journey(observation)
+    assert decision.journey == "unclassified"
+    assert decision.reason_code == "managed_runtime_inconsistent"
+    assert decision.blocked
+
+
+def test_pending_operation_precedes_inconsistent_background_classification():
+    observation = _observation(_fixture("current"))
+    observation["managed_runtime_state"] = "inconsistent"
+    decision = classify_journey(observation, prior_operation_terminal=False)
+    assert decision.reason_code == "operation_reconciliation_required"

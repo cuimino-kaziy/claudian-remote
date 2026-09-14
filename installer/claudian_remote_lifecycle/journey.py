@@ -160,7 +160,22 @@ def classify_journey(
             True,
             existing,
         )
+    managed = observation.get("managed_runtime_state")
+    if managed is None:
+        managed = "inconsistent" if current["present"] else "absent"
+    if managed not in {"absent", "verified", "inconsistent"}:
+        raise ValueError("invalid_managed_runtime_state")
+    if managed == "inconsistent":
+        return JourneyDecision(
+            "unclassified", "managed_runtime_inconsistent", True, None,
+            "not_applicable", True, existing,
+        )
     if current["enabled"] or (current["present"] and not legacy["enabled"]):
+        if managed == "absent":
+            return JourneyDecision(
+                "fresh_install", "plugin_only_installation", False, True,
+                "not_applicable", True, existing,
+            )
         return JourneyDecision(
             "current_update",
             "recognized_current_installation",
@@ -182,6 +197,11 @@ def classify_journey(
             capability,
             True,
             existing,
+        )
+    if managed == "verified":
+        return JourneyDecision(
+            "current_update", "recognized_current_installation", False, None,
+            "not_applicable", True, existing,
         )
     return JourneyDecision(
         "fresh_install",

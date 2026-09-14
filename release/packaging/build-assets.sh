@@ -3,6 +3,12 @@ set -eu
 
 release_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 release_version=$(node -p "require('${release_root}/package.json').version")
+release_channel="${CLAUDIAN_RELEASE_CHANNEL:-community}"
+case "${release_channel}" in
+  community) release_tag="${release_version}" ;;
+  private_beta) release_tag="v${release_version}" ;;
+  *) echo "unsupported release channel: ${release_channel}" >&2; exit 64 ;;
+esac
 release_dist="${CLAUDIAN_RELEASE_DIST:-${release_root}/dist}"
 release_tmp=$(mktemp -d "${TMPDIR:-/tmp}/claudian-remote-release.XXXXXX")
 trap 'rm -rf "${release_tmp}"' EXIT HUP INT TERM
@@ -75,5 +81,5 @@ cp gateway/relay/legacy_retirement.py \
   "${release_dist}/claudian-remote-legacy-retirement-helper-${release_version}.py"
 
 if [ "${assets_only}" = false ]; then
-  node release/packaging/prepare-manifest.mjs "${CLAUDIAN_RELEASE_TAG:-v${release_version}}" "${release_dist}"
+  node release/packaging/prepare-manifest.mjs "${CLAUDIAN_RELEASE_TAG:-${release_tag}}" "${release_dist}"
 fi

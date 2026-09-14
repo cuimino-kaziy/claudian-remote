@@ -1,9 +1,9 @@
 {
   "id": "claudian-remote",
   "name": "Claudian Remote",
-  "version": "0.2.0-beta.6.7",
+  "version": "0.2.0",
   "minAppVersion": "1.12.3",
-  "description": "Mobile-safe remote access for a supported Claudian installation.",
+  "description": "Remotely use Claudian on your Mac from mobile devices, with conversation history and attachments.",
   "author": "Lantian",
   "isDesktopOnly": false
 }

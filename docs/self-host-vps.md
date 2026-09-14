@@ -1,14 +1,14 @@
-# 使用自己的 VPS 连接 Claudian Remote
+# 使用自己的服务器连接 Claudian Remote
 
-VPS 是一台你管理的网络服务器。手机和 Mac 都连接它，由它转发消息；模型、仓库和工具仍在 Mac 上运行，所以 Mac 依然需要保持开机、登录和唤醒。
+这里的“服务器连接”不限于 VPS（虚拟专用服务器），也可以使用满足下方环境要求的云服务器、独立服务器或自有 Linux 主机。Relay 不依赖主机采用何种虚拟化方式；其他系统或受限托管环境尚未列入支持范围。手机和 Mac 都连接它，由它转发消息；模型、仓库和工具仍在 Mac 上运行，所以 Mac 依然需要保持开机、登录和唤醒。
 
-Claudian Remote 公开测试本身免费；VPS、域名、模型等外部服务费用另计。
+服务器、域名、模型等外部服务由你自行配置。
 
-**已经有可用服务器的用户，从“手机连接”开始。** 当前安装器尚未开放 `remote_vps` 自动部署，公开测试发布不改变这一限制。下面区分现有服务器接入和维护者手动部署，不把配置模板当作已经完成的安装器。Tailscale 与 VPS 不会自动互相切换。
+**已经有可用服务器的用户，从“手机连接”开始。** 当前安装器尚未开放 `remote_vps` 自动部署，本次发布不改变这一限制。下面区分现有服务器接入和维护者手动部署，不把配置模板当作已经完成的安装器。Tailscale 与服务器不会自动互相切换。
 
 ## 手机连接：只需要地址和配对码
 
-1. 让部署者确认 Mac 后台服务已经连上这台 VPS，并提供连接地址，例如 `https://relay.你的域名.com`。这个地址必须有手机信任的 HTTPS 证书。
+1. 让部署者确认 Mac 后台服务已经连上这台服务器，并提供连接地址，例如 `https://relay.你的域名.com`。这个地址必须有手机信任的 HTTPS 证书。
 2. 在 Mac 的同一个 Obsidian 仓库中打开 Claudian，再进入 Claudian Remote 设置，点击“添加移动设备”。
 3. 在手机打开 Mac 生成的配对链接；或进入远程页面 → 历史栏 → 设置，在“连接服务器地址”粘贴 HTTPS 地址并保存，再输入 Mac 显示的 8 位配对码。
 4. 配对码验证通过后，手机会自动完成配对并连接；再打开远程页面，无需回到 Mac 批准。
@@ -20,6 +20,8 @@ Claudian Remote 公开测试本身免费；VPS、域名、模型等外部服务�
 | 8 位配对码 | Mac 刚生成的短码 | 服务器密码、SSH 私钥、长期 Token |
 
 服务器根地址显示空白或 404，不代表连接失败；它不是普通网页。以远程页面的连接状态和真实消息往返为准。更换服务器需要重新配置 Mac 和配对手机，不能只修改手机地址。
+
+内网服务器还需要确保手机和 Mac 都能访问其 HTTPS 地址；仅有内网 IP、NAS 文件共享或不能持续运行 Python 服务的虚拟主机并不足够。
 
 ## 新服务器需要哪些环境
 
@@ -37,9 +39,9 @@ Debian 12 上不能假定系统默认 Python 就满足 3.12；由维护者先准
 
 ## 维护者手动部署步骤
 
-此流程需要维护者提供**同一版本**的签名 Relay 发行件、校验结果、安装身份和 Mac 安全配置交接。当前 Kit 没有可供普通用户直接执行的 VPS 全自动命令。没有这些配套信息时，先使用 Tailscale 安装路径，不能把示例值改成看似可用的内容后宣布安装完成。
+此流程需要维护者提供**同一版本**的签名 Relay 发行件、校验结果、安装身份和 Mac 安全配置交接。当前 Kit 没有可供普通用户直接执行的服务器全自动命令。没有这些配套信息时，先使用 Tailscale 安装路径，不能把示例值改成看似可用的内容后宣布安装完成。
 
-1. **确认服务器和发行件。** 核对操作系统、架构、可用磁盘和 SSH 主机密钥。从 [官方 GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases) 取得本版完整 Kit 和匹配版本的 `claudian-remote-relay-<version>.tar.gz`。按公开的 [下载与校验说明](install-verification-0.2.0-beta.6.7.md) 确认官方仓库与精确版本，以官方 GitHub 为下载信任起点，先用系统 `shasum` 核验完整 Kit，再解压并保留原有组件签名、指纹和摘要核验。旧包手册关于私发校验材料的要求以该公测补充说明为准，无需私聊领取；其余步骤不变。不要从可变分支部署，也不要把 GitHub “Source code” 当成运行包。
+1. **确认服务器和发行件。** 核对操作系统、架构、可用磁盘和 SSH 主机密钥。从 [官方 GitHub Releases](https://github.com/cuimino-kaziy/claudian-remote/releases) 取得本版完整 Kit 和匹配版本的 `claudian-remote-relay-<version>.tar.gz`。按公开的 [下载与校验说明](install-verification-0.2.0.md) 确认官方仓库与精确版本，以官方 GitHub 为下载信任起点，先用系统 `shasum` 核验完整 Kit，再解压并保留原有组件签名、指纹和摘要核验。不要从可变分支部署，也不要把 GitHub “Source code” 当成运行包。
 2. **准备独立服务目录。** 按发布包目录结构安装，保留旧版本以便回退。现有服务模板使用工作目录 `/opt/claudian-remote`、专用用户 `claudian-relay` 和数据目录 `/var/lib/claudian-remote-relay`。由管理员创建该用户和目录，并只允许服务用户访问数据；不要覆盖已有实例的配置或数据库。
 3. **安装运行环境。** 在发行件根目录使用 Python 3.12 创建 `gateway/.venv`，按 `gateway/requirements.lock` 安装精确依赖。代码运行入口是 `python -m gateway.relay.relay_server --config /etc/claudian-remote/relay.json`；发布包中的 systemd 模板已经使用该入口。依赖应在独立虚拟环境中安装，不要修改系统 Python。
 4. **填写 Relay 配置。** 以 [`gateway/relay/config.example.json`](../gateway/relay/config.example.json) 为起点，在服务器私有配置目录中填写下表。发布包的存储、上传和保留期限来自兼容矩阵，不应随意改动。保持 `enable_v1_compatibility: false`、空的 `fallback_base_url` 和仅回环监听。
@@ -71,4 +73,4 @@ Debian 12 上不能假定系统默认 Python 就满足 3.12；由维护者先准
 - **已配对但 Mac 离线：** 检查 Mac 是否睡眠、Obsidian / Claudian 是否打开、Companion 是否连接到相同地址和身份。
 - **一直连接中或回复中断：** 管理员检查证书、反向代理的 WebSocket 升级、服务器资源和版本匹配；可从远程页面顶部状态打开诊断。
 
-VPS 会终止 TLS，因此服务器管理员能够访问转发的会话和附件内容；本版本不声称端到端加密。详细边界见 [安全说明](security.md)。
+服务器会终止 TLS，因此服务器管理员能够访问转发的会话和附件内容；本版本不声称端到端加密。详细边界见 [安全说明](security.md)。
