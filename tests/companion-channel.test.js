@@ -1,5 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { build } from "esbuild";
+import vm from "node:vm";
+import { DesktopAdapter } from "../src/desktop-adapter.js";
+import { SourceCapture } from "../src/source-capture.js";
+import { SemanticStreamNormalizer } from "../src/stream-normalizer.js";
+import { COMPATIBILITY_SET, evaluateCompatibilitySet } from "../src/protocol/compatibility.js";
 import {
   BRIDGE_SUBPROTOCOL,
   CompanionChannel,
@@ -284,4 +290,105 @@ test("explicit disconnect cancels reconnect and never opens another socket", () 
   assert.equal(timers[0].cancelled, true);
   timers[0].callback();
   assert.equal(sockets.length, 1);
+});
+
+
+test("runtime refresh renews a stale Claudian bind once, using the active tab rather than the last instrumented tab", async () => {
+  const { outputFiles } = await build({ entryPoints: [new URL("../src/plugin.js", import.meta.url).pathname], bundle: true, write: false, format: "cjs", platform: "browser", external: ["obsidian"], logLevel: "silent" });
+  const module = { exports: {} };
+  vm.runInNewContext(outputFiles[0].text, {
+    module, exports: module.exports, TextEncoder, URL, console,
+    require: () => ({ Plugin: class {}, PluginSettingTab: class {}, ItemView: class {}, Modal: class {}, Component: class {} })
+  });
+  const plugin = new module.exports.default();
+  let active = null;
+  const dormant = { controllers: {} };
+  const tab = {
+    conversationId: "conv-ready", state: { messages: [] },
+    controllers: {
+      streamController: { handleStreamChunk() {} },
+      inputController: { sendMessage() {}, handleExecutionEvent() {}, cancelStreaming() {}, handleApprovalRequest() {} },
+      conversationController: { switchTo() {} }
+    }
+  };
+  const claudian = {
+    manifest: { id: "realclaudian", version: "2.2.7" },
+    getConversationList: () => [],
+    getAllViews: () => [{ getTabManager: () => ({ getActiveTab: () => active, tabs: active ? [active, dormant] : [] }) }]
+  };
+  plugin.app = { plugins: { plugins: { realclaudian: claudian } } };
+  const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "compat-refresh", emit() {}, batchMs: 1 });
+  plugin.capture = new SourceCapture({ claudian, normalizer });
+  plugin.adapter = new DesktopAdapter({ claudian, capture: plugin.capture, getActiveTab: () => active });
+  plugin.bridgeRouter = new DesktopBridgeRouter({
+    adapter: plugin.adapter, capture: plugin.capture, getActiveTab: () => active,
+    evaluateCompatibility: evaluateCompatibilitySet, componentSet: COMPATIBILITY_SET
+  });
+  const sockets = [];
+  plugin.companionChannel = new CompanionChannel({
+    router: plugin.bridgeRouter,
+    webSocketFactory: (url, protocol) => { const socket = new FakeSocket(url, protocol); sockets.push(socket); return socket; }
+  });
+  plugin.companionChannel.connect().receive({ type: "auth.accepted" });
+  const binding = { mac_session_id: "session-a", mac_connection_generation: 1, compatibility: COMPATIBILITY_SET };
+  const first = await plugin.bridgeRouter.bind(binding);
+  assert.equal(first.compatibility.reason, "required_capability_missing");
+  active = tab;
+  plugin.refreshRuntime();
+  assert.equal(sockets.length, 2, "controllers becoming ready must renew the authoritative Mac/Relay handshake");
+  assert.equal(plugin.adapter.macSessionId, null, "old binding must be fenced before reconnecting");
+  plugin.refreshRuntime();
+  sockets.at(-1).receive({ type: "auth.accepted" });
+  plugin.refreshRuntime();
+  assert.equal(sockets.length, 2, "waiting for a new bind must not reconnect repeatedly");
+
+  let generation = 2;
+  const ready = await plugin.bridgeRouter.bind({ ...binding, mac_connection_generation: generation });
+  assert.equal(ready.compatibility.writable, true);
+  plugin.refreshRuntime();
+  assert.equal(sockets.length, 2, "an inactive unready tab must not invalidate the active tab");
+  for (const version of ["2.2.8", "2.2.7"]) {
+    claudian.manifest.version = version;
+    const before = sockets.length;
+    plugin.refreshRuntime();
+    plugin.refreshRuntime();
+    assert.equal(sockets.length, before + 1, "both downgrade and recovery must renew the handshake once");
+    sockets.at(-1).receive({ type: "auth.accepted" });
+    const current = await plugin.bridgeRouter.bind({ ...binding, mac_connection_generation: ++generation });
+    assert.equal(current.compatibility.writable, version === "2.2.7");
+  }
+  delete tab.controllers.inputController.handleApprovalRequest;
+  const before = sockets.length;
+  plugin.refreshRuntime();
+  assert.equal(sockets.length, before + 1, "loss of a required method must also fence the old writable binding");
+  plugin.companionChannel.disconnect();
+  plugin.capture.unload();
+});
+
+test("a late bind or invalidation cannot restore the stale compatibility snapshot", async () => {
+  const { router } = fixture();
+  router.adapter = new DesktopAdapter({ claudian: {}, capture: router.capture, getActiveTab: router.getActiveTab });
+  let compatibility = { writable: false, reason: "required_capability_missing" };
+  let releaseOld;
+  router.capture.compatibility = () => compatibility;
+  router.capture.emitBootstrap = async () => await new Promise((resolve) => { releaseOld = resolve; });
+  const binding = { mac_session_id: "session-a", mac_connection_generation: 1 };
+  const oldBind = router.bind(binding);
+  compatibility = { writable: true, reason: "ready" };
+  assert.equal(router.refreshCompatibility(), true);
+  assert.equal(router.refreshCompatibility(), false);
+  router.capture.emitBootstrap = async () => ({});
+  await router.bind({ ...binding, mac_connection_generation: 2 });
+  assert.equal((await router.handle("transport.invalidate", binding)).invalidated, false);
+  releaseOld({});
+  await oldBind;
+  assert.equal(router.binding.mac_connection_generation, 2);
+  assert.equal(router.refreshCompatibility(), false);
+
+  // Fresh Claudian readiness cannot bypass an actual component-set mismatch.
+  router.evaluateCompatibility = () => ({ writable: false, reason: "compatibility_set_mismatch" });
+  const blocked = await router.bind({ ...binding, mac_connection_generation: 3 });
+  assert.equal(blocked.compatibility.reason, "compatibility_set_mismatch");
+  assert.equal(blocked.compatibility.writable, false);
+  assert.equal(router.refreshCompatibility(), false);
 });

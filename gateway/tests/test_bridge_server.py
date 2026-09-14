@@ -65,6 +65,7 @@ async def test_authenticated_loopback_websocket_is_command_and_event_adapter(aio
     })
     accepted = await ws.receive_json()
     assert accepted["type"] == "auth.accepted"
+    await bind_bridge(server, ws)
 
     command_task = asyncio.create_task(server.command("/command", {"delivery_id": "delivery-a"}))
     request = await ws.receive_json()
@@ -140,6 +141,7 @@ async def test_unanswered_bridge_request_times_out_and_releases_pending_state(ai
     })
     assert (await ws.receive_json())["type"] == "auth.accepted"
 
+    await bind_bridge(server, ws)
     pending = asyncio.create_task(server.command("/command", {"delivery_id": "delivery-timeout"}))
     assert (await ws.receive_json())["operation"] == "command.execute"
     with pytest.raises(BridgeServerError, match="bridge_request_timeout"):
@@ -236,35 +238,139 @@ async def test_missing_invalid_and_revoked_credentials_reveal_nothing(aiohttp_cl
     assert rejected == {"type": "auth.rejected", "error_code": "bridge_auth_failed"}
 
 
+async def connect_bridge(client, identity):
+    socket = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
+    challenge = await socket.receive_json()
+    await socket.send_json({
+        "type": "auth.response", "credential_id": identity.credential_id,
+        "nonce": challenge["nonce"], "proof": bridge_auth_proof(identity.secret, challenge["nonce"])
+    })
+    assert (await socket.receive_json())["type"] == "auth.accepted"
+    return socket
+
+
+async def bind_bridge(server, socket, generation=1):
+    binding = asyncio.create_task(server.bind("/bind", "session-a", generation, {"id": "set-a"}))
+    request = await socket.receive_json()
+    assert request["operation"] == "transport.bind"
+    await socket.send_json({"type": "response", "request_id": request["request_id"], "ok": True, "result": {}})
+    await binding
+
+
 @pytest.mark.asyncio
-async def test_plugin_restart_requests_one_keyframe_when_transport_is_already_bound(aiohttp_client):
+async def test_plugin_restart_ends_old_event_pump_instead_of_only_requesting_keyframe(aiohttp_client):
     identities = BridgeIdentityStore()
     identity = identities.issue("bridge-a", "bridge-secret")
-    server = CompanionBridgeServer(host="127.0.0.1", port=27125, identities=identities)
+    server = CompanionBridgeServer(identities=identities)
     client = await aiohttp_client(server.create_app())
-
-    async def connect():
-        socket = await client.ws_connect("/bridge", protocols=[BRIDGE_SUBPROTOCOL])
-        challenge = await socket.receive_json()
-        await socket.send_json({
-            "type": "auth.response", "credential_id": identity.credential_id,
-            "nonce": challenge["nonce"], "proof": bridge_auth_proof(identity.secret, challenge["nonce"])
-        })
-        assert (await socket.receive_json())["type"] == "auth.accepted"
-        return socket
-
-    first = await connect()
-    binding = asyncio.create_task(server.bind("/bind", "session-a", 1, {"id": "set-a"}))
-    request = await first.receive_json()
-    assert request["operation"] == "transport.bind"
-    await first.send_json({"type": "response", "request_id": request["request_id"], "ok": True, "result": {}})
-    await binding
+    first = await connect_bridge(client, identity)
+    await bind_bridge(server, first)
+    old_events = server.events(0)
+    waiting = asyncio.create_task(anext(old_events))
+    await asyncio.sleep(0)
     await first.close()
-
-    second = await connect()
-    recovery = await second.receive_json()
-    assert recovery["operation"] == "keyframe.request"
-    await second.send_json({"type": "response", "request_id": recovery["request_id"], "ok": True, "result": {}})
-    with pytest.raises(asyncio.TimeoutError):
-        await asyncio.wait_for(second.receive_json(), timeout=0.02)
+    with pytest.raises(BridgeServerError, match="bridge_disconnected"):
+        await asyncio.wait_for(waiting, timeout=0.2)
+    with pytest.raises(BridgeServerError, match="bridge_offline|bridge_not_ready"):
+        await server.command("/command", {"delivery_id": "offline"})
+    second = await connect_bridge(client, identity)
+    # No keyframe can substitute for binding the replacement native instance.
+    with pytest.raises(BridgeServerError, match="bridge_not_ready"):
+        await server.command("/command", {"delivery_id": "before-bind"})
+    await bind_bridge(server, second, 2)
     await second.close()
+
+
+@pytest.mark.asyncio
+async def test_replaced_socket_ends_old_pump_without_ending_new_generation(aiohttp_client):
+    identities = BridgeIdentityStore()
+    identity = identities.issue("bridge-a", "bridge-secret")
+    server = CompanionBridgeServer(identities=identities)
+    client = await aiohttp_client(server.create_app())
+    first = await connect_bridge(client, identity)
+    await bind_bridge(server, first)
+    old_generation = server._generation
+    old_events = server.events(0)
+    old_wait = asyncio.create_task(anext(old_events))
+    await asyncio.sleep(0)
+    second = await connect_bridge(client, identity)
+    with pytest.raises(BridgeServerError, match="bridge_disconnected"):
+        await asyncio.wait_for(old_wait, timeout=0.2)
+    await bind_bridge(server, second, 2)
+    new_events = server.events(0)
+    new_wait = asyncio.create_task(anext(new_events))
+    # The first socket's late finally/close must not end the new transport.
+    server._end_transport(old_generation)
+    await first.close()
+    await second.send_json({"type": "event.publish", "event": {
+        "source": {"sequence": 1}, "event_type": "capability.state"
+    }})
+    assert (await asyncio.wait_for(new_wait, timeout=0.2)).event == "semantic"
+    await second.close()
+    await new_events.aclose()
+
+
+@pytest.mark.asyncio
+async def test_native_reload_restarts_real_runner_bind_ack_and_hello_compatibility(aiohttp_client):
+    from types import SimpleNamespace
+    from gateway.mac_companion.stream_pump import AsyncMacCompanion
+    from gateway.protocol.compatibility import COMPATIBILITY_SET
+
+    class RelaySocket:
+        def __init__(self):
+            self.incoming = asyncio.Queue()
+            self.sent = asyncio.Queue()
+        async def receive_json(self):
+            return await self.incoming.get()
+        async def send_json(self, frame):
+            await self.sent.put(frame)
+
+    config = SimpleNamespace(v2_state_path="", outbound_max_events=32, outbound_max_bytes=64000,
+        bridge_command_path="/command", bridge_bind_path="/bind", bridge_invalidate_path="/invalidate")
+    runtime = AsyncMacCompanion(config)
+    identities = BridgeIdentityStore()
+    identity = identities.issue("bridge-a", "bridge-secret")
+    server = CompanionBridgeServer(identities=identities, request_timeout_seconds=0.2)
+    client = await aiohttp_client(server.create_app())
+    first = await connect_bridge(client, identity)
+    relay = RelaySocket()
+    run = asyncio.create_task(runtime.run_connection(relay, server, server))
+    try:
+        request = await first.receive_json()
+        assert request["operation"] == "transport.bind"
+        assert request["payload"]["compatibility"] == COMPATIBILITY_SET
+        await first.send_json({"type": "response", "request_id": request["request_id"], "ok": True,
+            "result": {"compatibility": {"writable": True, "reason": "ready"}}})
+        hello = await asyncio.wait_for(relay.sent.get(), timeout=0.2)
+        assert hello["type"] == "mac.hello"
+        await first.close()
+        with pytest.raises(BridgeServerError, match="bridge_disconnected"):
+            await asyncio.wait_for(run, timeout=0.3)
+
+        second = await connect_bridge(client, identity)
+        next_relay = RelaySocket()
+        run = asyncio.create_task(runtime.run_connection(next_relay, server, server))
+        request = await second.receive_json()
+        assert request["operation"] == "transport.bind"
+        assert request["payload"]["mac_connection_generation"] == hello["mac_connection_generation"] + 1
+        assert next_relay.sent.empty(), "Relay must not announce readiness before the native bind ACK"
+        # The updated native plugin has a new compatibility result. It must
+        # reach the new hello rather than reuse the old writable result.
+        changed = {"writable": False, "reason": "compatibility_set_mismatch"}
+        await second.send_json({"type": "response", "request_id": request["request_id"], "ok": True,
+            "result": {"compatibility": changed}})
+        next_hello = await asyncio.wait_for(next_relay.sent.get(), timeout=0.2)
+        assert next_hello["type"] == "mac.hello"
+        assert next_hello["bridge_compatibility"] == changed
+        assert next_hello["compatibility"] == COMPATIBILITY_SET
+        await next_relay.incoming.put(None)
+        invalidation = await second.receive_json()
+        assert invalidation["operation"] == "transport.invalidate"
+        await second.send_json({"type": "response", "request_id": invalidation["request_id"], "ok": True, "result": {}})
+        await run
+        await second.close()
+    finally:
+        if not run.done():
+            run.cancel()
+        await asyncio.gather(run, return_exceptions=True)
+        await runtime.outbound.close()

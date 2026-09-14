@@ -25,6 +25,20 @@ cd "${release_root}"
 npm run build
 
 cp main.js manifest.json styles.css LICENSE "${release_tmp}/plugin/"
+cp main.js manifest.json styles.css "${release_dist}/"
+python3.12 - "${release_tmp}/plugin" "${release_dist}/claudian-remote-plugin-${release_version}.zip" <<'PY'
+from pathlib import Path
+import sys
+from zipfile import ZipFile, ZipInfo, ZIP_STORED
+
+plugin_root, output = map(Path, sys.argv[1:])
+with ZipFile(output, "w", compression=ZIP_STORED) as archive:
+    for name in ("LICENSE", "main.js", "manifest.json", "styles.css"):
+        entry = ZipInfo(f"claudian-remote/{name}", (2000, 1, 1, 0, 0, 0))
+        entry.create_system = 3
+        entry.external_attr = 0o100644 << 16
+        archive.writestr(entry, (plugin_root / name).read_bytes())
+PY
 cp gateway/mac_companion/__init__.py gateway/mac_companion/bridge_server.py \
   gateway/mac_companion/config.py gateway/mac_companion/relay_ws_client.py \
   gateway/mac_companion/pairing_admin.py \

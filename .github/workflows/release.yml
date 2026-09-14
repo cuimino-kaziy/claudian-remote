@@ -42,6 +42,7 @@ jobs:
           CLAUDIAN_RELEASE_TAG: ${{ github.ref_name }}
         run: npm run release:package
       - name: Sign outside the repository and verify pinned trust root
+        if: ${{ vars.CLAUDIAN_RELEASE_KEY_FINGERPRINT != '' }}
         env:
           CLAUDIAN_RELEASE_SIGNING_KEY_B64: ${{ secrets.CLAUDIAN_RELEASE_SIGNING_KEY_B64 }}
           CLAUDIAN_RELEASE_KEY_FINGERPRINT: ${{ vars.CLAUDIAN_RELEASE_KEY_FINGERPRINT }}
@@ -51,6 +52,12 @@ jobs:
           node release/packaging/verify-release.mjs
           npm run release:kit
       - name: Publish immutable GitHub Release assets
+        if: ${{ vars.CLAUDIAN_RELEASE_KEY_FINGERPRINT != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" dist/*.tar.gz dist/release-manifest.json --verify-tag --prerelease --title "Claudian Remote ${GITHUB_REF_NAME}" --notes "Private beta release. Verify the signed manifest before installation."
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            dist/*.tar.gz dist/*.zip dist/claudian-remote-legacy-retirement-helper-*.py \
+            dist/main.js dist/manifest.json dist/styles.css dist/release-manifest.json \
+            --verify-tag --prerelease --title "Claudian Remote ${GITHUB_REF_NAME}" \
+            --notes "Private beta release. First installation requires the signed beta kit and Mac services. Plugin ZIP and standalone files are convenience copies; verify against the signed plugin archive."

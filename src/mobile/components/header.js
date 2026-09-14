@@ -1,13 +1,14 @@
+import { setIcon } from "obsidian";
 import { button, element } from "../dom.js";
 
 export class MobileHeader {
   constructor(container, { onHistory, onDetails }) {
     this.el = element("header", "claudian-remote-header");
     this.history = button("claudian-remote-icon-button", "历史对话", onHistory);
-    this.history.textContent = "☰";
+    setIcon(this.history, "panel-right");
     this.title = element("div", "claudian-remote-header-title");
     this.status = button("claudian-remote-status-pill", "连接详情", onDetails);
-    this.el.append(this.history, this.title, this.status);
+    this.el.append(this.title, this.status, this.history);
     container.append(this.el);
   }
 

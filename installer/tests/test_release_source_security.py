@@ -38,7 +38,7 @@ def write_release(
     *,
     name=None,
     component="plugin",
-    version="0.2.0-beta.5",
+    version="0.2.0-beta.6.7",
 ):
     release = tmp_path / "release"
     assets = release / "assets"
@@ -109,7 +109,7 @@ def write_release(
             "configuration_schema": SUPPORT_MATRIX["components"][
                 "configuration_schema"
             ],
-            "claudian": {"exact_version": "2.2.6", "supported_versions": ["2.0.4", "2.2.6"]},
+            "claudian": {"exact_version": "2.2.6", "supported_versions": ["2.0.4", "2.2.6", "2.2.7"]},
             "runtime": runtime_distribution(),
             "upgrade_contract": json.loads(
                 json.dumps(SUPPORT_MATRIX["upgrade_contract"])
@@ -223,7 +223,7 @@ def test_installer_accepts_only_the_exact_beta5_signed_upgrade_contract(tmp_path
 
     verified = source(release, trust).verify(plan)
 
-    assert verified == {"verified": True, "release_version": "0.2.0-beta.5"}
+    assert verified == {"verified": True, "release_version": "0.2.0-beta.6.7"}
 
 
 def test_installer_rejects_private_key_material_anywhere_in_manifest(tmp_path):
@@ -247,7 +247,7 @@ def test_installer_rejects_private_key_material_anywhere_in_manifest(tmp_path):
         lambda contract: contract["proof_schema_versions"].__setitem__(
             0, "attacker/proof/v9"
         ),
-        lambda contract: contract["supported_legacy_lineages"][1].update(
+        lambda contract: contract["supported_legacy_lineages"][2].update(
             {"version": "unknown-lineage"}
         ),
         lambda contract: contract["supported_profiles"].append("local_lan"),
@@ -315,7 +315,7 @@ def test_installer_rejects_missing_mixed_or_substituted_beta5_assets(tmp_path):
     helper_path = (
         helper_release
         / "assets"
-        / "claudian-remote-legacy-retirement-helper-0.2.0-beta.5.py"
+        / "claudian-remote-legacy-retirement-helper-0.2.0-beta.6.7.py"
     )
     helper_path.write_text("substituted helper", encoding="utf-8")
     with pytest.raises(ReleaseValidationError, match="release_asset_digest_mismatch"):
@@ -372,7 +372,7 @@ def test_installer_rejects_legacy_runtime_delivery_even_when_manifest_signature_
         source(release, trust).verify(plan)
 
 
-@pytest.mark.parametrize("versions", [None, ["2.2.6"], ["2.0.4", "2.2.6", "2.2.7"]])
+@pytest.mark.parametrize("versions", [None, ["2.2.6"], ["2.0.4", "2.2.6", "2.2.7", "2.2.8"]])
 def test_installer_rejects_changed_claudian_allowlist(tmp_path, versions):
     release, trust, plan = write_release(tmp_path)
     manifest_path = release / "release-manifest.json"

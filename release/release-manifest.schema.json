@@ -35,7 +35,7 @@
       "additionalProperties": false,
       "required": ["id", "plugin", "companion", "relay", "installer", "protocol", "configuration_schema", "claudian", "runtime", "upgrade_contract"],
       "properties": {
-        "id": {"const": "claudian-remote-0.2.0-beta.5"},
+        "id": {"const": "claudian-remote-0.2.0-beta.6.7"},
         "plugin": {
           "type": "object",
           "additionalProperties": false,
@@ -60,7 +60,7 @@
           }
         },
         "configuration_schema": {"type": "integer", "minimum": 1},
-        "claudian": {"type": "object", "additionalProperties": false, "required": ["exact_version", "supported_versions"], "properties": {"exact_version": {"const": "2.2.6"}, "supported_versions": {"const": ["2.0.4", "2.2.6"]}}},
+        "claudian": {"type": "object", "additionalProperties": false, "required": ["exact_version", "supported_versions"], "properties": {"exact_version": {"const": "2.2.6"}, "supported_versions": {"const": ["2.0.4", "2.2.6", "2.2.7"]}}},
         "runtime": {"$ref": "#/$defs/runtimeDistribution"},
         "upgrade_contract": {"$ref": "#/$defs/upgradeContract"}
       }
@@ -123,8 +123,8 @@
         "proof_schema_versions": {"const": ["claudian-remote.legacy-retirement-proof/v1"]},
         "supported_legacy_lineages": {
           "type": "array",
-          "minItems": 2,
-          "maxItems": 2,
+          "minItems": 10,
+          "maxItems": 10,
           "items": {"$ref": "#/$defs/legacyLineage"}
         },
         "supported_profiles": {"const": ["local_tailscale"]},
@@ -162,7 +162,7 @@
       "required": ["plugin_id", "version", "journey"],
       "properties": {
         "plugin_id": {"enum": ["claudian-remote", "whale-agent-bridge"]},
-        "version": {"enum": ["0.2.0-beta.4", "recognized-dogfood-lineage"]},
+        "version": {"enum": ["0.2.0-beta.4", "0.2.0-beta.5", "0.2.0-beta.6", "0.2.0-beta.6.1", "0.2.0-beta.6.2", "0.2.0-beta.6.3", "0.2.0-beta.6.4", "0.2.0-beta.6.5", "0.2.0-beta.6.6", "recognized-dogfood-lineage"]},
         "journey": {"enum": ["current_update", "legacy_upgrade"]}
       }
     },
@@ -183,9 +183,9 @@
       "required": ["pairing_identity_policy", "plugin", "companion", "installer"],
       "properties": {
         "pairing_identity_policy": {"enum": ["preserve", "rotate"]},
-        "plugin": {"const": "0.2.0-beta.5"},
-        "companion": {"const": "0.2.0-beta.5"},
-        "installer": {"const": "0.2.0-beta.5"}
+        "plugin": {"const": "0.2.0-beta.6.7"},
+        "companion": {"const": "0.2.0-beta.6.7"},
+        "installer": {"const": "0.2.0-beta.6.7"}
       }
     },
     "adapterRow": {
@@ -203,7 +203,7 @@
       "required": ["component", "name", "source_path", "delivery", "sha256"],
       "properties": {
         "component": {"const": "legacy_retirement_helper"},
-        "name": {"const": "claudian-remote-legacy-retirement-helper-0.2.0-beta.5.py"},
+        "name": {"const": "claudian-remote-legacy-retirement-helper-0.2.0-beta.6.7.py"},
         "source_path": {"const": "gateway/relay/legacy_retirement.py"},
         "delivery": {"const": "signed_kit_asset"},
         "sha256": {"$ref": "#/$defs/sha256"}

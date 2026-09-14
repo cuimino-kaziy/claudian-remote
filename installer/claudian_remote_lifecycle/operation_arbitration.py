@@ -18,11 +18,13 @@ from .compatibility_decode import (
 from .model import CHECKPOINT_SCHEMA, CHECKPOINT_SCHEMA_V1, LifecyclePhase
 from .migrations import inspect_legacy_retirement_journal
 from .plan import PlanStore
+from .pairing import PairingIdentityTransition
 
 
 _CHECKPOINT_NAME = re.compile(r"(op-[0-9a-f]{32})\.json")
 _TRANSACTION_NAME = re.compile(r"(op-[0-9a-f]{32})\.transaction\.json")
 _MIGRATION_NAME = re.compile(r"(op-[0-9a-f]{32})\.legacy-plugin\.json")
+_PAIRING_NAME = re.compile(r"(op-[0-9a-f]{32})\.pairing-identity\.json")
 _DIAGNOSTIC_DESTINATION_NAME = re.compile(
     r"(op-[0-9a-f]{32})\.diagnostic-destination\.json"
 )
@@ -123,6 +125,7 @@ class OperationArbitrator:
         checkpoint_paths: dict[str, Path] = {}
         transaction_paths: dict[str, Path] = {}
         migration_paths: dict[str, Path] = {}
+        pairing_paths: dict[str, Path] = {}
         diagnostic_destination_paths: dict[str, Path] = {}
         entries = []
         try:
@@ -144,6 +147,7 @@ class OperationArbitrator:
             checkpoint = _CHECKPOINT_NAME.fullmatch(path.name)
             transaction = _TRANSACTION_NAME.fullmatch(path.name)
             migration = _MIGRATION_NAME.fullmatch(path.name)
+            pairing = _PAIRING_NAME.fullmatch(path.name)
             diagnostic_destination = _DIAGNOSTIC_DESTINATION_NAME.fullmatch(
                 path.name
             )
@@ -159,6 +163,10 @@ class OperationArbitrator:
                 if migration.group(1) in migration_paths:
                     return self._invalid()
                 migration_paths[migration.group(1)] = path
+            elif pairing:
+                if pairing.group(1) in pairing_paths:
+                    return self._invalid()
+                pairing_paths[pairing.group(1)] = path
             elif diagnostic_destination:
                 if path.parent != self.state_dir:
                     return self._invalid()
@@ -167,7 +175,7 @@ class OperationArbitrator:
                 return self._invalid()
 
         companion_ids = (
-            transaction_paths.keys() | migration_paths.keys() | diagnostic_destination_paths.keys()
+            transaction_paths.keys() | migration_paths.keys() | pairing_paths.keys() | diagnostic_destination_paths.keys()
         )
         if companion_ids - set(checkpoint_paths):
             return self._invalid()
@@ -190,10 +198,33 @@ class OperationArbitrator:
                         migration_path=migration_paths.get(operation_id),
                         diagnostic_destination_path=diagnostic_destination_paths.get(operation_id),
                     )
-                    classified.append(self._classify_v2(current))
+                    item = self._classify_v2(current)
+                    pairing_path = pairing_paths.get(operation_id)
+                    if pairing_path is not None:
+                        if plan is None or plan.get("journey") != "current_update":
+                            raise ValueError("unexpected_pairing_identity_companion")
+                        # The immutable plan binds both the policy and vault;
+                        # pairing journals must never authorize another plan.
+                        pairing_journal = PairingIdentityTransition.read_journal(
+                            pairing_path, operation_id=operation_id, plan_id=plan_id,
+                            policy=str(plan["pairing_identity_policy"]),
+                        )
+                        if pairing_journal is None or (
+                            item.terminal and pairing_journal["phase"] != current.get("state")
+                        ):
+                            raise ValueError("checkpoint_pairing_terminal_mismatch")
+                        if item.action == "rollback" and pairing_journal["policy"] == "rotate" and (
+                            pairing_journal["revoked_device_ids"]
+                            or pairing_journal["phase"] in {"rotation_committed", "ready"}
+                        ):
+                            # Local compensation cannot restore revoked devices.
+                            raise ValueError("checkpoint_pairing_recovery_mismatch")
+                    classified.append(item)
                 except (OSError, ValueError):
                     return self._invalid()
                 continue
+            if operation_id in pairing_paths:
+                return self._invalid()
             saved_plan = self.state_dir / "plans" / f"{plan_id}.json"
             try:
                 reconciliation = decode_v1_compatibility_set(
@@ -401,6 +432,15 @@ class OperationArbitrator:
             raise ValueError("checkpoint_transaction_terminal_mismatch")
         if checkpoint_state == "rolled_back" and transaction_phase != "rolled_back":
             raise ValueError("checkpoint_transaction_terminal_mismatch")
+
+        if transaction["activation_started"]:
+            # SIGINT can leave the outer preparation checkpoint behind the
+            # durable transaction. Cancellation cannot undo begun activation.
+            current["cancellation_available"] = False
+            current["next_actions"] = [
+                item for item in current["next_actions"]
+                if item.get("command") != "cancel"
+            ]
 
         if (
             current.get("journey") == "fresh_install"

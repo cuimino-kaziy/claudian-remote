@@ -1,4 +1,46 @@
-# Claudian Remote 内测安装与讲解手册（Agent 入口）
+# Claudian Remote 安装与连接手册
+
+## 普通用户从这里开始
+
+手机上的 Claudian Remote 是 Mac 上 Claudian 的遥控界面。首次使用需要在 **Mac 安装后台服务**，再给 **手机配对**；仅启用手机插件还不能连接。
+
+| 在哪里操作 | 需要准备什么 | 操作结果 |
+|---|---|---|
+| Mac | Obsidian 1.12.3 或更新版本、Claudian 2.0.4 / 2.2.6 / 2.2.7、能正常对话的仓库；Claudian 2.2.7 要求 Obsidian 1.13.0 或更新版本 | 安装包检查并绑定这一个仓库，启动后台服务 |
+| iPhone / iPad | Obsidian、同一个已同步仓库、已启用 Claudian Remote | 可以打开远程页面和连接设置 |
+| Tailscale 路线 | 两台设备安装 Tailscale、同一账号、已连接 | Mac 提供以 `https://` 开头的私有连接地址 |
+| 已部署 VPS 路线 | 已部署的服务器和 HTTPS 域名、已配置好的 Mac 后台服务 | 部署者提供以 `https://` 开头的服务器地址 |
+
+**下载：** 打开维护者提供的 [GitHub Release](https://github.com/cuimino-kaziy/claudian-remote/releases)，选择约定版本，下载 `claudian-remote-beta-kit-<version>.tar.gz`，不要下载 “Source code”。在 Mac 先按维护者独立交付的可信校验说明验证 Kit，成功后再解压到新目录；首次安装使用完整 Kit，更新沿用现有安装流程。当前仍为内测分发，Obsidian 市场上架是后续发布步骤。
+
+发布附件还提供 `claudian-remote-plugin-<version>.zip` 和独立的 `main.js`、`manifest.json`、`styles.css`。ZIP 解压后为 `claudian-remote/` 文件夹，只包含插件和许可证，不含 Mac 服务。它们是签名插件归档的便捷副本，当前内测仍使用完整 Kit 安装和更新。此候选版已完成产物生成配置，是否已上传以实际 GitHub Release 为准。
+
+**没有服务器：选择 Tailscale。** 两台设备从官方渠道安装 Tailscale，登录同一个账号并打开连接。随后在 Mac 完成下面的安装流程；过程中按提示启用 MagicDNS / HTTPS。最后复制 Mac“连接设置”显示的地址，例如 `https://你的Mac名称.你的网络.ts.net`。不需要填写 Tailscale 的 IP，也不需要开启公开分享。
+
+**已有 VPS：** 先看 [VPS 环境、部署与字段说明](docs/self-host-vps.md)。当前 Kit 尚未开放 VPS 自动部署；已测试的服务器连接可以继续使用，选择 VPS 引导不会替你迁移配置。服务器和 Mac 必须已指向同一套连接，不能仅在手机填一个网址就完成服务器安装。
+
+**手机应该填什么：**
+
+| 手机字段 | 填写内容 | 从哪里获得 |
+|---|---|---|
+| 连接服务器地址（Relay） | 完整 HTTPS 地址，保留 `https://` | 复制 Mac 的连接设置；VPS 使用部署者给出的域名地址 |
+| 8 位配对码 | Mac 新生成的一次性短码 | Mac → Claudian Remote 连接设置 → 添加移动设备 |
+| 其他密码 / Token / API Key | 不需要填写 | 配对码验证通过后自动保存到手机本机 |
+
+Relay 就是帮助手机和 Mac 传递消息的服务。地址不是 SSH 登录地址、模型接口或配对码。若在手机打开 **Mac 生成的配对链接**，连接地址会自动带入，可省去手工填写。
+
+**完成配对：**
+
+1. Mac 打开目标仓库和 Claudian，再打开 Claudian Remote 设置，点击“添加移动设备”。
+2. 手机打开远程页面 → 历史栏底部“设置”。用 Mac 生成的链接打开 Obsidian，或保存连接地址后输入 8 位配对码并点“配对”。两端需要使用同一个已同步仓库。
+3. 配对码验证通过后，手机会自动完成配对并连接，无需回到 Mac 批准。
+4. 手机打开远程页面，显示“已就绪”后发送一条测试消息。顶部连接状态可以打开详情；若 Mac 离线，先打开 Mac 上的 Obsidian / Claudian 和后台服务。
+
+配对码 5 分钟内有效，只能使用一次；失效后在 Mac 重新生成。不要公开分享配对码或链接。以后进入设置只需点历史栏底部的“设置”，不必逐层查找 Obsidian 设置。
+
+配对成功后，设备凭据长期保存在手机本机；断网、重启和同一套连接的普通升级无需重新配对。换手机、清除本机数据、撤销设备或更换服务器身份后才需要重新配对。短时配对码失效不会影响已经配对的设备。
+
+下面是安装 Agent / 维护者的操作契约。普通用户可以把本手册与下载的 Kit 交给安装助手，助手会先检查环境，再按真实检查结果继续。
 
 ## 先向用户说明这是什么
 
@@ -79,9 +121,9 @@ Agent 必须先读取 `state`、`code` 和 `data.snapshot`，再决定下一步�
 ## 1. 对话规则
 
 1. 一次只问一个尚未解决的问题；已记录在 lifecycle checkpoint 的答案不得重复询问。
-2. Claudian 必须为 `2.0.4` 或 `2.2.6`（推荐）。不支持的版本只允许 inspect、status、diagnose、
+2. Claudian 必须为 `2.0.4`、`2.2.6` 或 `2.2.7`。不支持的版本只允许 inspect、status、diagnose、
    rollback、uninstall 等安全操作，禁止安装、更新或 Remote 写操作。
-   2.2.6 的“立即插话”取决于当前提供方能力；Claude 不支持插话，但仍可普通发送和排队。
+   2.2.6 / 2.2.7 的“立即插话”取决于当前提供方能力；Claude 不支持插话，但仍可普通发送和排队。
 3. 若检查到多个 Vault，只问“要为哪个 Vault 安装？”；不得猜测。
 4. 不询问用户是否有 Mac、iPhone、VPS 或 NAS。直接默认 `local_tailscale`；只有用户主动提出
    自有 VPS 时才解释 `remote_vps`，并明确当前内测尚未开放该自动部署路径。
@@ -184,7 +226,7 @@ operation 的 `resume`，lifecycle 会原地刷新门禁，不会创建新 opera
 | `vault_selection_required` | 用户明确选择一个 Vault | selected Vault identity probe |
 | `vps_host_authorization_required` | 用户核对并接受主机指纹 | pinned host-key probe |
 | `trusted_lan_consent_required` | 用户明确同意受限 LAN 暴露 | recorded consent + network probe |
-| `pairing_approval_required` | 用户在 Mac 核对短码并批准设备 | active scoped credential probe |
+| `pairing_approval_required` | 用户在手机输入 Mac 显示的短码，等待自动配对完成（保留旧 gate 名称） | active scoped credential probe |
 | `pairing_admin_bootstrap_required` | 等待已签名 lifecycle 建立 OS 安全存储和 Companion 配置路由 | Companion secure-provisioning route probe |
 | `desktop_plugin_bootstrap_required` | 在 Obsidian 打开或重新加载已选 Vault，等待 Remote 插件加载 | 选定 Vault 的插件向 Companion Bridge 完成认证 |
 | `obsidian_close_for_migration_required` | 旧插件仍需迁移时，完全退出 Obsidian | Obsidian process closed probe |
@@ -216,7 +258,7 @@ Agent 会话丢失后先运行：
 |---|---|---|
 | `inspection_ready` | 支持的只读快照已产生 | 单 Vault 直接生成 Tailscale plan；多 Vault 只询问目标 Vault |
 | `unsupported_desktop_os` | 非本内测支持的 macOS | 停止；仅 diagnose |
-| `unsupported_claudian_version` | Claudian 不是 2.0.4 或 2.2.6 | 提示安装受支持版本后重新 inspect |
+| `unsupported_claudian_version` | Claudian 不是 2.0.4、2.2.6 或 2.2.7 | 提示安装受支持版本后重新 inspect |
 | `claudian_not_enabled` | Claudian 未启用 | 让用户在 Obsidian 启用后重新 inspect |
 | `vault_not_found` | 未发现 Vault | 让用户在 Obsidian 打开目标 Vault 后重新 inspect |
 | `vault_selection_required` | 多 Vault 有歧义 | 一次只问用户选择哪个 Vault，再 plan |
@@ -243,7 +285,7 @@ Agent 会话丢失后先运行：
 | `manifest_signature_unverified` | bootstrap 验签回执无效 | 停止；不得安装或改用源码 |
 | `installation_ready` | 本地 Relay、Companion、插件与 Tailscale Serve 均通过验证 | 执行 verify，再进行真机配对验收 |
 | `verification_ready` | 已安装集合仍满足本地健康检查 | 进入真机验收或正常使用 |
-| `pairing_approval_required` | 本地运行时就绪，尚无已批准手机 | 完成短码核对并用同一 operation_id resume |
+| `pairing_approval_required` | 本地运行时就绪，尚无已配对手机；旧名称不代表需要 Mac 批准 | 在手机输入短码，配对完成后用同一 operation_id resume |
 | `desktop_plugin_bootstrap_required` | 运行时已启动，但自动打开已选 Vault 后插件仍未向 Companion 认证 | 检查 Obsidian 登录/插件启用状态，再用同一 operation_id resume |
 | `post_activation_verification_failed` | 激活后健康检查失败并已回滚 | 保持 rolled_back；检查 status 后重新 plan |
 | `installation_compensation_failed` | 自动补偿未能证明完成，operation 处于 recovery_required | 先 status；只执行返回的 allowlisted recovery_action。若为 manual_recovery_required，停止并联系维护者，不猜测 resume/rollback |

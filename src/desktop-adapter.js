@@ -1,21 +1,21 @@
 import { canonicalJson, safeText } from "./stream-normalizer.js";
-import { canSubmitToClaudian, claudianManifest } from "./protocol/compatibility.js";
+import { canSubmitToClaudian, claudianManifest, usesNativeExecution } from "./protocol/compatibility.js";
 
 function outcome(status, command, extra = {}) {
   return { delivery_id: command?.delivery_id || null, status, ...extra };
 }
 
 function currentConversationId(tab) {
-  return tab?.conversationId || tab?.state?.currentConversationId || null;
+  return tab?.conversationId || tab?.state?.currentConversationId || (tab ? "conversation-pending" : null);
 }
 
 function historyItems(claudian) {
   return (claudian?.getConversationList?.() || []).map((item) => ({
     conversation_id: String(item?.id || ""),
     title: safeText(item?.title || ""),
-    updated_at: item?.updatedAt || item?.lastResponseAt || null,
+    updated_at: item?.lastActivityAt || item?.updatedAt || item?.lastResponseAt || null,
     message_count: Math.max(0, Number(item?.messageCount) || 0),
-    archived: item?.archived === true
+    archived: item?.isArchived === true
   })).filter((item) => item.conversation_id);
 }
 
@@ -26,10 +26,8 @@ export function historyCapabilities(claudian, tab) {
     history_select: typeof conversation?.switchTo === "function",
     history_new: typeof claudian?.createConversation === "function" && typeof conversation?.switchTo === "function",
     history_rename: typeof claudian?.renameConversation === "function",
-    // Supported Claudian versions have permanent delete but no archive API. Never map
-    // archive to delete or to updateConversation: its persisted metadata
-    // allowlist does not retain an archived marker.
-    history_archive: typeof claudian?.archiveConversation === "function"
+    history_archive: typeof claudian?.setConversationArchived === "function"
+      && typeof claudian?.getAllViews === "function"
   };
 }
 
@@ -84,7 +82,7 @@ export class DesktopAdapter {
     const adapter = this;
     const wrapped = async function remoteApproval(toolName, toolInput, description, approvalOptions) {
       const approvalId = `approval-${adapter.clock()}-${Math.random().toString(36).slice(2, 8)}`;
-      const defaultOptions = claudianManifest(adapter.claudian).version === "2.2.6" ? [
+      const defaultOptions = usesNativeExecution(claudianManifest(adapter.claudian).version) ? [
         { label: "Allow once", value: "allow", decision: "allow" },
         { label: "Deny", value: "deny", decision: "deny" }
       ] : [
@@ -206,7 +204,7 @@ export class DesktopAdapter {
         return outcome("rejected", command, { error_code: "claudian_steer_busy" });
       }
       coordinator.steer = wrapped;
-      // Native 2.2.6 clones this call's queue synchronously, before its first
+      // Native execution clones this call's queue synchronously, before its first
       // await. Observe that object only; concurrent desktop Steer is unrelated.
       const captureClone = function (...args) {
         const cloned = clone.apply(this, args);
@@ -277,7 +275,7 @@ export class DesktopAdapter {
           result = outcome("already_resolved", command);
         } else if (!canSubmitToClaudian(this.claudian, tab) || input.canSteerQueuedMessage?.() === false) {
           result = outcome("rejected", command, { error_code: "claudian_steer_busy" });
-        } else if (claudianManifest(this.claudian).version === "2.2.6") {
+        } else if (usesNativeExecution(claudianManifest(this.claudian).version)) {
           result = await this.steerWithNativeReceipt(command, tab, input);
         } else {
           if (command.payload.text) await input.sendMessage({ content: command.payload.text });
@@ -305,6 +303,7 @@ export class DesktopAdapter {
         else {
           const selectedId = String(command.payload.conversation_id || "");
           await conversation.switchTo(selectedId);
+          if (currentConversationId(tab) === selectedId) await this.capture.emitBootstrap?.(tab);
           result = currentConversationId(tab) === selectedId
             ? historyReceipt(command, this.claudian, tab)
             : outcome("rejected", command, { error_code: "history_select_not_confirmed" });
@@ -321,6 +320,7 @@ export class DesktopAdapter {
           if (!createdId) result = outcome("rejected", command, { error_code: "history_new_not_confirmed" });
           else {
             await conversation.switchTo(createdId);
+            if (currentConversationId(tab) === createdId) await this.capture.emitBootstrap?.(tab);
             result = currentConversationId(tab) === createdId
               ? historyReceipt(command, this.claudian, tab, { created_conversation_id: createdId })
               : outcome("rejected", command, { error_code: "history_new_not_confirmed" });
@@ -347,15 +347,56 @@ export class DesktopAdapter {
         break;
       }
       case "history.archive": {
-        if (typeof this.claudian?.archiveConversation !== "function") {
+        if (!historyCapabilities(this.claudian, tab).history_archive) {
           result = outcome("capability_missing", command, { capability: "history_archive" });
           break;
         }
         const conversationId = String(command.payload.conversation_id || "");
-        await this.claudian.archiveConversation(conversationId);
+        const archived = Object.hasOwn(command.payload, "archived") ? command.payload.archived : true;
+        if (typeof archived !== "boolean" || !historyItems(this.claudian).some((item) => item.conversation_id === conversationId)) {
+          result = outcome("rejected", command, { error_code: "invalid_history_archive" });
+          break;
+        }
+        if (archived) {
+          // Match Claudian's archive flow: close every view of the session without
+          // forcing a running turn to stop, then persist its archive marker.
+          const managers = new Set(this.claudian.getAllViews().map((view) => view?.getTabManager?.()).filter(Boolean));
+          const openTabs = [];
+          for (const manager of managers) {
+            if (typeof manager.getAllTabs !== "function") {
+              result = outcome("capability_missing", command, { capability: "history_archive" });
+              break;
+            }
+            for (const openTab of manager.getAllTabs()) {
+              if (currentConversationId(openTab) === conversationId) openTabs.push({ manager, tab: openTab });
+            }
+          }
+          if (result) break;
+          if (openTabs.some(({ tab: openTab }) => openTab.state?.isStreaming)) {
+            result = outcome("rejected", command, { error_code: "streaming_history_archive_forbidden" });
+            break;
+          }
+          if ((currentConversationId(tab) === conversationId && !openTabs.some(({ tab: openTab }) => openTab === tab))
+            || openTabs.some(({ manager }) => typeof manager.closeTab !== "function")) {
+            result = outcome("capability_missing", command, { capability: "history_archive" });
+            break;
+          }
+          for (const { manager, tab: openTab } of openTabs) {
+            if (!await manager.closeTab(openTab.id)) {
+              result = outcome("rejected", command, { error_code: "history_archive_close_failed" });
+              break;
+            }
+          }
+          if (result) break;
+        }
+        await this.claudian.setConversationArchived(conversationId, archived);
         const authoritative = historyItems(this.claudian).find((item) => item.conversation_id === conversationId);
-        result = !authoritative || authoritative.archived
-          ? historyReceipt(command, this.claudian, tab, { archived_conversation_id: conversationId })
+        const activeTab = this.getActiveTab();
+        if (activeTab && currentConversationId(activeTab) !== currentConversationId(tab)) {
+          await this.capture.emitBootstrap?.(activeTab);
+        }
+        result = authoritative?.archived === archived
+          ? historyReceipt(command, this.claudian, activeTab, { archived_conversation_id: conversationId, archived })
           : outcome("rejected", command, { error_code: "history_archive_not_confirmed" });
         break;
       }

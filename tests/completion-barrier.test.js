@@ -16,7 +16,7 @@ function supportedClaudian(tab, value = {}) {
   return { manifest: { id: "realclaudian", version: "2.2.6" }, ...value };
 }
 
-test("Claudian 2.2.6 ignored submissions produce no remote turn or completion", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} ignored submissions produce no remote turn or completion`, async () => {
   for (const blocked of ["paused", "missing_session", "isCreatingConversation", "isSwitchingConversation", "isRewinding"]) {
     const events = [];
     let calls = 0;
@@ -29,6 +29,7 @@ test("Claudian 2.2.6 ignored submissions produce no remote turn or completion", 
       }
     };
     const claudian = supportedClaudian(tab, { getConversationList: () => [] });
+    claudian.manifest.version = version;
     if (blocked === "paused") tab.session.acceptsIntents = false;
     else if (blocked === "missing_session") delete tab.session;
     else tab.state[blocked] = true;
@@ -43,12 +44,13 @@ test("Claudian 2.2.6 ignored submissions produce no remote turn or completion", 
   }
 });
 
+for (const version of ["2.2.6", "2.2.7"])
 for (const [nativeType, terminalType, errorCode] of [
   ["execution_error", "turn.failed", "provider_error"],
   ["cancelled", "turn.interrupted"],
   ["turn_completed", "turn.completed"],
   [null, "turn.failed", "completion_unconfirmed"]
-]) test(`2.2.6 ${nativeType || "missing terminal"} stays truthful after save`, async () => {
+]) test(`${version} ${nativeType || "missing terminal"} stays truthful after save`, async () => {
   const events = [];
   const nativeCalls = [];
   let releaseSave;
@@ -74,6 +76,7 @@ for (const [nativeType, terminalType, errorCode] of [
     }
   };
   const claudian = supportedClaudian(tab, { getConversationList: () => [] });
+  claudian.manifest.version = version;
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "native-terminal", emit: (event) => events.push(event) });
   const capture = new SourceCapture({ claudian, normalizer });
   const input = tab.controllers.inputController;
@@ -110,7 +113,7 @@ for (const [nativeType, terminalType, errorCode] of [
   }
 });
 
-test("2.2.6 admits before yielding and a queued send preserves native terminal evidence", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} admits before yielding and a queued send preserves native terminal evidence`, async () => {
   const events = [];
   let releaseStart;
   let releaseSave;
@@ -137,6 +140,7 @@ test("2.2.6 admits before yielding and a queued send preserves native terminal e
     }
   };
   const claudian = supportedClaudian(tab, { getConversationList: () => [] });
+  claudian.manifest.version = version;
   const normalizer = new SemanticStreamNormalizer({
     sourceInstanceId: "admission-order",
     emit: (event) => {
@@ -170,7 +174,7 @@ test("2.2.6 admits before yielding and a queued send preserves native terminal e
   }
 });
 
-test("native auto-continuation keeps the shared turn running until the latest save barrier", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} native auto-continuation keeps the shared turn running until the latest save barrier`, async () => {
   const events = [];
   let releaseContinuation;
   let continuation;
@@ -196,6 +200,7 @@ test("native auto-continuation keeps the shared turn running until the latest sa
     }
   };
   const claudian = supportedClaudian(tab, { getConversationList: () => [] });
+  claudian.manifest.version = version;
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "continuation", emit: (event) => events.push(event) });
   const capture = new SourceCapture({ claudian, normalizer });
   capture.instrument(tab);
@@ -214,7 +219,7 @@ test("native auto-continuation keeps the shared turn running until the latest sa
   }
 });
 
-for (const version of ["2.0.4", "2.2.6"]) test(`${version} provider done is observable but completion waits for sendMessage save barrier`, async () => {
+for (const version of ["2.0.4", "2.2.6", "2.2.7"]) test(`${version} provider done is observable but completion waits for sendMessage save barrier`, async () => {
   const events = [];
   let releaseSave;
   const saved = new Promise((resolve) => { releaseSave = resolve; });
@@ -226,7 +231,7 @@ for (const version of ["2.0.4", "2.2.6"]) test(`${version} provider done is obse
       streamController: { async handleStreamChunk() {} },
       inputController: {
         async sendMessage() {
-          if (version === "2.2.6") await this.handleExecutionEvent({ type: "turn_completed" });
+          if (version !== "2.0.4") await this.handleExecutionEvent({ type: "turn_completed" });
           await saved;
         },
         getActiveCapabilities: () => ({})
@@ -300,7 +305,7 @@ test("legacy 2.0.4 error chunk converges to one failed terminal without a sessio
   assert.equal(JSON.stringify(events).includes("private provider failure"), false);
 });
 
-test("late repeated stop overrides native completion before the save barrier", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} late repeated stop overrides native completion before the save barrier`, async () => {
   const events = [];
   let release;
   const cancelled = new Promise((resolve) => { release = resolve; });
@@ -330,6 +335,7 @@ test("late repeated stop overrides native completion before the save barrier", a
     }
   };
   const claudian = supportedClaudian(tab, { getConversationSync: () => ({ title: "Demo", messages: [message] }), getConversationList: () => [] });
+  claudian.manifest.version = version;
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
   const capture = new SourceCapture({ claudian, normalizer });
   capture.instrument(tab);
@@ -373,7 +379,7 @@ test("late repeated stop overrides native completion before the save barrier", a
   assert.equal(recoveryPage.payload.projection.turns[0].status, "interrupted");
 });
 
-test("completion keyframe carries the observed mobile-safe operation, approvals, and artifacts", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} completion keyframe carries the observed mobile-safe operation, approvals, and artifacts`, async () => {
   const events = [];
   let release;
   const saved = new Promise((resolve) => { release = resolve; });
@@ -397,6 +403,7 @@ test("completion keyframe carries the observed mobile-safe operation, approvals,
     }
   };
   const claudian = supportedClaudian(tab, { getConversationSync: () => ({ title: "Stateful", messages: [message] }), getConversationList: () => [] });
+  claudian.manifest.version = version;
   const normalizer = new SemanticStreamNormalizer({ sourceInstanceId: "bridge-test", emit: (event) => events.push(event) });
   const capture = new SourceCapture({ claudian, normalizer });
   capture.instrument(tab);

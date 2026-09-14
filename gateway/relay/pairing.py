@@ -288,6 +288,11 @@ class PairingStore:
         return count >= self.max_attempts
 
     def _invalid_claim_attempt(self, row: sqlite3.Row, requester: str) -> None:
+        if row["status"] == "attempts_exhausted":
+            raise PairingError("attempt_limit_exceeded")
+        if row["status"] != "created":
+            # Bad replays must not erase a consumed claim's delivery state.
+            self._invalid_attempt(requester)
         attempts = int(row["attempts"]) + 1
         if attempts >= self.max_attempts:
             self.connection.execute(
@@ -354,23 +359,14 @@ class PairingStore:
                 raise PairingError("claim_expired")
             self._check_profile(row, installation_id, vault_id, endpoint_audience)
             redemption_handle = secrets.token_urlsafe(32)
-            self.connection.execute("BEGIN IMMEDIATE")
-            try:
-                updated = self.connection.execute(
-                    """UPDATE pairing_claims
-                       SET status='pending_approval', short_digest=NULL,
-                           redemption_digest=?, device_id=?, device_name=?
-                       WHERE claim_id=? AND status='created'""",
-                    (_digest(redemption_handle), device_id, device_name, row["claim_id"]),
-                )
-                if updated.rowcount != 1:
-                    raise PairingError("claim_replayed")
-                self.connection.execute("COMMIT")
-            except Exception:
-                self.connection.execute("ROLLBACK")
-                raise
+            # The Mac-created one-time code authorizes this device. Consume it
+            # and create the credential together; no second Mac approval.
+            self._issue_locked(
+                row, device_id=device_id, device_name=device_name,
+                redemption_digest=_digest(redemption_handle),
+            )
             self._request_attempts.pop(_digest(str(requester or "unknown")), None)
-            return PendingClaim(row["claim_id"], "pending_approval", float(row["expires_at"]), redemption_handle)
+            return PendingClaim(row["claim_id"], "approved", float(row["expires_at"]), redemption_handle)
 
     async def approve(
         self,
@@ -398,53 +394,64 @@ class PairingStore:
             self._check_profile(row, installation_id, vault_id, endpoint_audience)
             if not secrets.compare_digest(row["device_id"], str(expected_device_id)):
                 raise PairingError("wrong_device")
-            credential = secrets.token_urlsafe(32)
-            credential_id = "device-credential-" + uuid.uuid4().hex
+            return self._issue_locked(
+                row, device_id=row["device_id"], device_name=row["device_name"],
+                redemption_digest=row["redemption_digest"],
+            )
+
+    def _issue_locked(
+        self, row: sqlite3.Row, *, device_id: str, device_name: str, redemption_digest: str,
+    ) -> ApprovedClaim:
+        """Caller holds the store lock and has validated the claim and profile."""
+        credential = secrets.token_urlsafe(32)
+        credential_id = "device-credential-" + uuid.uuid4().hex
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
             generation_row = self.connection.execute(
                 "SELECT COALESCE(MAX(generation), 0) AS value FROM device_credentials WHERE device_id=?",
-                (row["device_id"],),
+                (device_id,),
             ).fetchone()
             generation = int(generation_row["value"]) + 1
-            now = self.clock()
-            self.connection.execute("BEGIN IMMEDIATE")
-            try:
-                self.connection.execute(
-                    """INSERT INTO device_credentials
-                       (credential_id, verifier_digest, name, role, pairing_id,
-                        installation_id, vault_id, device_id, endpoint_audience,
-                        generation, created_at, revoked_at, revoke_reason)
-                       VALUES (?, ?, ?, 'mobile', ?, ?, ?, ?, ?, ?, ?, NULL, '')""",
-                    (
-                        credential_id,
-                        _digest(credential),
-                        row["device_name"],
-                        row["pairing_id"],
-                        row["installation_id"],
-                        row["vault_id"],
-                        row["device_id"],
-                        row["endpoint_audience"],
-                        generation,
-                        now,
-                    ),
-                )
-                updated = self.connection.execute(
-                    "UPDATE pairing_claims SET status='approved', credential_id=? WHERE claim_id=? AND status='pending_approval'",
-                    (credential_id, row["claim_id"]),
-                )
-                if updated.rowcount != 1:
-                    raise PairingError("claim_replayed")
-                self.connection.execute("COMMIT")
-            except Exception:
-                self.connection.execute("ROLLBACK")
-                raise
-            record_row = self.connection.execute(
-                "SELECT * FROM device_credentials WHERE credential_id=?", (credential_id,)
-            ).fetchone()
-            self.authenticator.register_digest(self._record(record_row))
-            self._issuance[row["claim_id"]] = IssuedCredential(
-                credential_id, row["device_id"], generation, credential
+            self.connection.execute(
+                """INSERT INTO device_credentials
+                   (credential_id, verifier_digest, name, role, pairing_id,
+                    installation_id, vault_id, device_id, endpoint_audience,
+                    generation, created_at, revoked_at, revoke_reason)
+                   VALUES (?, ?, ?, 'mobile', ?, ?, ?, ?, ?, ?, ?, NULL, '')""",
+                (
+                    credential_id,
+                    _digest(credential),
+                    device_name,
+                    row["pairing_id"],
+                    row["installation_id"],
+                    row["vault_id"],
+                    device_id,
+                    row["endpoint_audience"],
+                    generation,
+                    self.clock(),
+                ),
             )
-            return ApprovedClaim(row["claim_id"], "approved", credential_id, row["device_id"])
+            updated = self.connection.execute(
+                """UPDATE pairing_claims
+                   SET status='approved', credential_id=?, short_digest=NULL,
+                       redemption_digest=?, device_id=?, device_name=?
+                   WHERE claim_id=? AND status=?""",
+                (credential_id, redemption_digest, device_id, device_name, row["claim_id"], row["status"]),
+            )
+            if updated.rowcount != 1:
+                raise PairingError("claim_replayed")
+            self.connection.execute("COMMIT")
+        except Exception:
+            self.connection.execute("ROLLBACK")
+            raise
+        record_row = self.connection.execute(
+            "SELECT * FROM device_credentials WHERE credential_id=?", (credential_id,)
+        ).fetchone()
+        self.authenticator.register_digest(self._record(record_row))
+        self._issuance[row["claim_id"]] = IssuedCredential(
+            credential_id, device_id, generation, credential
+        )
+        return ApprovedClaim(row["claim_id"], "approved", credential_id, device_id)
 
     async def complete(self, claim_id: str, redemption_handle: str, *, device_id: str) -> IssuedCredential:
         async with self._lock:

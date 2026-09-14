@@ -70,7 +70,7 @@ COMMAND_FIELDS: Dict[str, Set[str]] = {
     "history.select": {"conversation_id"},
     "history.new": set(),
     "history.rename": {"conversation_id", "title"},
-    "history.archive": {"conversation_id"},
+    "history.archive": {"conversation_id", "archived"},
     "keyframe.request": {"reason"},
     "upload.cancel": {"upload_id"},
 }
@@ -296,6 +296,8 @@ def validate_command(command: Mapping[str, Any], now: Optional[datetime] = None)
         title = _require_nonempty_string(payload.get("title"), "missing_history_title")
         if len(title) > 200:
             raise ProtocolError("history_title_too_long")
+    if command_type == "history.archive" and "archived" in payload and not isinstance(payload["archived"], bool):
+        raise ProtocolError("invalid_history_archive")
     if command_type == "message.submit":
         text = payload.get("text")
         if not isinstance(text, str):

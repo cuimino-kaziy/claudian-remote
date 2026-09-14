@@ -25,7 +25,7 @@ function setup() {
     fetchImpl: async (url, options) => {
       calls.push({ url, options, body: JSON.parse(options.body) });
       if (url.endsWith("/redeem")) {
-        return response(202, { claim_id: "claim-a", redemption_handle: "redemption-secret", expires_at: 100 });
+        return response(202, { claim_id: "claim-a", status: "approved", redemption_handle: "redemption-secret", expires_at: 100 });
       }
       return response(200, {
         credential_id: "credential-a",
@@ -45,7 +45,7 @@ function setup() {
   return { controller, deviceStore, calls };
 }
 
-test("Obsidian deep link and manual short code use the same approval flow without camera APIs", async () => {
+test("deep link and short code collect credentials immediately without a Mac approval request", async () => {
   const link = "obsidian://claudian-remote?claim_id=claim-a&claim_token=temporary-claim&relay_base_url=https%3A%2F%2Frelay.example.invalid&installation_id=installation-a&vault_id=vault-a&endpoint_audience=claudian-remote%3Alocal_tailscale%3Ainstallation-a";
   const parsed = parsePairingDeepLink(link);
   assert.deepEqual(parsed, {
@@ -60,16 +60,22 @@ test("Obsidian deep link and manual short code use the same approval flow withou
   const deep = setup();
   await deep.controller.acceptDeepLink(link);
   assert.equal(deep.calls[0].body.claim_token, "temporary-claim");
-  assert.deepEqual(deep.controller.diagnosticSummary(), { status: "pending_approval" });
+  assert.deepEqual(deep.controller.diagnosticSummary(), { status: "approved" });
   assert.doesNotMatch(JSON.stringify(deep.controller), /temporary-claim/);
+  assert.equal((await deep.controller.pollUntilComplete({ maxAttempts: 1 })).paired, true);
 
   const manual = setup();
   await manual.controller.acceptShortCode("abcd-2345");
   assert.equal(manual.calls[0].body.short_code, "ABCD-2345");
   assert.equal("getUserMedia" in manual.controller, false);
+  assert.equal((await manual.controller.pollUntilComplete({ maxAttempts: 1 })).paired, true);
+  for (const { calls } of [deep, manual]) {
+    assert.equal(calls.length, 2);
+    assert.ok(calls[1].url.endsWith("/complete"));
+  }
 });
 
-test("a fresh phone bootstraps its device-local profile from the deep link through Obsidian requestUrl", async () => {
+test("a fresh phone also supports pending claims on a legacy Relay through Obsidian requestUrl", async () => {
   const calls = [];
   const deviceStore = new DeviceStore({ storage: storage(), namespace: "fresh-phone" });
   let completion = 0;

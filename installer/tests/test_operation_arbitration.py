@@ -461,6 +461,97 @@ def test_journal_without_lifecycle_directory_is_not_clear(tmp_path):
     assert result.reason_code == "prior_operation_artifact_invalid"
 
 
+def _pairing_operation(tmp_path, *, policy="preserve", phase="ready", terminal=True):
+    lifecycle, journals = tmp_path / "lifecycle", tmp_path / "state"
+    journals.mkdir()
+    _plan, checkpoint = _create_v2_operation(
+        lifecycle, journey="current_update", plan_pairing=policy,
+        checkpoint_pairing=PairingIdentityPolicy(policy),
+    )
+    completed = ("staging", "secure_provisioning", "plugin_activation", "launchd", "tailscale_serve", "verified", "paired")
+    if phase == "rolled_back":
+        completed = ("staging",)
+    if terminal:
+        _write_transaction(journals, checkpoint, phase=phase, completed=completed,
+            activation_started=phase == "ready", plugin_activated=phase == "ready")
+        CheckpointStore(lifecycle).update(checkpoint["operation_id"],
+            state=phase, phase="complete" if phase == "ready" else "rollback",
+            completed_phases=list(completed), recovery_policy=RecoveryPolicy.NOT_APPLICABLE,
+            next_actions=(), cancellation_available=False)
+    value = {
+        "pairing_identity_schema": "claudian-remote.pairing-identity/v1",
+        "operation_id": checkpoint["operation_id"], "plan_id": checkpoint["plan_id"],
+        "policy": policy, "phase": phase, "original_device_ids": ["fixture-device"],
+        "revoked_device_ids": ["fixture-device"] if policy == "rotate" and phase in {"ready", "rotation_committed"} else [],
+    }
+    path = journals / f"{checkpoint['operation_id']}.pairing-identity.json"
+    _rewrite(path, value)
+    return lifecycle, journals, path, value
+
+
+@pytest.mark.parametrize("policy", ["preserve", "rotate"])
+@pytest.mark.parametrize("phase", ["ready", "rolled_back"])
+def test_terminal_pairing_companion_is_bound_and_read_only(tmp_path, policy, phase):
+    lifecycle, journals, path, value = _pairing_operation(tmp_path, policy=policy, phase=phase)
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
+    result = OperationArbitrator(lifecycle, journal_dir=journals).inspect()
+    assert result.state == "clear"
+    assert value["operation_id"] in result.terminal_operation_ids
+    assert {p: p.read_bytes() for p in before} == before
+
+
+@pytest.mark.parametrize("phase", ["captured", "rotation_committed", "ready"])
+def test_unfinished_pairing_operation_never_clears_global_gate(tmp_path, phase):
+    lifecycle, journals, _path, value = _pairing_operation(tmp_path, policy="rotate", phase=phase, terminal=False)
+    result = OperationArbitrator(lifecycle, journal_dir=journals).inspect()
+    assert result.state == "reconciliation_required"
+    assert result.operation_id == value["operation_id"]
+    assert result.recommended_action == "resume"
+    assert result.prior_operation_terminal is False
+
+
+@pytest.mark.parametrize("invalid", [
+    "orphan", "duplicate", "symlink", "operation", "plan", "policy", "schema",
+    "preserve_revoked", "preserve_rotation", "unfinished", "rotate_incomplete", "duplicate_key",
+])
+def test_pairing_companion_rejects_invalid_scope_or_state(tmp_path, invalid):
+    lifecycle, journals, path, value = _pairing_operation(tmp_path, policy="rotate" if invalid == "rotate_incomplete" else "preserve")
+    if invalid == "orphan":
+        (lifecycle / f"{value['operation_id']}.json").unlink()
+    elif invalid == "duplicate":
+        (lifecycle / path.name).write_bytes(path.read_bytes())
+    elif invalid == "symlink":
+        saved = path.read_bytes()
+        path.unlink()
+        target = tmp_path / "outside.json"
+        target.write_bytes(saved)
+        path.symlink_to(target)
+    elif invalid == "duplicate_key":
+        path.write_text(path.read_text().replace('{', '{"policy":"preserve",', 1))
+    else:
+        changes = {
+            "operation": {"operation_id": "op-" + "f" * 32},
+            "plan": {"plan_id": "plan-" + "f" * 64},
+            "policy": {"policy": "rotate"}, "schema": {"pairing_identity_schema": "unknown/v1"},
+            "preserve_revoked": {"revoked_device_ids": ["fixture-device"]},
+            "preserve_rotation": {"phase": "rotation_committed"},
+            "unfinished": {"phase": "captured"}, "rotate_incomplete": {"revoked_device_ids": []},
+        }
+        _rewrite(path, {**value, **changes[invalid]})
+    assert OperationArbitrator(lifecycle, journal_dir=journals).inspect().reason_code == "prior_operation_artifact_invalid"
+
+
+@pytest.mark.parametrize("phase", ["captured", "rotation_committed", "ready"])
+def test_revoked_pairing_identity_cannot_project_local_rollback(tmp_path, phase):
+    lifecycle, journals, path, value = _pairing_operation(tmp_path, policy="rotate", phase=phase, terminal=False)
+    _rewrite(path, {**value, "revoked_device_ids": ["fixture-device"]})
+    checkpoint = CheckpointStore(lifecycle).read(value["operation_id"])
+    _write_transaction(journals, checkpoint, phase="recovery_required", completed=("staging",))
+    result = OperationArbitrator(lifecycle, journal_dir=journals).inspect()
+    assert result.state == "blocked"
+    assert result.recommended_action == "manual_recovery_required"
+
+
 def test_multiple_unfinished_operations_fail_closed_without_mtime_selection(tmp_path):
     first_paths, first_values = _artifact_set(tmp_path / "first", migration=False)
     second_paths, second_values = _artifact_set(tmp_path / "second", migration=False)

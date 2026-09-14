@@ -160,7 +160,8 @@ class CompanionBridgeServer:
         self._pending: Dict[str, asyncio.Future] = {}
         self._events: "asyncio.Queue[BridgeEventMessage]" = asyncio.Queue(maxsize=512)
         self._runner: Optional[web.AppRunner] = None
-        self._transport_bound = False
+        self._bound_bridge_generation: Optional[int] = None
+        self._transport_disconnected: Optional[asyncio.Future] = None
 
     def create_app(self) -> web.Application:
         app = web.Application(client_max_size=MAX_BRIDGE_FRAME_BYTES)
@@ -192,6 +193,13 @@ class CompanionBridgeServer:
             if not future.done():
                 future.set_exception(BridgeServerError(code))
         self._pending.clear()
+
+    def _end_transport(self, generation: int) -> None:
+        if generation != self._bound_bridge_generation:
+            return
+        signal = self._transport_disconnected
+        if signal is not None and not signal.done():
+            signal.set_result(None)
 
     async def _reject(self, socket: web.WebSocketResponse) -> web.WebSocketResponse:
         await socket.send_json({"type": "auth.rejected", "error_code": "bridge_auth_failed"})
@@ -232,22 +240,21 @@ class CompanionBridgeServer:
                 return await self._reject(socket)
 
         previous = self._socket
+        previous_generation = self._generation
         self._generation += 1
         generation = self._generation
         if previous and previous is not socket:
+            self._end_transport(previous_generation)
             self._fail_pending("bridge_generation_changed")
         self._socket = socket
         if previous and previous is not socket and not previous.closed:
             await previous.close(code=1008, message=b"bridge replaced")
         await socket.send_json({"type": "auth.accepted", "generation": generation})
-        recovery_task = None
         management_tasks: set[asyncio.Task[None]] = set()
-        if self._transport_bound:
-            recovery_task = asyncio.create_task(
-                self._request("keyframe.request", {}), name="bridge-reconnect-keyframe"
-            )
         try:
             async for message in socket:
+                if self._socket is not socket or self._generation != generation:
+                    break
                 if message.type != WSMsgType.TEXT:
                     if message.type in (WSMsgType.CLOSE, WSMsgType.CLOSED, WSMsgType.ERROR):
                         break
@@ -305,15 +312,12 @@ class CompanionBridgeServer:
                     management_tasks.add(task)
                     task.add_done_callback(management_tasks.discard)
         finally:
-            if recovery_task and not recovery_task.done():
-                recovery_task.cancel()
-            if recovery_task:
-                await asyncio.gather(recovery_task, return_exceptions=True)
             for task in management_tasks:
                 task.cancel()
             await asyncio.gather(*management_tasks, return_exceptions=True)
             if self._socket is socket:
                 self._socket = None
+                self._end_transport(generation)
                 self._fail_pending("bridge_disconnected")
         return socket
 
@@ -378,22 +382,33 @@ class CompanionBridgeServer:
             self._pending.pop(request_id, None)
 
     async def bind(self, _path: str, session_id: str, generation: int, compatibility=None) -> Dict[str, Any]:
+        bridge_generation = self._generation
         result = await self._request("transport.bind", {
             "mac_session_id": session_id,
             "mac_connection_generation": generation,
             "compatibility": dict(compatibility or {}),
         })
-        self._transport_bound = True
+        if bridge_generation != self._generation or not self._socket or self._socket.closed:
+            raise BridgeServerError("bridge_generation_changed")
+        self._bound_bridge_generation = bridge_generation
+        self._transport_disconnected = asyncio.get_running_loop().create_future()
         return result
 
     async def invalidate(self, _path: str, session_id: str, generation: int) -> Dict[str, Any]:
-        self._transport_bound = False
+        # A replacement plugin has not received the old transport binding.
+        # Do not send that old invalidation into its authentication handshake.
+        bound_here = self._bound_bridge_generation == self._generation
+        self._bound_bridge_generation = None
+        if not bound_here:
+            return {"invalidated": False}
         return await self._request("transport.invalidate", {
             "mac_session_id": session_id,
             "mac_connection_generation": generation,
         })
 
     async def command(self, _path: str, command: Dict[str, Any]) -> Dict[str, Any]:
+        if self._bound_bridge_generation != self._generation:
+            raise BridgeServerError("bridge_not_ready")
         return await self._request("command.execute", command)
 
     async def keyframe(self, _path: str) -> Dict[str, Any]:
@@ -410,5 +425,21 @@ class CompanionBridgeServer:
         })
 
     async def events(self, _last_event_id: int = 0) -> AsyncIterator[BridgeEventMessage]:
+        # Keep this binding's signal: a late old socket close must not stop a
+        # newer pump. Ending this iterator reuses run_connection's existing
+        # invalidate/reconnect/bind-ACK/mac.hello compatibility handshake.
+        disconnected = self._transport_disconnected
         while True:
-            yield await self._events.get()
+            if disconnected is None:
+                yield await self._events.get()
+                continue
+            receive = asyncio.create_task(self._events.get())
+            try:
+                done, _ = await asyncio.wait({receive, disconnected}, return_when=asyncio.FIRST_COMPLETED)
+                if disconnected in done:
+                    raise BridgeServerError("bridge_disconnected")
+                yield receive.result()
+            finally:
+                if not receive.done():
+                    receive.cancel()
+                await asyncio.gather(receive, return_exceptions=True)

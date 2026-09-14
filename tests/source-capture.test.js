@@ -38,6 +38,14 @@ function fixture() {
   return { events, tab, claudian, normalizer };
 }
 
+test("source advertises the same persisted Claudian archive capability as command receipts", () => {
+  const { claudian, tab, normalizer } = fixture();
+  const capture = new SourceCapture({ claudian, normalizer });
+  assert.equal(capture.capabilities(tab).history_archive, false);
+  claudian.setConversationArchived = async () => {};
+  assert.equal(capture.capabilities(tab).history_archive, true);
+});
+
 test("Claudian 2.0.4 compatibility is characterized by a public versioned fixture", () => {
   const fixture = JSON.parse(fs.readFileSync(
     path.resolve(import.meta.dirname, "fixtures/claudian-2.0.4-compatibility.json"),

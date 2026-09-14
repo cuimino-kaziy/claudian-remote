@@ -36,6 +36,18 @@ export class DesktopBridgeRouter {
     this.componentSet = componentSet;
     this.importUpload = importUpload;
     this.binding = null;
+    this.boundClaudianSignature = null;
+  }
+
+  refreshCompatibility() {
+    if (!this.binding || this.boundClaudianSignature === null) return false;
+    const current = this.capture.compatibility?.(this.getActiveTab());
+    if (JSON.stringify(current) === this.boundClaudianSignature) return false;
+    // Relay caches the bind result. Fence it before requesting a fresh handshake.
+    this.adapter.invalidateTransport(this.binding);
+    this.binding = null;
+    this.boundClaudianSignature = null;
+    return true;
   }
 
   async keyframe() {
@@ -51,6 +63,7 @@ export class DesktopBridgeRouter {
     this.binding = binding;
     const tab = this.getActiveTab();
     const claudianCompatibility = this.capture.compatibility?.(tab);
+    this.boundClaudianSignature = JSON.stringify(claudianCompatibility);
     const writable = componentCompatibility.writable && claudianCompatibility?.writable === true;
     const compatibility = writable
       ? componentCompatibility
@@ -68,7 +81,10 @@ export class DesktopBridgeRouter {
         return await this.bind(payload, { invalidatePrevious: true });
       case "transport.invalidate": {
         const invalidated = this.adapter.invalidateTransport(payload);
-        if (invalidated) this.binding = null;
+        if (invalidated) {
+          this.binding = null;
+          this.boundClaudianSignature = null;
+        }
         return { invalidated };
       }
       case "command.execute":

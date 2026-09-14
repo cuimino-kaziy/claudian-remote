@@ -28,13 +28,14 @@ export function deriveReadiness(state = {}, { paired } = {}) {
   const isPaired = paired ?? state?.pairing?.status !== "required";
   if (!isPaired) reason = "pairing_required";
   else if (state?.transport?.status !== "connected") reason = "relay_offline";
-  else if (state?.compatibility?.writable === false) reason = COPY[state.compatibility.reason]
+  else if (state?.compatibility?.writable === false && state.compatibility.pending !== true) reason = COPY[state.compatibility.reason]
     ? state.compatibility.reason
     : "compatibility_mismatch";
   else if (state?.recovery?.required === true) reason = "recovering";
   else if (state?.presence?.mac?.status !== "online") reason = state?.presence?.mac?.reason === "vault_closed"
     ? "vault_closed"
     : "mac_offline";
+  else if (state?.compatibility?.pending === true) reason = "recovering";
   else if (activeTurn(state)?.status === "running") reason = "running";
   const [status, label] = COPY[reason] || COPY.compatibility_mismatch;
   return {

@@ -126,10 +126,11 @@ export class MobilePairingController {
       claim_id: String(body.claim_id),
       redemption_handle: String(body.redemption_handle),
       device_id: context.device_id,
+      status: body.status === "approved" ? "approved" : "pending_approval",
       expires_at: Number(body.expires_at || 0),
       profile: authoritative
     };
-    return { claim_id: this.pending.claim_id, status: "pending_approval", expires_at: this.pending.expires_at };
+    return { claim_id: this.pending.claim_id, status: this.pending.status, expires_at: this.pending.expires_at };
   }
 
   acceptDeepLink(value) {
@@ -236,6 +237,6 @@ export class MobilePairingController {
   }
 
   diagnosticSummary() {
-    return { status: this.pending ? "pending_approval" : "idle" };
+    return { status: this.pending?.status || "idle" };
   }
 }

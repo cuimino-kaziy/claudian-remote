@@ -28,7 +28,7 @@ def config(tmp_path):
     )
 
 
-async def pair(client):
+async def pair(client, *, use_short_code=True):
     created_response = await client.post(
         "/api/v2/pairing/claims",
         headers={"Authorization": "Bearer admin-secret"},
@@ -47,8 +47,9 @@ async def pair(client):
     redeemed_response = await client.post(
         "/api/v2/pairing/redeem",
         json={
-            "claim_id": created["claim_id"],
-            "claim_token": created["claim_token"],
+            **({"short_code": created["short_code"]} if use_short_code else {
+                "claim_id": created["claim_id"], "claim_token": created["claim_token"],
+            }),
             "device_id": "iphone-a",
             "device_name": "Alice's iPhone",
             "vault_id": "vault-a",
@@ -62,21 +63,13 @@ async def pair(client):
         "endpoint_audience": "claudian-remote:local_tailscale:installation-a",
     }
 
-    pending_complete = await client.post(
-        f"/api/v2/pairing/claims/{created['claim_id']}/complete",
-        json={"redemption_handle": redeemed["redemption_handle"], "device_id": "iphone-a"},
+    assert redeemed["status"] == "approved"
+    assert "credential" not in redeemed
+    pending_response = await client.get(
+        "/api/v2/pairing/claims", headers={"Authorization": "Bearer admin-secret"},
     )
-    assert pending_complete.status == 202
-    assert (await pending_complete.json())["status"] == "pending_approval"
-
-    approved_response = await client.post(
-        f"/api/v2/pairing/claims/{created['claim_id']}/approve",
-        headers={"Authorization": "Bearer admin-secret"},
-        json={"device_id": "iphone-a"},
-    )
-    assert approved_response.status == 200
-    approved = await approved_response.json()
-    assert "credential" not in approved
+    assert pending_response.status == 200
+    assert (await pending_response.json())["claims"] == []
 
     completed_response = await client.post(
         f"/api/v2/pairing/claims/{created['claim_id']}/complete",
@@ -181,7 +174,8 @@ async def test_device_revocation_and_command_dispatch_share_one_atomic_boundary(
 
 
 @pytest.mark.asyncio
-async def test_route_roles_and_pairing_claim_are_non_interchangeable(aiohttp_client, tmp_path):
+@pytest.mark.parametrize("use_short_code", [True, False])
+async def test_route_roles_and_pairing_claim_are_non_interchangeable(aiohttp_client, tmp_path, use_short_code):
     client = await aiohttp_client(create_app(config(tmp_path)))
     assert (await client.post("/api/v2/pairing/claims")).status == 401
     assert (
@@ -190,7 +184,7 @@ async def test_route_roles_and_pairing_claim_are_non_interchangeable(aiohttp_cli
         )
     ).status == 403
 
-    created, completed = await pair(client)
+    created, completed = await pair(client, use_short_code=use_short_code)
     assert completed["credential"] != created["claim_token"]
     assert completed["credential"] != "admin-secret"
     assert (

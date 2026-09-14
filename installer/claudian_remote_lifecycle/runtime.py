@@ -34,7 +34,7 @@ class ReleaseValidationError(ValueError):
 
 REQUIRED_RUNTIME_VERSIONS = {"python": "3.12.11", "uv": "0.10.12"}
 REQUIRED_RUNTIME_TARGETS = {("darwin", "arm64"), ("darwin", "x86_64")}
-REQUIRED_RELEASE_VERSION = "0.2.0-beta.5"
+REQUIRED_RELEASE_VERSION = "0.2.0-beta.6.7"
 RELEASE_COMPONENTS = (
     "plugin",
     "companion",
@@ -436,6 +436,46 @@ def _validate_upgrade_contract(
                 "journey": "current_update",
             },
             {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.5",
+                "journey": "current_update",
+            },
+            {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.6",
+                "journey": "current_update",
+            },
+            {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.6.1",
+                "journey": "current_update",
+            },
+            {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.6.2",
+                "journey": "current_update",
+            },
+            {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.6.3",
+                "journey": "current_update",
+            },
+            {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.6.4",
+                "journey": "current_update",
+            },
+            {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.6.5",
+                "journey": "current_update",
+            },
+            {
+                "plugin_id": "claudian-remote",
+                "version": "0.2.0-beta.6.6",
+                "journey": "current_update",
+            },
+            {
                 "plugin_id": "whale-agent-bridge",
                 "version": "recognized-dogfood-lineage",
                 "journey": "legacy_upgrade",
@@ -545,9 +585,9 @@ def _validate_release_metadata(
         or compatibility.get("configuration_schema")
         != components.get("configuration_schema")
         or compatibility.get("claudian")
-        != {"exact_version": "2.2.6", "supported_versions": ["2.0.4", "2.2.6"]}
+        != {"exact_version": "2.2.6", "supported_versions": ["2.0.4", "2.2.6", "2.2.7"]}
         or matrix.get("claudian", {}).get("exact_version") != "2.2.6"
-        or matrix.get("claudian", {}).get("supported_versions") != ["2.0.4", "2.2.6"]
+        or matrix.get("claudian", {}).get("supported_versions") != ["2.0.4", "2.2.6", "2.2.7"]
     ):
         raise ReleaseValidationError("release_contract_mismatch")
     for component in ("companion", "relay", "installer"):

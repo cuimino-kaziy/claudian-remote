@@ -361,6 +361,57 @@ def test_reinstall_recreates_ownership_receipt_after_receipt_loss(tmp_path):
     assert transaction.verify(expected_plan)["code"] == "verification_ready"
 
 
+def test_consumed_bridge_handoff_requires_bound_ack_and_preserves_ownership(tmp_path):
+    from installer.claudian_remote_lifecycle.uninstall import OwnershipUninstaller
+
+    deps, _ = dependencies(tmp_path)
+    transaction = LocalTailscaleTransaction(deps)
+    expected_plan = plan()
+    assert transaction.install(expected_plan, operation_id="op-" + "c" * 32)["state"] == "ready"
+    layout = deps.layout
+    receipt_before = layout.ownership_receipt.read_bytes()
+    bootstrap = layout.bridge_bootstrap_for(expected_plan["vault_id"])
+    original_bootstrap = bootstrap.read_bytes()
+    bootstrap.unlink()  # The plugin consumes this one-use handoff after activation.
+    assert transaction.verify(expected_plan)["state"] == "blocked"
+
+    provisioning_before = layout.secure_provisioning.read_bytes()
+    provisioning = json.loads(provisioning_before)
+    ack = {"ack_schema": "claudian-remote.bridge-bootstrap-ack/v1", **{
+        field: provisioning[field] for field in (
+            "installation_id", "vault_id", "bridge_credential_id", "bootstrap_generation"
+        )
+    }}
+    for field in ("bootstrap_generation", "vault_id", "installation_id", "bridge_credential_id"):
+        layout.bridge_bootstrap_ack.write_text(json.dumps({**ack, field: "foreign-or-stale"}))
+        assert transaction.verify(expected_plan)["state"] == "blocked"
+    layout.bridge_bootstrap_ack.write_text(json.dumps(ack))
+    assert transaction.verify(expected_plan)["code"] == "verification_ready"
+    assert layout.ownership_receipt.read_bytes() == receipt_before
+
+    # ACK acceptance does not waive any extant digest or other required file.
+    bootstrap.write_bytes(original_bootstrap + b" ")
+    assert transaction.verify(expected_plan)["state"] == "blocked"
+    bootstrap.unlink()
+    agent_before = layout.relay_launch_agent.read_bytes()
+    layout.relay_launch_agent.unlink()
+    assert transaction.verify(expected_plan)["state"] == "blocked"
+    layout.relay_launch_agent.write_bytes(agent_before)
+    layout.secure_provisioning.write_text(json.dumps({**provisioning, "bootstrap_generation": "forged"}))
+    layout.bridge_bootstrap_ack.write_text(json.dumps({**ack, "bootstrap_generation": "forged"}))
+    assert transaction.verify(expected_plan)["state"] == "blocked"
+    layout.secure_provisioning.write_bytes(provisioning_before)
+    layout.bridge_bootstrap_ack.write_text(json.dumps(ack))
+
+    uninstaller = OwnershipUninstaller(
+        layout, stop_owned_services=lambda: None, revoke_credentials=lambda: None,
+    )
+    assert uninstaller.preflight(require_present=True)["state"] == "ready"
+    assert layout.ownership_receipt.read_bytes() == receipt_before
+    assert uninstaller.uninstall()["code"] == "uninstall_completed"
+    assert not bootstrap.exists()
+
+
 def test_fresh_and_current_journeys_share_the_tail_without_legacy_calls_or_journals(
     tmp_path,
 ):
@@ -1208,6 +1259,32 @@ def test_plugin_activation_write_failure_restores_original_directory(tmp_path, m
     assert (destination / "manifest.json").read_text() == "old plugin"
 
 
+@pytest.mark.parametrize("healthy", [True, False])
+def test_plugin_backup_and_restore_never_rename_across_the_synced_vault(tmp_path, monkeypatch, healthy):
+    deps, _ = dependencies(tmp_path)
+    vault = deps.vault_path("vault-a")
+    destination = vault / ".obsidian/plugins/claudian-remote"
+    destination.mkdir(parents=True)
+    (destination / "manifest.json").write_text("old plugin")
+    (destination / "data.json").write_text(json.dumps({"vault_id": "vault-a"}))
+    original_replace = Path.replace
+
+    def replace_within_storage_domain(path, target):
+        if path.is_relative_to(vault) != Path(target).is_relative_to(vault):
+            raise OSError("cross-domain iCloud directory rename unavailable")
+        return original_replace(path, target)
+
+    monkeypatch.setattr(Path, "replace", replace_within_storage_domain)
+    deps.health_probe = lambda: healthy
+    operation_id = "op-" + "d" * 32
+    result = LocalTailscaleTransaction(deps).install(plan(), operation_id=operation_id)
+
+    assert result["state"] == ("ready" if healthy else "rolled_back")
+    assert (deps.layout.backups / operation_id / "plugin/manifest.json").read_text() == "old plugin"
+    assert ((destination / "manifest.json").read_text() == "old plugin") is (not healthy)
+    assert json.loads((destination / "data.json").read_text())["vault_id"] == "vault-a"
+
+
 def test_resume_after_activation_preserves_original_plugin_rollback_boundary(tmp_path):
     deps, _ = dependencies(tmp_path, interrupt_after="after_activation")
     plugin = deps.vault_path("vault-a") / ".obsidian/plugins/claudian-remote/manifest.json"
@@ -1512,3 +1589,36 @@ def test_activation_waits_for_transient_runtime_readiness(tmp_path):
 
     assert result["state"] == "ready"
     assert delays == [0.1, 0.1]
+
+
+def test_failed_plugin_activation_and_failed_restore_require_recovery(tmp_path, monkeypatch):
+    import shutil
+
+    deps, _ = dependencies(tmp_path)
+    destination = deps.vault_path("vault-a") / ".obsidian/plugins/claudian-remote"
+    destination.mkdir(parents=True)
+    original = {"manifest.json": "old plugin", "data.json": json.dumps({"vault_id": "vault-a"})}
+    for name, contents in original.items():
+        (destination / name).write_text(contents)
+    operation_id = "op-" + "e" * 32
+    backup = deps.layout.backups / operation_id / "plugin"
+    original_replace = Path.replace
+    original_copytree = shutil.copytree
+
+    def fail_activation_replace(path, target):
+        if path.name.endswith(".next") and Path(target) == destination:
+            raise OSError("iCloud activation rename failed")
+        return original_replace(path, target)
+
+    def fail_restore_copy(source, target, *args, **kwargs):
+        if Path(source) == backup:
+            raise OSError("disk full while restoring plugin")
+        return original_copytree(source, target, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "replace", fail_activation_replace)
+    monkeypatch.setattr(shutil, "copytree", fail_restore_copy)
+    result = LocalTailscaleTransaction(deps).install(plan(), operation_id=operation_id)
+
+    assert not destination.exists()
+    assert {path.name: path.read_text() for path in backup.iterdir()} == original
+    assert result["state"] == "recovery_required"

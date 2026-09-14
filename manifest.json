@@ -1,7 +1,7 @@
 {
   "id": "claudian-remote",
   "name": "Claudian Remote",
-  "version": "0.2.0-beta.5",
+  "version": "0.2.0-beta.6.7",
   "minAppVersion": "1.12.3",
   "description": "Mobile-safe remote access for a supported Claudian installation.",
   "author": "Lantian",

@@ -29,7 +29,7 @@ in URLs, cookies, command-line arguments, synchronized plugin data, logs, or
 Agent-visible text.
 
 U5 uses explicit test credentials to verify an endpoint. U6 owns formal mobile
-claim creation, Mac approval, durable credential issue, rotation, and
+claim creation, code redemption, durable credential issue, rotation, and
 revocation.
 
 Pairing uses a five-minute single-use claim and an eight-character fallback
@@ -37,7 +37,8 @@ code. The QR opens the system Obsidian deep-link handler; the plugin does not
 request camera access. Its Relay URL and installation/Vault/audience values are
 non-secret bootstrap metadata for a new phone. The phone's synchronized Vault
 identity must match, and the Relay revalidates the claim binding before it
-creates authority. Mac approval creates a distinct device credential; only its
+creates authority. Successful redemption creates a distinct device credential without
+a separate Mac approval; invalid attempts remain rate-limited. Only its
 verifier digest persists server-side, while the raw credential is delivered
 once to device-local mobile storage. Approved-but-unclaimed credentials are
 revoked after expiry or process restart. Revocation closes active sockets and

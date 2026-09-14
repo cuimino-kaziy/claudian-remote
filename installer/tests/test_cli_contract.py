@@ -19,11 +19,11 @@ from installer.claudian_remote_lifecycle.legacy_authority import (
     RetirementCommit,
     RetirementIntent,
 )
-from installer.claudian_remote_lifecycle.inspect import Inspector
+from installer.claudian_remote_lifecycle.inspect import Inspector, content_id
 from installer.claudian_remote_lifecycle.human_gates import HumanGateController
-from installer.claudian_remote_lifecycle.model import COMMANDS, RESULT_SCHEMA
+from installer.claudian_remote_lifecycle.model import COMMANDS, RESULT_SCHEMA, PairingIdentityPolicy
 from installer.claudian_remote_lifecycle.operation_arbitration import OperationArbitrator
-from installer.claudian_remote_lifecycle.plan import PlanStore
+from installer.claudian_remote_lifecycle.plan import PlanBuilder, PlanStore
 from installer.claudian_remote_lifecycle.transaction import LocalTailscaleTransaction
 from installer.tests.test_compatibility_decode import _artifact_set
 from installer.tests.test_inspect import FakeProbe
@@ -1150,7 +1150,7 @@ def test_pairing_resume_preserves_progress_on_drift_and_accepts_own_installation
             return original_installation()
         return {
             **original_installation(), "installed": True,
-            "compatibility_set_id": "claudian-remote-0.2.0-beta.5",
+            "compatibility_set_id": PlanStore(state_dir).read(plan_id)[0]["compatibility_set_id"],
             "profile_mode": "local_tailscale", "profile_generation_id": "profile-generation-" + "b" * 64,
             "plugin_lineage": {
                 "current": {"present": True, "enabled": True, "recognized": True},
@@ -1190,3 +1190,113 @@ def test_pairing_resume_preserves_progress_on_drift_and_accepts_own_installation
     resumed = run("resume", "--operation-id", operation_id)
     assert resumed["state"] == "ready", resumed
     assert OperationArbitrator(state_dir, journal_dir=deps.layout.state).inspect().state == "clear"
+
+
+@pytest.mark.parametrize("activation_started", [False, True])
+def test_status_preserves_only_cancellation_allowed_by_transaction(tmp_path, activation_started):
+    _, checkpoint = _create_v2_operation(tmp_path, journey="current_update",
+        checkpoint_pairing=PairingIdentityPolicy.PRESERVE)
+    _write_transaction(tmp_path, checkpoint,
+        phase="activation_started" if activation_started else "before_staging",
+        completed=["staging"] if activation_started else [],
+        activation_started=activation_started)
+    output = io.StringIO()
+    main(["--state-dir", str(tmp_path), "status", "--operation-id", checkpoint["operation_id"]],
+        stdout=output, services=LifecycleServices(FakeProbe(), {}))
+    result = json.loads(output.getvalue())
+    assert result["code"] == "prior_operation_incomplete", result
+    assert result["cancellation_available"] is not activation_started
+    assert [a["command"] for a in result["next_actions"]] == (
+        ["resume"] if activation_started else ["resume", "cancel"])
+    assert CheckpointStore(tmp_path).read(checkpoint["operation_id"]) == checkpoint
+
+
+@pytest.mark.parametrize("drift", [None, "installation_id", "vault_id", "endpoint",
+    "endpoint_audience", "companion_credential_ref", "prior_release_id", "claudian_version",
+    "journal_operation", "journal_plan", "journal_pre_activation", "profile_symlink", "snapshot_race"])
+def test_resume_after_provisioning_accepts_only_owned_profile_change(tmp_path, monkeypatch, drift):
+    deps, _ = dependencies(tmp_path)
+    layout = deps.layout
+    state_dir = layout.base / "lifecycle"
+    probe = FakeProbe(vaults=[{"vault_id": "vault-a", "display_name": "Notes",
+        "claudian_version": "2.0.4", "claudian_enabled": True}])
+    identity = PlanBuilder().build(Inspector(probe).snapshot(), mode="local_tailscale")["installation_id"]
+    old_release = "claudian-remote-0.2.0-beta.6.5"
+    layout.release_path(old_release).mkdir(parents=True)
+    layout.current.symlink_to(layout.release_path(old_release))
+    profile_path = layout.config / "connection-profile.json"
+    profile_path.parent.mkdir(parents=True)
+    profile_path.write_text(json.dumps({"schema_version": 1, "mode": "local_tailscale",
+        "installation_id": identity, "vault_id": "vault-a", "endpoint": deps.tailscale.preflight()["endpoint"],
+        "endpoint_audience": f"claudian-remote:local_tailscale:{identity}",
+        "companion_credential_ref": f"{identity}:local_tailscale:companion",
+        "mobile_credential_ref": f"{identity}:local_tailscale:mobile", "cursor": 0, "epoch": "before-update"}))
+    original_installation = probe.installation()
+    def installation():
+        profile = json.loads(profile_path.read_text())
+        return {**original_installation, "installed": True,
+            "compatibility_set_id": layout.current.resolve().name, "profile_mode": profile["mode"],
+            "profile_generation_id": content_id("profile-generation", {key: profile[key] for key in
+                ("mode", "installation_id", "vault_id", "endpoint", "endpoint_audience", "epoch")}),
+            "plugin_lineage": {"current": {"present": True, "enabled": True, "recognized": True},
+                "legacy": {"present": False, "enabled": False, "recognized": True}}}
+    probe.installation = installation
+    transaction = LocalTailscaleTransaction(deps)
+    services = LifecycleServices(probe, {}, transaction=transaction, layout=layout)
+    plan_id = _prepare_plan(state_dir, services)
+    def run(*args):
+        output = io.StringIO()
+        main(["--state-dir", str(state_dir), *args], stdout=output, services=services)
+        return json.loads(output.getvalue())
+    activate_plugin = transaction._activate_plugin
+    def interrupted_activation(*args, **kwargs):
+        raise KeyboardInterrupt()
+    monkeypatch.setattr(transaction, "_activate_plugin", interrupted_activation)
+    with pytest.raises(KeyboardInterrupt):
+        run("update", "--plan-id", plan_id)
+    arbitration = OperationArbitrator(state_dir, journal_dir=layout.state).inspect()
+    operation_id = arbitration.operation_id
+    assert arbitration.recommended_action == "resume"
+    before = CheckpointStore(state_dir).read(operation_id)
+    profile = json.loads(profile_path.read_text())
+    assert profile["epoch"] != "before-update"
+    assert layout.current.resolve().name == old_release
+    if drift in {"prior_release_id", "journal_operation", "journal_plan", "journal_pre_activation"}:
+        journal_path = layout.state / f"{operation_id}.transaction.json"
+        journal = json.loads(journal_path.read_text())
+        if drift == "prior_release_id":
+            journal["prior_release_id"] = "claudian-remote-0.2.0-beta.6.4"
+        elif drift == "journal_operation":
+            journal["operation_id"] = "op-" + "f" * 32
+        elif drift == "journal_plan":
+            journal["plan_id"] = "plan-" + "f" * 64
+        else:
+            journal.update(phase="before_activation", activation_started=False)
+        journal_path.write_text(json.dumps(journal))
+    elif drift == "profile_symlink":
+        other_profile = profile_path.with_suffix(".other.json")
+        profile_path.rename(other_profile)
+        profile_path.symlink_to(other_profile)
+    elif drift == "snapshot_race":
+        preflight = deps.tailscale.preflight
+        def concurrent_profile_change():
+            profile["epoch"] = "concurrent-configuration"
+            profile_path.write_text(json.dumps(profile))
+            return preflight()
+        monkeypatch.setattr(deps.tailscale, "preflight", concurrent_profile_change)
+    elif drift == "claudian_version":
+        probe._vaults[0]["claudian_version"] = "2.0.5"
+    elif drift:
+        profile[drift] = "https://different.tailnet.ts.net" if drift == "endpoint" else "different-binding"
+        profile_path.write_text(json.dumps(profile))
+    monkeypatch.setattr(transaction, "_activate_plugin", activate_plugin)
+    resumed = run("resume", "--operation-id", operation_id)
+    if drift:
+        assert resumed["code"] == ("prior_operation_artifact_invalid"
+            if drift in {"journal_operation", "journal_plan"} else "environment_drift"), resumed
+        assert resumed["cancellation_available"] is False or drift == "journal_pre_activation"
+        assert layout.current.resolve().name == old_release
+        assert CheckpointStore(state_dir).read(operation_id) == before
+    else:
+        assert resumed["state"] == "ready", resumed
+        assert OperationArbitrator(state_dir, journal_dir=layout.state).inspect().state == "clear"

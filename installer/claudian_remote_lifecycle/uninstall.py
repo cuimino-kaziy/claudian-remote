@@ -10,6 +10,7 @@ from typing import Any, Callable, Mapping
 
 from .runtime import RuntimeLayout
 from .private_io import tree_digest, write_private_json
+from .provisioning import verify_bridge_bootstrap_ack
 
 
 class OwnershipUninstaller:
@@ -141,6 +142,39 @@ class OwnershipUninstaller:
             return self._receipt_plugin_root is not None and root == self._receipt_plugin_root
         return False
 
+    def _bridge_bootstrap_consumed(self, path: Path, resources: list[Any]) -> bool:
+        # The one-use handoff is erased by the plugin. Its absence is valid
+        # only after authentication to the unchanged, receipt-bound generation.
+        provisioning = next((
+            item for item in resources
+            if isinstance(item, Mapping)
+            and item.get("resource_id") == "secure_provisioning"
+            and item.get("path") == str(self.layout.secure_provisioning)
+        ), None)
+        if provisioning is None:
+            return False
+        try:
+            if any(
+                target.is_symlink() or not target.is_file()
+                for target in (self.layout.secure_provisioning, self.layout.bridge_bootstrap_ack)
+            ):
+                return False
+            if tree_digest(self.layout.secure_provisioning) != provisioning.get("digest"):
+                return False
+            state = json.loads(self.layout.secure_provisioning.read_text(encoding="utf-8"))
+            fields = ("installation_id", "vault_id", "bridge_credential_id", "bootstrap_generation")
+            return (
+                isinstance(state, Mapping)
+                and all(isinstance(state.get(field), str) and state[field] for field in fields)
+                and path in {
+                    self.layout.bridge_bootstrap,
+                    self.layout.bridge_bootstrap_for(state["vault_id"]),
+                }
+                and verify_bridge_bootstrap_ack(self.layout)
+            )
+        except (OSError, ValueError):
+            return False
+
     def preflight(
         self,
         *,
@@ -178,7 +212,10 @@ class OwnershipUninstaller:
             if not self._allowed_path(resource_id, path):
                 raise ValueError("ownership_receipt_scope_invalid")
             if not path.exists() and not path.is_symlink():
-                if require_present:
+                if require_present and not (
+                    resource_id == "bridge_bootstrap"
+                    and self._bridge_bootstrap_consumed(path, resources)
+                ):
                     missing.append(resource_id)
                 continue
             policy = str(resource.get("removal_policy") or "remove")

@@ -1,4 +1,4 @@
-import { ItemView, Notice, requestUrl } from "obsidian";
+import { ItemView, Notice, requestUrl, Menu } from "obsidian";
 import { MobileReplica } from "./reducer.js";
 import { RemoteClient } from "./remote-client.js";
 import { MobileRecoveryController } from "./recovery.js";
@@ -14,6 +14,7 @@ import { HistoryDrawer } from "./components/history-drawer.js";
 import { MessageList } from "./components/message-list.js";
 import { MobileComposer } from "./components/composer.js";
 import { FrameRenderScheduler } from "./render-scheduler.js";
+import { MobileViewportController } from "./viewport-controller.js";
 import { pairingStatusFromSettings } from "./readiness.js";
 
 export const MOBILE_VIEW_TYPE = "claudian-remote-mobile";
@@ -88,13 +89,17 @@ export class ClaudianRemoteMobileView extends ItemView {
       onRemoveAttachment: () => void this.attachments.cancel(),
       onRetryAttachment: () => void this.retryAttachment()
     });
+    this.viewport = new MobileViewportController({ root: this.root, composer: this.composer.el, input: this.composer.input });
+    this.viewport.start();
     this.history = new HistoryDrawer(this.root, {
       onClose: () => this.setHistoryOpen(false),
       onRefresh: () => void this.loadHistory(),
       onSelect: (conversationId) => void this.selectHistory(conversationId),
       onNew: () => void this.createHistory(),
       onRename: (conversationId, title) => void this.renameHistory(conversationId, title),
-      onArchive: (conversationId) => void this.archiveHistory(conversationId)
+      onArchive: (conversationId, archived) => void this.archiveHistory(conversationId, archived),
+      onSettings: () => this.openSettings(),
+      onActions: (item, event) => this.showHistoryActions(item, event)
     });
     this.createDetailsSheet();
     this.root.addEventListener("click", (event) => this.handleLinkClick(event));
@@ -146,11 +151,7 @@ export class ClaudianRemoteMobileView extends ItemView {
     this.detailsBody = element("div", "claudian-remote-details-body");
     const reconnect = button("mod-cta", "重新连接", () => void this.lifecycle.setVisible(true));
     const copyReport = button("", "复制诊断报告", () => void this.copyDiagnosticReport());
-    const settings = button("", "打开插件设置", () => {
-      this.setDetailsOpen(false);
-      this.app.setting?.open?.();
-      this.app.setting?.openTabById?.(this.plugin.manifest.id);
-    });
+    const settings = button("", "连接设置", () => this.openSettings());
     const actions = element("div", "claudian-remote-details-actions");
     actions.append(reconnect, copyReport, settings);
     sheet.append(header, this.detailsBody, actions);
@@ -166,6 +167,8 @@ export class ClaudianRemoteMobileView extends ItemView {
     this.detailsOverlay.setAttribute("aria-hidden", String(!detailsOpen));
     this.detailsOverlay.inert = !detailsOpen;
     this.history.setOpen(historyOpen);
+    for (const node of [this.header.el, this.messages.el, this.composer.el]) node.inert = surface !== "none";
+    if (surface === "none") this.header.history.focus({ preventScroll: true });
   }
 
   setDetailsOpen(open) {
@@ -176,13 +179,29 @@ export class ClaudianRemoteMobileView extends ItemView {
     this.setActiveSurface(open ? "history" : (this.activeSurface === "history" ? "none" : this.activeSurface));
   }
 
+  openSettings() {
+    this.composer.input.blur();
+    this.setActiveSurface("none");
+    this.plugin.openConnectionSettings();
+  }
+
+  showHistoryActions(item, event) {
+    const controls = activeConversationModel(this.replica.state).controls;
+    const menu = new Menu();
+    menu.addItem((entry) => entry.setTitle("重命名").setIcon("pencil")
+      .setDisabled(!controls.historyRename).onClick(() => this.history.requestRename(item)));
+    menu.addItem((entry) => entry.setTitle(item.archived ? "取消归档" : "归档").setIcon(item.archived ? "archive-restore" : "archive")
+      .setDisabled(!controls.historyArchive).onClick(() => void this.archiveHistory(item.conversation_id, !item.archived)));
+    menu.showAtMouseEvent(event);
+  }
+
   async openDetails() {
     this.composer.input.blur();
     if (!this.closing) this.setActiveSurface("details");
   }
 
   async copyDiagnosticReport() {
-    const report = buildDiagnosticReport(this.replica.state, this.attachments.snapshot());
+    const report = buildDiagnosticReport(this.replica.state, this.attachments.snapshot(), new Date(), this.viewport?.getLayoutDiagnostics());
     try {
       await navigator.clipboard.writeText(report);
       new Notice("诊断报告已复制（不含对话正文和凭据）");
@@ -205,8 +224,8 @@ export class ClaudianRemoteMobileView extends ItemView {
   async selectHistory(conversationId) {
     const model = activeConversationModel(this.replica.state);
     const browsing = this.replica.selectConversationForViewing(conversationId);
-    if (!browsing) return new Notice("该对话尚未同步到本机缓存");
     if (!model.controls.historySelect) {
+      if (!browsing) return new Notice("该对话尚未同步到本机缓存，请连接电脑后打开");
       new Notice(model.executionTurn?.status === "running"
         ? "正在查看历史；当前任务仍在原对话中运行"
         : "当前为只读历史，未切换电脑端对话");
@@ -227,9 +246,9 @@ export class ClaudianRemoteMobileView extends ItemView {
     await this.send("history.rename", { conversation_id: conversationId, title });
   }
 
-  async archiveHistory(conversationId) {
-    const archived = await this.send("history.archive", { conversation_id: conversationId });
-    if (!archived) new Notice("当前 Claudian 暂不支持归档；没有删除任何对话");
+  async archiveHistory(conversationId, archived = true) {
+    const accepted = await this.send("history.archive", { conversation_id: conversationId, archived });
+    if (!accepted) new Notice(archived ? "归档未完成，请检查连接或当前任务状态" : "取消归档未完成，请检查连接状态");
   }
 
   async sendMessage(text, steer) {
@@ -237,18 +256,19 @@ export class ClaudianRemoteMobileView extends ItemView {
     const readyAttachmentRefs = this.attachments.references();
     if (!value && !readyAttachmentRefs.length) return;
     if (steer) {
+      const deliveryId = createDeliveryId();
       this.composer.clear();
-      const submitted = await this.send("turn.steer", { text: value }, value);
-      if (!submitted) this.composer.setDraft(value);
+      const submitted = await this.send("turn.steer", { text: value }, value, { deliveryId });
+      if (!submitted) this.restoreFailedDraft(value, deliveryId);
       return;
     }
-    const deliveryId = readyAttachmentRefs.length ? createDeliveryId() : null;
-    const attachmentRefs = deliveryId ? this.attachments.reserveReady(deliveryId) : [];
+    const deliveryId = createDeliveryId();
+    const attachmentRefs = readyAttachmentRefs.length ? this.attachments.reserveReady(deliveryId) : [];
     if (readyAttachmentRefs.length && !attachmentRefs.length) {
       new Notice("附件正在等待上一条消息回执");
       return;
     }
-    if (deliveryId) {
+    if (attachmentRefs.length) {
       this.attachmentDeliveries.add(deliveryId);
       this.composer.syncAttachments(this.attachments.snapshot());
     }
@@ -260,13 +280,21 @@ export class ClaudianRemoteMobileView extends ItemView {
       { deliveryId }
     );
     if (!submitted) {
-      if (deliveryId) {
+      if (attachmentRefs.length) {
         this.attachments.releaseReservation(deliveryId);
         this.attachmentDeliveries.delete(deliveryId);
         this.composer.syncAttachments(this.attachments.snapshot());
       }
-      this.composer.setDraft(value);
+      this.restoreFailedDraft(value, deliveryId);
     }
+  }
+
+  restoreFailedDraft(text, deliveryId) {
+    const command = this.replica.state.commands[deliveryId];
+    if (command?.draftRestored) return;
+    if (command) command.draftRestored = true;
+    const current = this.composer.input.value;
+    this.composer.setDraft(current ? `${text}\n\n${current}` : text);
   }
 
   async uploadAttachment(file) {
@@ -411,6 +439,7 @@ export class ClaudianRemoteMobileView extends ItemView {
     globalThis.clearInterval(this.pairingWatcher);
     this.unsubscribe?.();
     this.renderScheduler?.dispose();
+    this.viewport?.dispose();
     this.composer?.dispose();
     await this.attachments?.dispose();
     this.messages?.dispose();

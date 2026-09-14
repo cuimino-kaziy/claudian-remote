@@ -806,14 +806,16 @@ class LocalTailscaleTransaction:
             if bound_vault and bound_vault != vault_id:
                 raise ValueError("plugin_vault_binding_mismatch")
             preferences = dict(value)
-        moved_original = not backup.exists() and destination.exists()
-        if moved_original:
-            destination.replace(backup)
-        elif backup.exists():
-            # A crash may occur after the original plugin was backed up but
-            # before the activation checkpoint. Preserve that one rollback
-            # boundary instead of replacing it with the staged plugin.
-            shutil.rmtree(destination, ignore_errors=True)
+        if not backup.exists() and destination.exists():
+            # Moving an iCloud directory outside its File Provider domain can
+            # block in rename. Commit a complete local copy before replacement.
+            partial_backup = backup.with_name("plugin.partial")
+            shutil.rmtree(partial_backup, ignore_errors=True)
+            try:
+                shutil.copytree(destination, partial_backup, symlinks=True)
+                partial_backup.replace(backup)
+            finally:
+                shutil.rmtree(partial_backup, ignore_errors=True)
         staging = destination.parent / f".{destination.name}.{operation_id}.next"
         shutil.rmtree(staging, ignore_errors=True)
         try:
@@ -824,19 +826,25 @@ class LocalTailscaleTransaction:
                 vault_id=vault_id,
                 connection_mode=connection_mode,
             )
+            shutil.rmtree(destination, ignore_errors=True)
             staging.replace(destination)
         except Exception:
             shutil.rmtree(staging, ignore_errors=True)
-            if moved_original and backup.exists() and not destination.exists():
-                backup.replace(destination)
+            if backup.exists():
+                self._restore_plugin(destination, backup)
             raise
         return backup if backup.exists() else None
 
     @staticmethod
     def _restore_plugin(destination: Path, backup: Path | None) -> None:
-        shutil.rmtree(destination, ignore_errors=True)
         if backup and backup.exists():
-            backup.replace(destination)
+            staging = destination.parent / f".{destination.name}.{backup.parent.name}.next"
+            shutil.rmtree(staging, ignore_errors=True)
+            shutil.copytree(backup, staging, symlinks=True)
+            shutil.rmtree(destination, ignore_errors=True)
+            staging.replace(destination)
+        else:
+            shutil.rmtree(destination, ignore_errors=True)
 
     def _record_receipt(
         self,
@@ -1385,8 +1393,11 @@ class LocalTailscaleTransaction:
                 if runtime_mutated:
                     self.dependencies.launchd.remove_local_agents()
                     self.dependencies.tailscale.remove_serve()
-                    if plugin_activated:
-                        self._restore_plugin(plugin_destination, plugin_backup)
+                    if plugin_activated or backup_candidate.exists():
+                        self._restore_plugin(
+                            plugin_destination,
+                            backup_candidate if backup_candidate.exists() else plugin_backup,
+                        )
                 migration.rollback(operation_id=operation_id)
                 if pairing_transition is not None and journey == "current_update":
                     if not pairing_transition.rollback(
@@ -1709,14 +1720,14 @@ class LocalTailscaleTransaction:
                             "The update could not prove that the existing phone identity was preserved."
                             if pairing_result.get("code")
                             == "pairing_identity_preservation_failed"
-                            else "Approve the phone shown by the Mac pairing UI."
+                            else "Pair the phone using the one-time code shown on the Mac."
                         )
                     ),
                     "exact_action": (
                         "Run a separately signed rotate update or restore the existing active phone identity."
                         if pairing_result.get("code")
                         == "pairing_identity_preservation_failed"
-                        else "Redeem the one-time code on the phone and approve that device on the Mac."
+                        else "Enter the Mac's one-time code on the phone; pairing completes automatically."
                     ),
                     "verification_probe": "pairing_credential_active",
                     "resume_reference": operation_id,

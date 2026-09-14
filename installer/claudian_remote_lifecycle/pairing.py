@@ -32,6 +32,15 @@ PAIRING_IDENTITY_SCHEMA = "claudian-remote.pairing-identity/v1"
 DEVICE_ID_PATTERN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
 
 
+def _identity_journal_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {}
+    for key, item in pairs:
+        if key in value:
+            raise ValueError("pairing_identity_journal_invalid")
+        value[key] = item
+    return value
+
+
 class PairingManagement(Protocol):
     def create_claim(self, profile: Mapping[str, str]) -> Mapping[str, Any]: ...
 
@@ -136,9 +145,9 @@ class PairingLifecycle:
         resume_reference = f"pairing:{secrets.token_urlsafe(18)}"
         self._pending[resume_reference] = _PendingPairing(claim_id, normalized)
         return _gate(
-            gate_type="pairing_approval_required",
-            explanation="A person must redeem the code on the phone and approve that device on the Mac.",
-            human_action="Use the code shown in the Mac pairing window, then review and approve the displayed phone.",
+            gate_type="pairing_redemption_required",
+            explanation="The phone connects after redeeming the Mac's one-time pairing code.",
+            human_action="Enter the code shown in the Mac pairing window on the phone; pairing completes automatically.",
             verification_probe="pairing_claim_state",
             resume_reference=resume_reference,
         )
@@ -147,7 +156,7 @@ class PairingLifecycle:
         operation = self._operation(resume_reference)
         inspected = dict(self._management.inspect_claim(operation.claim_id))
         state = str(inspected.get("state") or "")
-        if state == "pending_redemption":
+        if state in {"created", "pending_redemption"}:
             return _gate(
                 gate_type="pairing_redemption_required",
                 explanation="The phone has not redeemed the one-time claim yet.",
@@ -159,8 +168,8 @@ class PairingLifecycle:
             device_id = str(inspected.get("device_id") or "")
             result = _gate(
                 gate_type="pairing_device_confirmation_required",
-                explanation="The Mac must confirm the phone shown in the pairing window.",
-                human_action="Verify the displayed phone and approve it in Claudian Remote settings.",
+                explanation="This phone is waiting on the legacy Mac approval flow.",
+                human_action="For this legacy request, verify and approve the displayed phone in Claudian Remote settings, or use a new pairing code.",
                 verification_probe="pairing_claim_state",
                 resume_reference=resume_reference,
             )
@@ -169,11 +178,11 @@ class PairingLifecycle:
         if state in {"paired", "completed", "issued"}:
             self._pending.pop(resume_reference, None)
             return self._paired(operation, str(inspected.get("device_id") or ""))
-        if state == "credential_ready":
+        if state in {"approved", "credential_ready"}:
             return _gate(
                 gate_type="pairing_mobile_completion_required",
-                explanation="The Mac approved the phone; the phone still needs to receive its one-time credential.",
-                human_action="Return to Claudian Remote on the phone and finish pairing.",
+                explanation="The pairing code was accepted; the phone is receiving its device credential.",
+                human_action="Keep Claudian Remote open on the phone until pairing completes.",
                 verification_probe="paired_device_active",
                 resume_reference=resume_reference,
             )
@@ -209,7 +218,7 @@ class PairingLifecycle:
         if approved_state in {"approved", "credential_ready"}:
             return _gate(
                 gate_type="pairing_mobile_completion_required",
-                explanation="The Mac approved the phone; the phone still needs to receive its one-time credential.",
+                explanation="The legacy request was approved; the phone still needs to receive its device credential.",
                 human_action="Return to Claudian Remote on the phone and finish pairing.",
                 verification_probe="paired_device_active",
                 resume_reference=resume_reference,
@@ -308,15 +317,19 @@ class PairingIdentityTransition:
             normalized.add(device_id)
         return sorted(normalized)
 
-    def _read(
-        self,
+    @classmethod
+    def read_journal(
+        cls,
+        path: Path,
         *,
         operation_id: str,
         plan_id: str,
         policy: str,
     ) -> dict[str, Any] | None:
+        """Read the same bound journal for transitions and operation arbitration."""
         try:
-            value = json.loads(self._path(operation_id).read_text(encoding="utf-8"))
+            value = json.loads(Path(path).read_text(encoding="utf-8"),
+                object_pairs_hook=_identity_journal_object)
         except FileNotFoundError:
             return None
         except (OSError, json.JSONDecodeError) as exc:
@@ -332,6 +345,7 @@ class PairingIdentityTransition:
         }
         if (
             not isinstance(value, dict)
+            or policy not in {"preserve", "rotate"}
             or set(value) != expected
             or value.get("pairing_identity_schema") != PAIRING_IDENTITY_SCHEMA
             or value.get("operation_id") != operation_id
@@ -341,11 +355,25 @@ class PairingIdentityTransition:
             not in {"captured", "rotation_committed", "ready", "rolled_back"}
         ):
             raise ValueError("pairing_identity_journal_invalid")
-        original = self._normalize_device_ids(value.get("original_device_ids"))
-        revoked = self._normalize_device_ids(value.get("revoked_device_ids"))
-        if not set(revoked).issubset(original):
+        for field in ("original_device_ids", "revoked_device_ids"):
+            if not isinstance(value[field], list) or not all(isinstance(item, str) for item in value[field]):
+                raise ValueError("pairing_identity_journal_invalid")
+        original = cls._normalize_device_ids(value["original_device_ids"])
+        revoked = cls._normalize_device_ids(value["revoked_device_ids"])
+        phase = value["phase"]
+        if (
+            not set(revoked).issubset(original)
+            or (policy == "preserve" and (revoked or phase == "rotation_committed"))
+            or (policy == "rotate" and phase in {"rotation_committed", "ready"} and revoked != original)
+            or (phase == "rolled_back" and revoked)
+        ):
             raise ValueError("pairing_identity_journal_invalid")
         return {**value, "original_device_ids": original, "revoked_device_ids": revoked}
+
+    def _read(self, *, operation_id: str, plan_id: str, policy: str) -> dict[str, Any] | None:
+        return self.read_journal(
+            self._path(operation_id), operation_id=operation_id, plan_id=plan_id, policy=policy,
+        )
 
     def _write(self, operation_id: str, value: Mapping[str, Any]) -> None:
         write_private_json(self._path(operation_id), dict(value))

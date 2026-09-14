@@ -23,7 +23,7 @@ except ImportError:  # pragma: no cover - script execution fallback
     from legacy_retirement import LEGACY_RETIREMENT_PROFILE_IDS
 
 
-VERSION = "0.2.0-beta.5"
+VERSION = "0.2.0-beta.6.7"
 ROLES = {"mac", "mobile"}
 ALLOWED_EVENT_TYPES = {
     "mac": {"message.receipt", "conversation.snapshot", "conversation.event"},

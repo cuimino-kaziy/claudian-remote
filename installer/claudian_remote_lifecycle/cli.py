@@ -24,9 +24,10 @@ from .compatibility_decode import (
     mark_supported_v1_checkpoint_rolled_back,
 )
 from .credentials import CredentialRevocationService
+from .connection_profile import ConnectionProfile
 from .diagnostics import DiagnosticService
 from .human_gates import HumanGateController
-from .inspect import Inspector, InspectionProbe, LocalInspectionProbe
+from .inspect import Inspector, InspectionProbe, LocalInspectionProbe, content_id
 from .legacy_authority import CapabilityAwareLegacyRetirementService
 from .model import (
     COMMANDS,
@@ -46,7 +47,7 @@ from .model import (
     blocked_not_implemented,
     normalize_strict_result,
 )
-from .operation_arbitration import OperationArbitration, OperationArbitrator
+from .operation_arbitration import OperationArbitration, OperationArbitrator, _read_transaction_companion
 from .launchd import LaunchAgentManager
 from .keychain import MacOSKeychain
 from .plan import EnvironmentDrift, PlanBuilder, PlanError, PlanStore, validate_mutation_environment
@@ -653,7 +654,7 @@ def _arbitration_result(
         ambiguity_state=ambiguity,
         recovery_policy=recovery,
         effect_summary=effect_summary,
-        next_actions=(next_action(),) if next_action else (),
+        next_actions=((next_action(),) if next_action else ()) + ((_cancel_action(),) if cancellation else ()),
         cancellation_available=cancellation,
         pairing_identity_policy=pairing,
         data=data,
@@ -2322,6 +2323,62 @@ def _result_from_outcome(
     )
 
 
+def _owned_partial_profile_generation(
+    services: LifecycleServices,
+    operation_id: str,
+    plan: Mapping[str, Any],
+    planned_snapshot: Mapping[str, Any],
+    current_snapshot: Mapping[str, Any],
+) -> str | None:
+    """Authorize only provisioning by this interrupted local update."""
+    layout = services.layout
+    transaction = services.transaction
+    if (
+        layout is None or transaction is None
+        or plan.get("journey") != "current_update"
+        or plan.get("pairing_identity_policy") != "preserve"
+        or plan.get("topology", {}).get("mode") != "local_tailscale"
+    ):
+        return None
+    planned = planned_snapshot.get("installation", {})
+    current = current_snapshot.get("installation", {})
+    if current.get("profile_generation_id") == planned.get("profile_generation_id"):
+        return None
+    journal_path = layout.state / f"{operation_id}.transaction.json"
+    profile_path = layout.config / "connection-profile.json"
+    try:
+        if journal_path.is_symlink() or profile_path.is_symlink() or not layout.current.is_symlink():
+            return None
+        journal = _read_transaction_companion(journal_path, operation_id=operation_id,
+            plan_id=str(plan["plan_id"]), journey="current_update")
+        prior = journal["prior_release_id"]
+        if (
+            journal["phase"] not in {"activation_started", "plugin_activated"}
+            or not journal["activation_started"] or not prior
+            or prior != planned.get("compatibility_set_id")
+            or prior != current.get("compatibility_set_id")
+            or layout.current.resolve(strict=True) != layout.release_path(prior).resolve(strict=True)
+        ):
+            return None
+        # Probe first, then read the profile so configuration changes during
+        # the external probe cannot authorize a stale inspection fingerprint.
+        tailnet = transaction.dependencies.tailscale.preflight()
+        value = json.loads(profile_path.read_text(encoding="utf-8"))
+        profile = ConnectionProfile.from_dict(value)
+        if (profile.mode != "local_tailscale" or profile.installation_id != plan.get("installation_id")
+            or profile.vault_id != plan.get("vault_id")):
+            return None
+        # Profile validation also binds audience and both credential references
+        # to this installation. The live tailnet must still own its endpoint.
+        if tailnet.get("state") != "ready" or profile.endpoint != tailnet.get("endpoint"):
+            return None
+        generation = content_id("profile-generation", {key: str(value.get(key) or "") for key in
+            ("mode", "installation_id", "vault_id", "endpoint", "endpoint_audience", "epoch")})
+        return generation if generation == current.get("profile_generation_id") else None
+    except (OSError, ValueError, TypeError, RuntimeError):
+        return None
+
+
 def _run_mutation(
     *,
     command: str,
@@ -2361,11 +2418,17 @@ def _run_mutation(
                         )
                     outcome = reconcile(plan, operation_id=operation_id)
                 else:
+                    current_snapshot = inspector.snapshot()
                     validate_mutation_environment(
                         plan,
                         planned_snapshot,
-                        inspector.snapshot(),
+                        current_snapshot,
                         allow_plan_target=command == "resume",
+                        owned_profile_generation_id=(
+                            _owned_partial_profile_generation(services, operation_id, plan,
+                                planned_snapshot, current_snapshot)
+                            if command == "resume" else None
+                        ),
                     )
                     outcome = services.transaction.install(
                         plan, operation_id=operation_id
@@ -2499,6 +2562,10 @@ def _run_mutation(
         # The failed attempt changed nothing; keep the original operation's
         # durable effects and resume owner instead of erasing its progress.
         checkpoint = checkpoints.read(operation_id)
+        arbitration = OperationArbitrator(args.state_dir,
+            journal_dir=services.layout.state if services.layout else None).inspect()
+        if arbitration.operation_id == operation_id and arbitration.checkpoint:
+            checkpoint = arbitration.checkpoint
         return LifecycleResult(
             command=command, state="blocked", code="environment_drift",
             message="Restore the plan-bound environment, then resume this operation.",

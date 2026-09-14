@@ -8,6 +8,7 @@ import { createObsidianFetch } from "../src/mobile/obsidian-http.js";
 import { COMPATIBILITY_SET } from "../src/protocol/compatibility.js";
 import { deriveReadiness, pairingStatusFromSettings } from "../src/mobile/readiness.js";
 import { buildDiagnosticReport } from "../src/mobile/diagnostic-report.js";
+import { DeviceStore } from "../src/storage/device-store.js";
 
 class FakeTimers {
   constructor() { this.jobs = new Map(); this.next = 1; }
@@ -119,6 +120,46 @@ test("remote client keeps credentials out of WebSocket URL and authenticates wit
     command: { delivery_id: "delivery" },
     compatibility: COMPATIBILITY_SET
   });
+});
+
+test("network disconnect and foreground recovery reuse the persisted device credential", async () => {
+  const values = new Map();
+  const store = new DeviceStore({ storage: {
+    getItem: (key) => values.get(key) ?? null,
+    setItem: (key, value) => values.set(key, String(value)),
+    removeItem: (key) => values.delete(key)
+  } });
+  store.write("identity", { mobile_token: "durable-device-token", device_id: "iphone", client_instance_id: "view" });
+  const before = JSON.stringify(store.read("identity"));
+  const requests = [];
+  const client = new RemoteClient({
+    baseUrl: "https://relay.example", tokenProvider: () => store.read("identity").mobile_token,
+    deviceId: "iphone", clientInstanceId: "view", WebSocketImpl: FakeWebSocket,
+    fetchImpl: async (url, options) => {
+      requests.push({ url, authorization: options.headers.Authorization, ...JSON.parse(options.body) });
+      return { ok: true, json: async () => ({ ticket: `ticket-${requests.length}` }) };
+    }
+  });
+  const timers = new FakeTimers();
+  const lifecycle = new MobileRecoveryController({ client, replica: new MobileReplica(), timers });
+  await lifecycle.setVisible(true);
+  client.socket.close(1006, "network disconnected");
+  assert.equal(timers.jobs.size, 1);
+  const [timerId, retry] = [...timers.jobs.entries()][0];
+  timers.jobs.delete(timerId);
+  retry.fn();
+  await new Promise(setImmediate);
+  await lifecycle.setVisible(false);
+  await lifecycle.setVisible(true);
+  assert.equal(requests.length, 3);
+  for (const request of requests) {
+    assert.equal(request.url, "https://relay.example/api/v2/ws-ticket");
+    assert.equal(request.authorization, "Bearer durable-device-token");
+    assert.equal(request.device_id, "iphone");
+    assert.equal(request.client_instance_id, "view");
+  }
+  assert.equal(JSON.stringify(store.read("identity")), before);
+  await lifecycle.dispose();
 });
 
 test("Obsidian native HTTP adapter keeps bounded binary chunks and disables CORS-dependent fetch", async () => {

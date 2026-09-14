@@ -388,6 +388,36 @@ test("history receipts update replica only after authoritative desktop confirmat
   assert.equal(replica.state.conversations.one.title, "Renamed");
 });
 
+test("archiving the viewed session follows the replacement while preserving archived content and restore state", async () => {
+  const replica = new MobileReplica({
+    activeConversationId: "one", viewingConversationId: "one",
+    conversations: { one: { id: "one", title: "Saved", revision: 1, activeTurnId: null, turnOrder: [], turns: {} } }
+  });
+  replica.beginCommand({ deliveryId: "archive", commandType: "history.archive" });
+  await replica.applyFrame({
+    type: "command.receipt", receipt: {
+      delivery_id: "archive", status: "executed", active_conversation_id: "conversation-pending",
+      archived_conversation_id: "one", archived: true,
+      items: [{ conversation_id: "one", title: "Saved", archived: true }]
+    }
+  });
+  assert.equal(replica.state.activeConversationId, "conversation-pending");
+  assert.equal(replica.state.viewingConversationId, "conversation-pending");
+  assert.equal(replica.state.history.items[0].archived, true);
+  assert.equal(replica.state.conversations.one.title, "Saved");
+
+  replica.beginCommand({ deliveryId: "restore", commandType: "history.archive" });
+  await replica.applyFrame({
+    type: "command.receipt", receipt: {
+      delivery_id: "restore", status: "executed", active_conversation_id: "conversation-pending",
+      archived_conversation_id: "one", archived: false,
+      items: [{ conversation_id: "one", title: "Saved", archived: false }]
+    }
+  });
+  assert.equal(replica.state.viewingConversationId, "conversation-pending");
+  assert.equal(replica.state.history.items[0].archived, false);
+});
+
 test("completion dedupe uses conversation and turn identity and ignores replay", async () => {
   const replica = new MobileReplica({ visible: true });
   const completion = (conversationId, sequence, replayed = false) => replica.applyFrame({

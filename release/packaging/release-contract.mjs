@@ -5,8 +5,8 @@ import { basename, resolve } from "node:path";
 export const FINAL_PLUGIN_ID = "claudian-remote";
 export const LEGACY_PLUGIN_ID = "whale-agent-bridge";
 export const REQUIRED_CLAUDIAN_VERSION = "2.2.6";
-export const SUPPORTED_CLAUDIAN_VERSIONS = Object.freeze(["2.0.4", "2.2.6"]);
-export const REQUIRED_RELEASE_VERSION = "0.2.0-beta.5";
+export const SUPPORTED_CLAUDIAN_VERSIONS = Object.freeze(["2.0.4", "2.2.6", "2.2.7"]);
+export const REQUIRED_RELEASE_VERSION = "0.2.0-beta.6.7";
 const SHA256 = /^[a-f0-9]{64}$/;
 const COMPONENTS = ["plugin", "companion", "relay", "installer"];
 const ASSET_COMPONENTS = [...COMPONENTS, "legacy_retirement_helper"];
@@ -28,6 +28,14 @@ function expectedUpgradeContract(version, helperDigest) {
     proof_schema_versions: ["claudian-remote.legacy-retirement-proof/v1"],
     supported_legacy_lineages: [
       { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.4", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.5", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.1", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.2", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.3", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.4", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.5", journey: "current_update" },
+      { plugin_id: FINAL_PLUGIN_ID, version: "0.2.0-beta.6.6", journey: "current_update" },
       { plugin_id: LEGACY_PLUGIN_ID, version: "recognized-dogfood-lineage", journey: "legacy_upgrade" }
     ],
     supported_profiles: ["local_tailscale"],
@@ -274,7 +282,7 @@ export function validateReleaseContract(manifest, context) {
   for (const claudian of [compatibility.claudian, matrix.claudian]) {
     if (claudian?.exact_version !== REQUIRED_CLAUDIAN_VERSION
       || canonicalJson(claudian?.supported_versions) !== canonicalJson(SUPPORTED_CLAUDIAN_VERSIONS)) {
-      errors.push("Claudian supported versions must be exactly 2.0.4 and 2.2.6");
+      errors.push("Claudian supported versions must be exactly 2.0.4, 2.2.6, and 2.2.7");
     }
   }
   if (plugin.minimum_obsidian_version !== matrix.plugin?.minimum_obsidian_version) errors.push("minimum Obsidian versions disagree");

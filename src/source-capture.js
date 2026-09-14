@@ -1,8 +1,10 @@
 import { safeText, safeToolSummary, sha256 } from "./stream-normalizer.js";
+import { historyCapabilities } from "./desktop-adapter.js";
 import {
   canSubmitToClaudian,
   claudianManifest,
-  evaluateClaudianCompatibility
+  evaluateClaudianCompatibility,
+  usesNativeExecution
 } from "./protocol/compatibility.js";
 
 const WRAP = Symbol.for("claudian.remote.v2.wrap");
@@ -108,7 +110,6 @@ export class SourceCapture {
   capabilities(tab) {
     const input = tab?.controllers?.inputController;
     const stream = tab?.controllers?.streamController;
-    const conversation = tab?.controllers?.conversationController;
     const provider = input?.getActiveCapabilities?.() || {};
     return {
       semantic_stream: typeof stream?.handleStreamChunk === "function",
@@ -117,11 +118,7 @@ export class SourceCapture {
       stop: typeof input?.cancelStreaming === "function",
       steer: Boolean(provider.supportsTurnSteer && typeof input?.steerQueuedMessage === "function"),
       approval: typeof input?.handleApprovalRequest === "function",
-      history_list: typeof this.claudian?.getConversationList === "function",
-      history_select: typeof conversation?.switchTo === "function",
-      history_new: typeof this.claudian?.createConversation === "function" && typeof conversation?.switchTo === "function",
-      history_rename: typeof this.claudian?.renameConversation === "function",
-      history_archive: typeof this.claudian?.archiveConversation === "function"
+      ...historyCapabilities(this.claudian, tab)
     };
   }
 
@@ -235,13 +232,13 @@ export class SourceCapture {
     const originalChunk = stream.handleStreamChunk;
     const originalSend = input.sendMessage;
     const originalCancel = typeof input.cancelStreaming === "function" ? input.cancelStreaming : null;
-    const nativeExecution = claudianManifest(this.claudian).version === "2.2.6";
+    const nativeExecution = usesNativeExecution(claudianManifest(this.claudian).version);
     const originalExecutionEvent = nativeExecution ? input.handleExecutionEvent : null;
     let activeNativeTurn = null;
     const normalizer = this.normalizer;
     const capture = this;
     const wrappedExecutionEvent = originalExecutionEvent && function remoteExecutionEvent(event, ...args) {
-      // 2.2.6 drops terminal events before handleStreamChunk. Keep only their safe type.
+      // Native execution drops terminal events before handleStreamChunk. Keep only their safe type.
       const status = event?.type === "execution_error" ? "failed"
         : event?.type === "cancelled" ? "interrupted"
           : event?.type === "turn_completed" ? "completed" : null;

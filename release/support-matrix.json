@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "release_version": "0.2.0-beta.5",
+  "release_version": "0.2.0-beta.6.7",
   "beta_scope": {
     "invited_users_min": 5,
     "invited_users_max": 10,
@@ -18,20 +18,21 @@
   },
   "claudian": {
     "exact_version": "2.2.6",
-    "supported_versions": ["2.0.4", "2.2.6"],
+    "supported_versions": ["2.0.4", "2.2.6", "2.2.7"],
     "unsupported_mode": "read_only",
     "manifest_schema": 1,
     "required_capabilities_by_version": {
       "2.0.4": ["semantic_stream", "completion_barrier", "stop", "steer", "approval", "history_list", "history_select"],
-      "2.2.6": ["semantic_stream", "completion_barrier", "stop", "native_execution_events", "approval", "history_list", "history_select"]
+      "2.2.6": ["semantic_stream", "completion_barrier", "stop", "native_execution_events", "approval", "history_list", "history_select"],
+      "2.2.7": ["semantic_stream", "completion_barrier", "stop", "native_execution_events", "approval", "history_list", "history_select"]
     }
   },
   "components": {
-    "compatibility_set_id": "claudian-remote-0.2.0-beta.5",
-    "plugin": "0.2.0-beta.5",
-    "companion": "0.2.0-beta.5",
-    "relay": "0.2.0-beta.5",
-    "installer": "0.2.0-beta.5",
+    "compatibility_set_id": "claudian-remote-0.2.0-beta.6.7",
+    "plugin": "0.2.0-beta.6.7",
+    "companion": "0.2.0-beta.6.7",
+    "relay": "0.2.0-beta.6.7",
+    "installer": "0.2.0-beta.6.7",
     "configuration_schema": 1
   },
   "protocol": {
@@ -106,6 +107,46 @@
         "journey": "current_update"
       },
       {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.5",
+        "journey": "current_update"
+      },
+      {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.6",
+        "journey": "current_update"
+      },
+      {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.6.1",
+        "journey": "current_update"
+      },
+      {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.6.2",
+        "journey": "current_update"
+      },
+      {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.6.3",
+        "journey": "current_update"
+      },
+      {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.6.4",
+        "journey": "current_update"
+      },
+      {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.6.5",
+        "journey": "current_update"
+      },
+      {
+        "plugin_id": "claudian-remote",
+        "version": "0.2.0-beta.6.6",
+        "journey": "current_update"
+      },
+      {
         "plugin_id": "whale-agent-bridge",
         "version": "recognized-dogfood-lineage",
         "journey": "legacy_upgrade"
@@ -123,15 +164,15 @@
     "current_update_pairing_rows": [
       {
         "pairing_identity_policy": "preserve",
-        "plugin": "0.2.0-beta.5",
-        "companion": "0.2.0-beta.5",
-        "installer": "0.2.0-beta.5"
+        "plugin": "0.2.0-beta.6.7",
+        "companion": "0.2.0-beta.6.7",
+        "installer": "0.2.0-beta.6.7"
       },
       {
         "pairing_identity_policy": "rotate",
-        "plugin": "0.2.0-beta.5",
-        "companion": "0.2.0-beta.5",
-        "installer": "0.2.0-beta.5"
+        "plugin": "0.2.0-beta.6.7",
+        "companion": "0.2.0-beta.6.7",
+        "installer": "0.2.0-beta.6.7"
       }
     ],
     "adapter_rows": [
@@ -147,7 +188,7 @@
     "helper_rows": [
       {
         "component": "legacy_retirement_helper",
-        "name": "claudian-remote-legacy-retirement-helper-0.2.0-beta.5.py",
+        "name": "claudian-remote-legacy-retirement-helper-0.2.0-beta.6.7.py",
         "source_path": "gateway/relay/legacy_retirement.py",
         "delivery": "signed_kit_asset",
         "sha256": "ec6a3abbdc7c98812e5ee885b7e58d7b8f3fbcf81614cea321eaf8d5123d0b66"

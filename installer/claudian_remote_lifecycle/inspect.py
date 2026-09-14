@@ -33,7 +33,7 @@ from .runtime import RuntimeLayout
 
 
 SUPPORTED_CLAUDIAN_VERSION = "2.2.6"
-SUPPORTED_CLAUDIAN_VERSIONS = frozenset({"2.0.4", "2.2.6"})
+SUPPORTED_CLAUDIAN_VERSIONS = frozenset({"2.0.4", "2.2.6", "2.2.7"})
 SUPPORTED_LEGACY_PLUGIN_VERSIONS = frozenset({"recognized-dogfood-lineage"})
 SUPPORTED_LEGACY_PLUGIN_BUILDS = {
     "0.2.0": "09e5e1f43b7db46636f12aace6117da579d0a50e322de2c8743ce42b5000de2f",

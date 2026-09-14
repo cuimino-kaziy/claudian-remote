@@ -4,10 +4,11 @@ import { DesktopAdapter } from "../src/desktop-adapter.js";
 
 const expiry = "2099-01-01T00:00:00Z";
 
-function setup({ streaming = false, steer = true, archive = false } = {}) {
+function setup({ streaming = false, steer = true, archive = false, version = "2.2.6" } = {}) {
   const calls = [];
   const events = [];
   const tab = {
+    id: "tab-1",
     conversationId: "conv-1",
     session: { acceptsIntents: true },
     state: { isStreaming: streaming, currentConversationId: "conv-1", remoteTurnId: "turn-1", queuedMessage: null, messages: [] },
@@ -28,12 +29,29 @@ function setup({ streaming = false, steer = true, archive = false } = {}) {
       }
     }
   };
+  let activeTab = tab;
+  const openTabs = [tab];
+  const manager = {
+    getAllTabs: () => [...openTabs],
+    async closeTab(id) {
+      calls.push(["close", id]);
+      const index = openTabs.findIndex((item) => item.id === id);
+      if (index < 0 || openTabs[index].state.isStreaming) return false;
+      const [closed] = openTabs.splice(index, 1);
+      if (closed === activeTab) {
+        activeTab = { id: "blank", controllers: tab.controllers, state: { isStreaming: false, messages: [] } };
+        openTabs.push(activeTab);
+      }
+      return true;
+    }
+  };
   const normalizer = { revisionFor: () => 4, emit: async (type, context, payload) => events.push({ type, context, payload }) };
   const conversations = [{ id: "conv-1", providerId: "claude", title: "One", updatedAt: 1, messageCount: 2 }];
   const claudian = {
-    manifest: { id: "realclaudian", version: "2.2.6" },
+    manifest: { id: "realclaudian", version },
     getConversationList: () => conversations.map((item) => ({ ...item })),
     getConversationSync: (id) => conversations.find((item) => item.id === id) || null,
+    getAllViews: () => [{ getTabManager: () => manager }],
     async createConversation() {
       calls.push(["new"]);
       const created = { id: "conv-2", providerId: "claude", title: "New Chat", updatedAt: 2, messageCount: 0 };
@@ -48,14 +66,14 @@ function setup({ streaming = false, steer = true, archive = false } = {}) {
     async deleteConversation(id) { calls.push(["delete", id]); }
   };
   if (archive) {
-    claudian.archiveConversation = async (id) => {
-      calls.push(["archive", id]);
+    claudian.setConversationArchived = async (id, isArchived) => {
+      calls.push(["archive", id, isArchived]);
       const item = conversations.find((candidate) => candidate.id === id);
-      if (item) item.archived = true;
+      if (item) item.isArchived = isArchived;
     };
   }
-  const adapter = new DesktopAdapter({ claudian, capture: { normalizer }, getActiveTab: () => tab, macSessionId: "session-a", connectionGeneration: 7, clock: () => 0 });
-  return { adapter, calls, tab, events };
+  const adapter = new DesktopAdapter({ claudian, capture: { normalizer }, getActiveTab: () => activeTab, macSessionId: "session-a", connectionGeneration: 7, clock: () => 0 });
+  return { adapter, calls, tab, events, claudian, manager, conversations };
 }
 
 function command(type, payload = {}, target = {}) {
@@ -77,8 +95,8 @@ test("2.0.4 submit preserves Claudian normal queue and the legacy void Steer con
 
 // Model the native 2.2.6 void-returning controller: pending objects can be
 // released before its promise settles, and only definitely-unsent input is restored.
-function nativeSteerSetup({ accepted = true, failure, releasePending = false, finishTurn = false, providerAccepted = false, beforeHandoff } = {}) {
-  const context = setup({ streaming: true });
+function nativeSteerSetup({ accepted = true, failure, releasePending = false, finishTurn = false, providerAccepted = false, beforeHandoff, version = "2.2.6" } = {}) {
+  const context = setup({ streaming: true, version });
   const { tab, calls } = context;
   const input = tab.controllers.inputController;
   const pendingByConversation = input.pendingSteersByConversation = new Map();
@@ -120,7 +138,7 @@ function nativeSteerSetup({ accepted = true, failure, releasePending = false, fi
   return { ...context, input, coordinator };
 }
 
-test("2.2.6 Steer receipts use native acceptance and retain rejected or ambiguous input without resending", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} Steer receipts use native acceptance and retain rejected or ambiguous input without resending`, async () => {
   for (const [options, expected, restored] of [
     [{}, "executed", false],
     [{ releasePending: true }, "executed", false],
@@ -133,7 +151,7 @@ test("2.2.6 Steer receipts use native acceptance and retain rejected or ambiguou
     [{ finishTurn: true, releasePending: true }, "executed", false],
     [{ accepted: false, finishTurn: true }, "rejected", true]
   ]) {
-    const { adapter, tab, input, coordinator, calls } = nativeSteerSetup(options);
+    const { adapter, tab, input, coordinator, calls } = nativeSteerSetup({ ...options, version });
     const original = coordinator.steer;
     const request = command("turn.steer", { text: "keep once" }, { turn_id: "turn-1" });
     assert.equal((await adapter.execute(request)).status, expected, JSON.stringify(options));
@@ -148,9 +166,9 @@ test("2.2.6 Steer receipts use native acceptance and retain rejected or ambiguou
   }
 });
 
-test("2.2.6 Steer rechecks admission after queueing without consuming or resending native input", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} Steer rechecks admission after queueing without consuming or resending native input`, async () => {
   for (const finishTurn of [false, true]) {
-    const { adapter, tab, input, calls } = nativeSteerSetup();
+    const { adapter, tab, input, calls } = nativeSteerSetup({ version });
     const originalSend = input.sendMessage;
     input.sendMessage = async (value) => {
       await originalSend(value);
@@ -164,17 +182,18 @@ test("2.2.6 Steer rechecks admission after queueing without consuming or resendi
   }
 });
 
-test("2.2.6 Steer never infers acceptance from a void return or an absent pending record", async () => {
-  const { adapter, input, tab } = nativeSteerSetup();
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} Steer never infers acceptance from a void return or an absent pending record`, async () => {
+  const { adapter, input, tab } = nativeSteerSetup({ version });
   input.steerQueuedMessage = async () => { tab.state.queuedMessage = null; };
   assert.equal((await adapter.execute(command("turn.steer", { text: "unconfirmed" }))).status, "unknown");
 });
 
-test("2.2.6 an unrelated desktop Steer cannot supply acceptance for the remote queue item", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} an unrelated desktop Steer cannot supply acceptance for the remote queue item`, async () => {
   for (const throwBeforeHandoff of [false, true]) {
     let resume;
     const paused = new Promise((resolve) => { resume = resolve; });
     const { adapter, input, tab, coordinator } = nativeSteerSetup({
+      version,
       beforeHandoff: async (message) => {
         if (message.content !== "remote") return;
         await paused;
@@ -193,9 +212,9 @@ test("2.2.6 an unrelated desktop Steer cannot supply acceptance for the remote q
   }
 });
 
-test("2.2.6 Steer does not offer a retry when its queue was consumed or replaced while awaiting submission", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} Steer does not offer a retry when its queue was consumed or replaced while awaiting submission`, async () => {
   for (const streaming of [false, true]) {
-    const { adapter, tab, input } = nativeSteerSetup();
+    const { adapter, tab, input } = nativeSteerSetup({ version });
     input.sendMessage = async () => {
       tab.state.queuedMessage = { content: "remote" };
       await Promise.resolve();
@@ -229,8 +248,8 @@ test("stop, history list/select, approval and keyframe use existing desktop cont
   assert.deepEqual(calls.at(-1), ["select", "conv-2"]);
 });
 
-test("history new and rename use Claudian 2.2.6 public APIs and return authoritative history", async () => {
-  const { adapter, calls, tab } = setup();
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} history new and rename use public APIs and return authoritative history`, async () => {
+  const { adapter, calls, tab } = setup({ version });
   const created = await adapter.execute(command("history.new"));
   assert.equal(created.status, "executed");
   assert.equal(created.active_conversation_id, "conv-2");
@@ -246,6 +265,15 @@ test("history new and rename use Claudian 2.2.6 public APIs and return authorita
   assert.equal(renamed.items.find((item) => item.conversation_id === "conv-2").title, "Renamed");
 });
 
+test("selecting an uncached session publishes its authoritative messages before returning the receipt", async () => {
+  const { adapter } = setup();
+  const bootstraps = [];
+  adapter.capture.emitBootstrap = async (tab) => bootstraps.push(tab.conversationId);
+  const result = await adapter.execute(command("history.select", { conversation_id: "uncached" }));
+  assert.equal(result.active_conversation_id, "uncached");
+  assert.deepEqual(bootstraps, ["uncached"]);
+});
+
 test("history archive fails closed when Claudian has no archive capability and never deletes", async () => {
   const { adapter, calls } = setup();
   const archive = command("history.archive", { conversation_id: "conv-1" });
@@ -257,6 +285,69 @@ test("history archive fails closed when Claudian has no archive capability and n
     capability: "history_archive"
   });
   assert.equal(calls.some(([name]) => name === "delete"), false);
+});
+
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} Claudian archive closes the session, preserves history, and restores through its persisted API`, async () => {
+  const { adapter, calls, claudian, conversations } = setup({ archive: true, version });
+  conversations[0].lastActivityAt = 123;
+  const bootstraps = [];
+  adapter.capture.emitBootstrap = async (tab) => bootstraps.push(tab);
+  const archive = command("history.archive", { conversation_id: "conv-1" });
+  const archived = await adapter.execute(archive);
+  assert.equal(archived.status, "executed");
+  assert.equal(archived.active_conversation_id, "conversation-pending");
+  assert.equal(archived.items[0].archived, true);
+  assert.equal(archived.items[0].updated_at, 123);
+  assert.equal(archived.capabilities.history_archive, true);
+  assert.deepEqual(calls, [["close", "tab-1"], ["archive", "conv-1", true]]);
+  assert.equal(bootstraps.length, 1);
+  assert.equal((await adapter.execute(archive)).status, "duplicate");
+  assert.equal(calls.length, 2);
+
+  const restore = command("history.archive", { conversation_id: "conv-1", archived: false });
+  restore.delivery_id += "-restore";
+  restore.target.conversation_id = "conversation-pending";
+  const restored = await adapter.execute(restore);
+  assert.equal(restored.status, "executed");
+  assert.equal(restored.items[0].archived, false);
+  assert.deepEqual(calls.at(-1), ["archive", "conv-1", false]);
+  assert.equal(claudian.getConversationSync("conv-1").messageCount, 2);
+  assert.equal(calls.some(([name]) => name === "delete"), false);
+});
+
+test("archive checks every view for a running session before closing any tab", async () => {
+  const { adapter, calls, claudian, manager } = setup({ archive: true });
+  const running = { id: "other-window", conversationId: "conv-1", state: { isStreaming: true } };
+  claudian.getAllViews = () => [
+    { getTabManager: () => manager },
+    { getTabManager: () => ({ getAllTabs: () => [running], closeTab: async () => { throw new Error("must not close"); } }) }
+  ];
+  const result = await adapter.execute(command("history.archive", { conversation_id: "conv-1", archived: true }));
+  assert.equal(result.error_code, "streaming_history_archive_forbidden");
+  assert.deepEqual(calls, []);
+});
+
+test("failed close and unconfirmed archive never report a successful mutation", async () => {
+  const blocked = setup({ archive: true });
+  blocked.manager.closeTab = async () => false;
+  const payload = { conversation_id: "conv-1", archived: true };
+  assert.equal((await blocked.adapter.execute(command("history.archive", payload))).error_code, "history_archive_close_failed");
+  assert.deepEqual(blocked.calls, []);
+
+  const noop = setup({ archive: true });
+  noop.claudian.setConversationArchived = async () => {};
+  assert.equal((await noop.adapter.execute(command("history.archive", payload))).error_code, "history_archive_not_confirmed");
+  const missing = setup({ archive: true });
+  assert.equal((await missing.adapter.execute(command("history.archive", { conversation_id: "absent" }))).error_code, "invalid_history_archive");
+  assert.deepEqual(missing.calls, []);
+});
+
+test("archive validates its boolean at the desktop boundary", async () => {
+  for (const archived of [null, 0, "false", {}]) {
+    const { adapter, calls } = setup({ archive: true });
+    assert.equal((await adapter.execute(command("history.archive", { conversation_id: "conv-1", archived }))).error_code, "invalid_history_archive");
+    assert.deepEqual(calls, []);
+  }
 });
 
 test("session, connection generation, revision, turn, expiry, and capabilities are checked again locally", async () => {
@@ -334,8 +425,8 @@ test("approval wrapper exposes only safe options and first authoritative result 
   assert.match(serialized, /\[local path hidden\]/);
 });
 
-test("2.2.6 paused intent admission rejects submission without reporting success", async () => {
-  const { adapter, tab, calls } = setup();
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} paused intent admission rejects submission without reporting success`, async () => {
+  const { adapter, tab, calls } = setup({ version });
   tab.session = { acceptsIntents: false };
   const result = await adapter.execute(command("message.submit", { text: "keep this draft" }));
   assert.equal(result.status, "rejected");
@@ -346,6 +437,7 @@ test("2.2.6 paused intent admission rejects submission without reporting success
 test("default approvals use version-native decisions and reject unoffered options", async () => {
   for (const [version, value, expected] of [
     ["2.2.6", "allow", "allow"], ["2.2.6", "deny", "deny"],
+    ["2.2.7", "allow", "allow"], ["2.2.7", "deny", "deny"],
     ["2.0.4", "allow", { type: "approve", scope: "turn" }], ["2.0.4", "deny", "cancel"]
   ]) {
     const { adapter, tab } = setup({ streaming: true });
@@ -363,19 +455,19 @@ test("default approvals use version-native decisions and reject unoffered option
   }
 });
 
-test("Claudian 2.2.6 rejects blocked input and steer without queueing text", async () => {
+for (const version of ["2.2.6", "2.2.7"]) test(`${version} rejects blocked input and steer without queueing text`, async () => {
   for (const field of ["isCreatingConversation", "isSwitchingConversation", "isRewinding"]) {
-    const { adapter, tab, calls } = setup({ streaming: true });
+    const { adapter, tab, calls } = setup({ streaming: true, version });
     tab.state[field] = true;
     assert.equal((await adapter.execute(command("message.submit", { text: "blocked" }))).error_code, "claudian_input_busy");
     assert.equal((await adapter.execute(command("turn.steer", { text: "blocked" }))).error_code, "claudian_steer_busy");
     assert.deepEqual(calls, []);
   }
-  const busy = setup({ streaming: true });
+  const busy = setup({ streaming: true, version });
   busy.tab.controllers.inputController.canSteerQueuedMessage = () => false;
   assert.equal((await busy.adapter.execute(command("turn.steer", { text: "blocked" }))).error_code, "claudian_steer_busy");
   assert.deepEqual(busy.calls, []);
-  const idle = setup();
+  const idle = setup({ version });
   assert.equal((await idle.adapter.execute(command("turn.steer", { text: "too late" }))).status, "already_resolved");
   assert.deepEqual(idle.calls, []);
 });

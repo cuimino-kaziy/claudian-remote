@@ -192,7 +192,12 @@ states, and timings only.
   capability-checked and update mobile state only from an authoritative desktop
   receipt. Permanent deletion is intentionally absent. Claudian 2.0.4 exposes
   no durable archive API, so `history.archive` reports `capability_missing`
-  rather than mapping to deletion or a local-only flag.
+  rather than mapping to deletion or a local-only flag. Claudian 2.2.6 uses
+  `setConversationArchived(id, boolean)`. The optional `history.archive` payload
+  field `archived` defaults to `true`; `false` restores the session. Archiving
+  closes all non-running tabs for that session before saving. A running tab or
+  failed close rejects the operation, and receipts retain both active and archived
+  sessions with their authoritative `archived` marker.
 - turn lifecycle: `turn.started`, `turn.completed`, `turn.interrupted`, `turn.failed`
 - observable work: `activity.updated`, `tool.started`, `tool.completed`
 - answer content: `text.delta`, `text.replace`

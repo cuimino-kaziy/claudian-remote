@@ -104,5 +104,18 @@ def test_history_mutation_commands_are_explicit_and_permanent_delete_is_absent()
 
     assert COMMAND_FIELDS["history.new"] == set()
     assert COMMAND_FIELDS["history.rename"] == {"conversation_id", "title"}
-    assert COMMAND_FIELDS["history.archive"] == {"conversation_id"}
+    assert COMMAND_FIELDS["history.archive"] == {"conversation_id", "archived"}
     assert "history.delete" not in COMMAND_FIELDS
+
+
+def test_history_archive_supports_restore_and_validates_optional_boolean():
+    command = copy.deepcopy(load("command-races.json")["valid"])
+    command["command_type"] = "history.archive"
+    now = datetime(2099, 1, 1, tzinfo=timezone.utc)
+    for payload in ({"conversation_id": "conv-1"}, {"conversation_id": "conv-1", "archived": True}, {"conversation_id": "conv-1", "archived": False}):
+        command["payload"] = payload
+        assert validate_command(command, now=now) is command
+    for archived in (None, 0, 1, "false", {}):
+        command["payload"] = {"conversation_id": "conv-1", "archived": archived}
+        with pytest.raises(ProtocolError, match="invalid_history_archive"):
+            validate_command(command, now=now)

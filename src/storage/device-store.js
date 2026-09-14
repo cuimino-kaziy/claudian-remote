@@ -98,9 +98,18 @@ export async function migrateLegacySynchronizedState({
   if (!(deviceStore instanceof DeviceStore)) throw new TypeError("device store required");
   const migrations = deviceStore.read("migration") || {};
   if (migrations[MIGRATION_KEY]?.completed === true) {
+    const preferences = sanitizeSyncPreferences(synchronized);
+    const identity = deviceStore.read("identity");
+    const profile = deviceStore.read("connection-profile");
+    // The migration's re-pair flag describes the retired shared token, not a
+    // scoped device credential successfully paired and saved since then.
+    const paired = ["credential_id", "mobile_token", "device_id", "installation_id", "vault_id", "endpoint_audience"]
+      .every((key) => typeof identity?.[key] === "string" && identity[key].trim())
+      && ["installation_id", "vault_id", "endpoint_audience"].every((key) => identity[key] === profile?.[key])
+      && identity.vault_id === preferences.vault_id;
     return {
-      synchronized: sanitizeSyncPreferences(synchronized),
-      rePairRequired: migrations[MIGRATION_KEY].re_pair_required === true,
+      synchronized: preferences,
+      rePairRequired: migrations[MIGRATION_KEY].re_pair_required === true && !paired,
       alreadyCompleted: true
     };
   }

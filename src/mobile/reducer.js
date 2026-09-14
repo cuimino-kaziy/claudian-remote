@@ -31,6 +31,7 @@ const REJECTED_STATUSES = new Set([
   "stale_conversation",
   "stale_turn",
   "capability_missing",
+  "compatibility_mismatch",
   "delivery_conflict",
   "command_backpressure",
   "relay_shutting_down"
@@ -101,6 +102,17 @@ function commandMatchesMessage(command, message) {
   return authoritativeText === commandText || authoritativeText.startsWith(`${commandText}\n\n@`);
 }
 
+function pendingCompatibility() {
+  return { writable: false, mode: "read_only", reason: "recovering", pending: true, remediation: null };
+}
+
+function updateCompatibility(state) {
+  const layers = Object.values(state.compatibilityLayers);
+  state.compatibility = layers.find((result) => result?.writable === false)
+    || (layers.every((result) => result?.writable === true) ? state.compatibilityLayers.claudian : pendingCompatibility());
+  state.compatibilityMode = state.compatibility.writable === false;
+}
+
 export function createReplicaState(seed = {}) {
   return {
     relay: { epoch: "", appliedCursor: 0, ...(seed.relay || {}) },
@@ -110,8 +122,11 @@ export function createReplicaState(seed = {}) {
       ...(seed.presence || {})
     },
     capabilities: normalizeCapabilities(seed.capabilities),
-    compatibility: seed.compatibility || null,
-    compatibilityMode: seed.compatibilityMode === true || seed.compatibility?.writable === false,
+    // Cached projections are readable; cached compatibility cannot authorize
+    // writes. All three sources must be confirmed in this live connection.
+    compatibilityLayers: { mobileRelay: null, macRelay: null, claudian: null },
+    compatibility: pendingCompatibility(),
+    compatibilityMode: true,
     pairing: { status: "paired", ...(seed.pairing || {}) },
     activeConversationId: seed.activeConversationId || null,
     viewingConversationId: seed.viewingConversationId || seed.activeConversationId || null,
@@ -315,16 +330,23 @@ export class MobileReplica {
     if (!frame || typeof frame !== "object") return { ignored: true, reason: "invalid_frame" };
     if (frame.type === "authenticated") {
       this.state.transport.status = "connected";
-      if (frame.compatibility) {
-        this.state.compatibility = normalizeCompatibilityResult(frame.compatibility);
-        this.state.compatibilityMode = this.state.compatibility.writable === false;
-      }
+      this.state.compatibilityLayers = {
+        mobileRelay: frame.compatibility ? normalizeCompatibilityResult(frame.compatibility) : null,
+        macRelay: null,
+        claudian: null
+      };
+      this.state.presence.mac = { status: "offline", sessionId: null, connectionGeneration: null };
+      updateCompatibility(this.state);
       this.notify("transport");
       return { applied: true };
     }
     if (frame.type === "connection.changed") {
       this.state.transport.status = String(frame.status || "disconnected");
-      if (this.state.transport.status !== "connected") this.markUnacceptedCommandsUnknown("connection_lost");
+      if (this.state.transport.status !== "connected") {
+        this.markUnacceptedCommandsUnknown("connection_lost");
+        this.state.compatibilityLayers = { mobileRelay: null, macRelay: null, claudian: null };
+        updateCompatibility(this.state);
+      }
       this.notify("transport");
       return { applied: true };
     }
@@ -345,16 +367,20 @@ export class MobileReplica {
     }
     if (frame.type === "presence.changed") {
       if (frame.role === "mac") {
+        const previous = this.state.presence.mac;
         this.state.presence.mac = {
           status: frame.status === "online" ? "online" : "offline",
           sessionId: frame.mac_session_id || null,
           connectionGeneration: Number(frame.mac_connection_generation) || null,
           reason: frame.reason === "vault_closed" ? "vault_closed" : null
         };
-        if (frame.compatibility) {
-          this.state.compatibility = normalizeCompatibilityResult(frame.compatibility);
-          this.state.compatibilityMode = this.state.compatibility.writable === false;
-        }
+        const current = this.state.presence.mac;
+        if (current.status !== "online" || (previous.sessionId && (
+          previous.sessionId !== current.sessionId || previous.connectionGeneration !== current.connectionGeneration
+        ))) this.state.compatibilityLayers.claudian = null;
+        this.state.compatibilityLayers.macRelay = current.status === "online" && frame.compatibility
+          ? normalizeCompatibilityResult(frame.compatibility) : null;
+        updateCompatibility(this.state);
         if (frame.status !== "online") this.rejectUnacceptedCommands("mac_offline");
         this.notify("presence");
       }
@@ -421,7 +447,9 @@ export class MobileReplica {
       if (activeId) {
         this.ensureConversation(activeId);
         this.state.activeConversationId = activeId;
-        if (["history.new", "history.select"].includes(command.commandType)) {
+        if (["history.new", "history.select"].includes(command.commandType)
+          || (command.commandType === "history.archive" && receipt.archived === true
+            && this.state.viewingConversationId === receipt.archived_conversation_id)) {
           this.state.viewingConversationId = activeId;
           this.state.viewingPinned = false;
         }
@@ -534,9 +562,8 @@ export class MobileReplica {
         stop: payload.supports_stop,
         approval: payload.supports_approval
       });
-      this.state.compatibilityMode = payload.mode === "compatibility";
       if (typeof payload.writable === "boolean") {
-        this.state.compatibility = {
+        this.state.compatibilityLayers.claudian = {
           writable: payload.writable,
           mode: payload.writable ? "streaming" : "read_only",
           reason: String(payload.reason || (payload.writable ? "ready" : "compatibility_mismatch")),
@@ -545,7 +572,10 @@ export class MobileReplica {
           missing_capabilities: Array.isArray(payload.missing_capabilities) ? [...payload.missing_capabilities] : [],
           remediation: payload.remediation || null
         };
+      } else {
+        this.state.compatibilityLayers.claudian = null;
       }
+      updateCompatibility(this.state);
     } else if (type === "conversation.activated") {
       conversation.title = String(payload.title || conversation.title || "");
       this.state.activeConversationId = conversation.id;

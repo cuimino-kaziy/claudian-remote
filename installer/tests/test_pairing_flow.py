@@ -88,11 +88,11 @@ def test_pairing_begin_presents_claim_only_to_human_ui_and_returns_verifiable_ga
     assert result == {
         "state": "blocked",
         "ready": False,
-        "code": "pairing_approval_required",
+        "code": "pairing_redemption_required",
         "gate": {
-            "gate_type": "pairing_approval_required",
-            "explanation": "A person must redeem the code on the phone and approve that device on the Mac.",
-            "human_action": "Use the code shown in the Mac pairing window, then review and approve the displayed phone.",
+            "gate_type": "pairing_redemption_required",
+            "explanation": "The phone connects after redeeming the Mac's one-time pairing code.",
+            "human_action": "Enter the code shown in the Mac pairing window on the phone; pairing completes automatically.",
             "verification_probe": "pairing_claim_state",
             "resume_reference": result["gate"]["resume_reference"],
         },
@@ -120,7 +120,31 @@ def test_pairing_admin_bootstrap_requires_verified_device_local_secure_reference
     assert "keychain:pairing-admin" not in json.dumps(ready)
 
 
-def test_pairing_resume_requires_verified_pending_device_then_returns_only_safe_identity():
+@pytest.mark.parametrize("waiting_state", ["created", "pending_redemption"])
+@pytest.mark.parametrize("accepted_state", ["approved", "credential_ready"])
+def test_pairing_code_redemption_completes_without_mac_approval(waiting_state, accepted_state):
+    management = FakePairingManagement()
+    lifecycle = PairingLifecycle(management, lambda _created: None)
+    started = lifecycle.begin(PROFILE)
+    resume_reference = started["gate"]["resume_reference"]
+    management.claims["claim-a"]["state"] = waiting_state
+    assert lifecycle.resume(resume_reference)["gate"]["gate_type"] == "pairing_redemption_required"
+
+    management.claims["claim-a"].update({"state": accepted_state, "device_id": "iphone-a"})
+    receiving = lifecycle.resume(resume_reference)
+    assert receiving["gate"]["gate_type"] == "pairing_mobile_completion_required"
+    assert "Mac approved" not in receiving["gate"]["explanation"]
+    assert_agent_safe(receiving)
+
+    management.claims["claim-a"]["state"] = "issued"
+    completed = lifecycle.resume(resume_reference)
+    assert completed["state"] == "paired"
+    assert completed["ready"] is True
+    assert completed["device"] == {"device_id": "iphone-a"}
+    assert_agent_safe(completed)
+
+
+def test_legacy_pairing_resume_requires_verified_pending_device_then_returns_only_safe_identity():
     management = FakePairingManagement()
     lifecycle = PairingLifecycle(management, lambda _created: None)
     started = lifecycle.begin(PROFILE)

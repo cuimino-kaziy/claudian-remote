@@ -4,23 +4,29 @@
 }
 
 .claudian-remote-mobile-view {
+  position: relative;
   padding: 0 !important;
   overflow: hidden !important;
 }
 
 .claudian-remote-shell {
-  --cr-radius: 18px;
+  --cr-radius: 8px;
   --cr-touch: 44px;
   --cr-motion-fast: 150ms;
   --cr-motion-keyboard: 240ms;
   --cr-motion-sheet: 300ms;
   --cr-composer-space: 12px;
+  --cr-native-bottom-space: calc(var(--navbar-height, 0px) + var(--navbar-bottom-offset, 0px));
   --cr-ease-standard: cubic-bezier(0.2, 0, 0, 1);
   --cr-ease-sheet: cubic-bezier(0.32, 0.72, 0, 1);
-  position: relative;
+  /* Keep measured shell dimensions out of the host's intrinsic flex size. */
+  position: absolute;
+  top: var(--cr-visible-top, 0px);
+  right: 0;
+  left: 0;
   display: flex;
   flex-direction: column;
-  height: 100%;
+  height: var(--cr-visible-height, 100%);
   min-height: 0;
   color: var(--text-normal);
   background: var(--background-primary);
@@ -30,11 +36,11 @@
 .claudian-remote-header {
   flex: 0 0 auto;
   display: grid;
-  grid-template-columns: var(--cr-touch) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr) auto var(--cr-touch);
   align-items: center;
-  min-height: 52px;
+  min-height: 48px;
   max-height: 56px;
-  padding: 4px 8px;
+  padding: 0 8px 0 16px;
   border-bottom: 1px solid var(--background-modifier-border);
   background: color-mix(in srgb, var(--background-primary) 92%, transparent);
   z-index: 3;
@@ -43,9 +49,9 @@
 .claudian-remote-header-title {
   overflow: hidden;
   font-size: var(--font-ui-medium);
-  font-weight: 650;
+  font-weight: 550;
   line-height: 1.2;
-  text-align: center;
+  text-align: left;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -79,18 +85,19 @@
 
 .claudian-remote-icon-button {
   padding: 0;
+  border-radius: 999px;
   background: transparent;
   font-size: 21px;
 }
 
 .claudian-remote-status-pill {
-  min-width: 72px;
-  min-height: 36px;
-  padding: 0 10px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
   border-radius: 999px;
-  background: var(--background-secondary);
+  background: transparent;
   color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  font-size: 12px;
   white-space: nowrap;
 }
 
@@ -112,11 +119,14 @@
 .claudian-remote-message-list {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 22px;
+  box-sizing: border-box;
   width: min(100%, 760px);
   min-height: 100%;
   margin: 0 auto;
-  padding: 18px 14px var(--cr-composer-space);
+  padding: 20px 18px var(--cr-composer-space);
+  font-size: var(--font-text-size, 16px);
+  line-height: 1.65;
 }
 
 .claudian-remote-message {
@@ -129,28 +139,29 @@
 .claudian-remote-message.is-assistant { align-self: stretch; max-width: 100%; }
 
 .claudian-remote-message-label {
-  margin: 0 8px 5px;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
 }
 
 .claudian-remote-message-body {
   min-width: 0;
-  padding: 11px 14px;
-  border-radius: var(--cr-radius);
   overflow-wrap: anywhere;
 }
 
 .is-user > .claudian-remote-message-body {
-  border-bottom-right-radius: 6px;
-  background: var(--interactive-accent);
-  color: var(--text-on-accent);
+  padding: 8px 12px;
+  border-radius: 6px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
   white-space: pre-wrap;
 }
 
 .is-assistant > .claudian-remote-message-body {
-  border-bottom-left-radius: 6px;
-  background: var(--background-secondary);
+  padding: 0;
+  background: transparent;
 }
 
 .claudian-remote-markdown-inner > :first-child { margin-top: 0; }
@@ -174,9 +185,15 @@
   background: var(--background-secondary-alt);
 }
 
+.claudian-remote-activity {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+}
+
 .claudian-remote-activity-summary {
   min-height: var(--cr-touch);
-  padding: 11px 13px;
+  padding: 8px 0;
   cursor: pointer;
   font-size: var(--font-ui-small);
   font-weight: 600;
@@ -256,124 +273,103 @@
   padding: 6px max(10px, env(safe-area-inset-right)) 0 max(10px, env(safe-area-inset-left));
   padding-bottom: calc(
     max(8px, env(safe-area-inset-bottom)) +
-    var(--navbar-height, 0px) +
-    var(--navbar-bottom-offset, 0px)
+    var(--cr-native-bottom-space)
   );
   border-top: 1px solid var(--background-modifier-border);
   background: var(--background-primary);
   z-index: 3;
 }
 
-.claudian-remote-composer-launch {
-  display: grid;
-  grid-template-columns: var(--cr-touch) minmax(0, 1fr) var(--cr-touch);
-  align-items: center;
+.claudian-remote-composer {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
   width: 100%;
   max-width: 760px;
-  min-height: 56px;
   margin: 0 auto;
-  padding: 5px;
+  padding: 4px;
+  box-sizing: border-box;
   border: 1px solid var(--background-modifier-border);
-  border-radius: 22px;
-  background: var(--background-secondary);
-  box-shadow: 0 3px 14px rgb(0 0 0 / 8%);
-  color: var(--text-muted);
-  text-align: left;
-}
-.claudian-remote-composer-launch:disabled { opacity: 0.55; }
-.claudian-remote-composer-launch.has-draft { color: var(--text-normal); }
-.claudian-remote-composer-launch-icon,
-.claudian-remote-composer-launch-arrow {
-  display: grid;
-  place-items: center;
-  min-width: var(--cr-touch);
-  min-height: var(--cr-touch);
-  border-radius: 50%;
-  background: var(--background-modifier-hover);
-  font-size: 23px;
-}
-.claudian-remote-composer-launch-text {
-  overflow: hidden;
-  padding: 0 8px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-.claudian-remote-composer-launch-arrow { color: var(--text-normal); }
-
-.claudian-remote-input-modal {
-  width: min(680px, calc(100vw - 24px));
-  max-width: 680px;
-}
-
-.claudian-remote-modal-input {
-  width: 100%;
-  min-height: 120px;
-  max-height: 32vh;
-  margin: 0;
-  padding: 12px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 14px;
-  background: var(--background-primary);
-  font-size: 16px;
-  line-height: 1.4;
-  resize: vertical;
-}
-
-.claudian-remote-modal-file-input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  opacity: 0;
-  pointer-events: none;
-}
-
-.claudian-remote-modal-attachments { display: grid; gap: 7px; margin-top: 10px; }
-.claudian-remote-modal-attachments:empty { display: none; }
-.claudian-remote-modal-attachment {
-  display: grid;
-  grid-template-columns: 24px minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 7px;
-  min-height: 48px;
-  padding: 5px 6px 5px 10px;
-  border: 1px solid var(--background-modifier-border);
-  border-radius: 14px;
+  border-radius: 26px;
   background: var(--background-secondary);
 }
-.claudian-remote-modal-attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.claudian-remote-modal-attachment-name small { display: block; color: var(--text-muted); }
-.claudian-remote-attachment-action { min-width: var(--cr-touch); min-height: var(--cr-touch); padding: 0 8px; }
-
-.claudian-remote-input-modal .modal-header,
-.claudian-remote-input-modal .modal-title,
-.claudian-remote-input-modal .modal-close-button {
-  display: none !important;
-}
-
-.claudian-remote-modal-toolbar {
-  display: flex;
-  flex-wrap: nowrap;
-  align-items: center;
-  gap: 8px;
-  margin: 0 0 10px;
-}
-.claudian-remote-modal-toolbar button {
-  flex: 1 1 0;
+.claudian-remote-composer-input {
+  flex: 1 1 auto;
   min-width: 0;
-  min-height: 36px;
-  padding: 0 10px;
-  border-radius: 999px;
-  font-size: var(--font-ui-smaller);
-}
-.claudian-remote-modal-send { margin-left: 0; }
-.claudian-remote-modal-stop { color: var(--color-red); }
-.claudian-remote-modal-steer { color: var(--interactive-accent); }
-
-body.is-mobile .claudian-remote-input-modal {
-  width: calc(100vw - 16px);
-  max-width: none;
+  min-height: 44px;
+  max-height: min(128px, 30dvh);
   margin: 0;
+  padding: 10px 6px;
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none !important;
+  font-family: inherit;
+  font-size: 16px;
+  line-height: 24px;
+  resize: none;
 }
+.claudian-remote-composer-actions { display: flex; align-items: center; justify-content: flex-end; }
+.claudian-remote-composer:has(.claudian-remote-composer-stop:not([hidden])) { flex-wrap: wrap; }
+.claudian-remote-composer:has(.claudian-remote-composer-stop:not([hidden])) .claudian-remote-composer-input { flex-basis: calc(100% - 50px); }
+.claudian-remote-composer:has(.claudian-remote-composer-stop:not([hidden])) .claudian-remote-composer-actions { width: 100%; }
+.claudian-remote-composer-attach,
+.claudian-remote-composer-stop,
+.claudian-remote-composer-steer,
+.claudian-remote-composer-send {
+  flex: 0 0 auto;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+.claudian-remote-composer-attach-control {
+  position: relative;
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  border-radius: 999px;
+}
+.claudian-remote-composer-attach { display: flex; align-items: center; justify-content: center; height: 44px; box-sizing: border-box; font-size: 23px; }
+.claudian-remote-composer-attach-control:focus-within { outline: 2px solid var(--interactive-accent); outline-offset: 1px; }
+.claudian-remote-composer-attach-control:has(input:disabled) { opacity: 0.4; }
+.claudian-remote-composer-send { background: var(--interactive-accent); color: var(--text-on-accent); }
+.claudian-remote-composer-stop { color: var(--color-red); }
+.claudian-remote-composer-steer { color: var(--interactive-accent); }
+.claudian-remote-composer [hidden] { display: none; }
+.claudian-remote-composer-file-input {
+  position: absolute;
+  inset: 0;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  opacity: 0;
+  z-index: 1;
+  cursor: pointer;
+}
+.claudian-remote-composer-file-input:disabled { cursor: default; }
+.claudian-remote-composer-attachments { display: grid; gap: 6px; max-width: 760px; margin: 0 auto 6px; max-height: 100px; overflow: auto; }
+.claudian-remote-composer-attachments:empty { display: none; }
+.claudian-remote-composer-attachment {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 8px;
+}
+.claudian-remote-composer-attachment-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.claudian-remote-composer-attachment-name small { display: block; color: var(--text-muted); }
+.claudian-remote-attachment-action { min-width: var(--cr-touch); min-height: var(--cr-touch); padding: 0 8px; }
 
 .claudian-remote-composer-hint {
   min-height: 14px;
@@ -387,7 +383,7 @@ body.is-mobile .claudian-remote-input-modal {
 
 .claudian-remote-overlay {
   position: absolute;
-  inset: 0;
+  inset: 0 0 var(--cr-native-bottom-space) 0;
   display: flex;
   align-items: flex-end;
   background: rgb(0 0 0 / 0%);
@@ -413,7 +409,7 @@ body.is-mobile .claudian-remote-input-modal {
   width: 100%;
   max-height: min(82%, 720px);
   padding: 8px 12px max(14px, env(safe-area-inset-bottom));
-  border-radius: 22px 22px 0 0;
+  border-radius: 24px 24px 0 0;
   background: var(--background-primary);
   box-shadow: 0 -10px 30px rgb(0 0 0 / 18%);
   opacity: 0.96;
@@ -439,58 +435,86 @@ body.is-mobile .claudian-remote-input-modal {
 }
 .claudian-remote-sheet-header h2 { flex: 1; margin: 0; font-size: var(--font-ui-large); }
 
-.claudian-remote-history { overscroll-behavior: contain; }
-.claudian-remote-history-search {
-  box-sizing: border-box;
-  width: 100%;
-  min-height: var(--cr-touch);
-  margin: 2px 0 10px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  font-size: 16px;
-}
-.claudian-remote-history-list { display: flex; flex-direction: column; gap: 7px; }
-.claudian-remote-history-item {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
-  gap: 6px;
-}
-.claudian-remote-history-row {
+.claudian-remote-history {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
-  justify-content: space-between;
+  align-self: stretch;
+  width: min(74%, 300px);
+  height: 100%;
+  max-height: 100%;
+  margin-left: auto;
+  padding: 6px 8px 8px;
+  border-radius: 16px 0 0 16px;
+  border-left: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  overflow: hidden;
+  overscroll-behavior: contain;
+  transform: translateX(100%);
+  /* Only opening/closing animates. Keyboard height changes remain immediate. */
+  transition: transform 180ms var(--cr-ease-sheet), opacity 150ms var(--cr-ease-standard);
+  will-change: auto;
+}
+.claudian-remote-overlay.is-open .claudian-remote-history { transform: translateX(0); }
+.claudian-remote-history .claudian-remote-sheet-header { flex: 0 0 auto; min-height: 44px; gap: 0; padding-left: 8px; }
+.claudian-remote-history .claudian-remote-sheet-header h2 { min-width: 0; font-size: 14px; white-space: nowrap; }
+.claudian-remote-history input.claudian-remote-history-search {
+  flex: 0 0 auto;
+  box-sizing: border-box;
   width: 100%;
-  min-height: 52px;
+  height: var(--cr-touch);
+  min-height: var(--cr-touch);
+  margin: 4px 0;
   padding: 8px 10px;
+  border-radius: 8px;
+  font-size: 16px;
+}
+/* Beat Obsidian's button:not(.clickable-icon), including its mobile tap state,
+   only inside this drawer. Keep native buttons elsewhere untouched. */
+.claudian-remote-history button.claudian-remote-icon-button,
+.claudian-remote-history button.claudian-remote-history-tab,
+.claudian-remote-history button.claudian-remote-history-row,
+.claudian-remote-history button.claudian-remote-history-action,
+.claudian-remote-history button.claudian-remote-history-settings {
+  box-sizing: border-box;
+  height: var(--cr-touch);
+  min-height: var(--cr-touch);
   border: 0;
-  border-radius: 12px;
+  border-radius: 6px;
+  box-shadow: none;
   background: transparent;
   color: var(--text-normal);
+  font-size: 14px;
+  font-weight: normal;
+}
+.claudian-remote-history button.claudian-remote-icon-button { flex: 0 0 44px; width: 44px; padding: 0; font-size: 22px; color: var(--text-muted); }
+.claudian-remote-history button.claudian-remote-icon-button:active:not(:disabled) { transform: none; }
+.claudian-remote-history-tabs { display: flex; flex: 0 0 auto; gap: 4px; margin-bottom: 4px; }
+.claudian-remote-history button.claudian-remote-history-tab { flex: 1; padding: 0 8px; border-radius: 0; border-bottom: 2px solid transparent; color: var(--text-muted); }
+.claudian-remote-history button.claudian-remote-history-tab[aria-pressed="true"] { color: var(--interactive-accent); border-bottom-color: var(--interactive-accent); }
+.claudian-remote-history-list { flex: 1 1 auto; min-height: 0; overflow: auto; display: flex; flex-direction: column; gap: 2px; }
+.claudian-remote-history-item { display: grid; grid-template-columns: minmax(0, 1fr) 44px; align-items: center; flex: 0 0 auto; }
+.claudian-remote-history button.claudian-remote-history-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  min-width: 0;
+  padding: 0 8px;
   text-align: left;
-  transition:
-    background-color var(--cr-motion-fast) var(--cr-ease-standard),
-    transform var(--cr-motion-fast) var(--cr-ease-standard);
 }
-.claudian-remote-history-row:active:not(:disabled) { transform: scale(0.985); }
-.claudian-remote-history-row[data-active="true"] { background: var(--background-secondary); }
-.claudian-remote-history-row[data-viewing="true"] { box-shadow: inset 3px 0 var(--interactive-accent); }
-.claudian-remote-history-meta { color: var(--text-muted); font-size: var(--font-ui-smaller); }
-.claudian-remote-history-actions { display: flex; align-items: stretch; gap: 4px; }
-.claudian-remote-history-action {
-  min-width: var(--cr-touch);
-  min-height: var(--cr-touch);
-  padding: 0 9px;
-  border: 0;
-  border-radius: 10px;
-  color: var(--text-muted);
-  font-size: var(--font-ui-smaller);
-  transition:
-    transform var(--cr-motion-fast) var(--cr-ease-standard),
-    background-color var(--cr-motion-fast) var(--cr-ease-standard);
+.claudian-remote-history-title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.claudian-remote-history button.claudian-remote-history-row[data-viewing="true"] { background: var(--background-modifier-hover); box-shadow: inset 2px 0 var(--interactive-accent); }
+.claudian-remote-history button.claudian-remote-history-action { min-width: var(--cr-touch); padding: 0; color: var(--text-muted); font-size: 22px; }
+.claudian-remote-history-footer { flex: 0 0 auto; border-top: 1px solid var(--background-modifier-border); margin-top: 6px; padding-top: 4px; }
+.claudian-remote-history button.claudian-remote-history-settings { display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 0 8px; text-align: left; }
+.claudian-remote-history-settings small { color: var(--text-muted); font-size: 11px; }
+.claudian-remote-history button:focus-visible { outline: 2px solid var(--interactive-accent); outline-offset: -2px; }
+@media (hover: hover) {
+  .claudian-remote-history button.claudian-remote-history-row:hover,
+  .claudian-remote-history button.claudian-remote-history-action:hover,
+  .claudian-remote-history button.claudian-remote-history-settings:hover { background: var(--background-modifier-hover); }
 }
-.claudian-remote-history-action:active:not(:disabled) { transform: scale(0.96); }
+
 .claudian-remote-empty { padding: 24px 8px; color: var(--text-muted); text-align: center; }
 
 .claudian-remote-details-body { display: flex; flex-direction: column; }
@@ -503,13 +527,13 @@ body.is-mobile .claudian-remote-input-modal {
   border-bottom: 1px solid var(--background-modifier-border);
 }
 .claudian-remote-detail-row strong { text-align: right; }
-.claudian-remote-details-actions { display: flex; gap: 8px; padding-top: 14px; }
-.claudian-remote-details-actions button { flex: 1; min-height: var(--cr-touch); }
+.claudian-remote-details-actions { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 14px; }
+.claudian-remote-details-actions button { flex: 1; min-height: var(--cr-touch); border-radius: 999px; }
 
 @media (max-width: 390px) {
-  .claudian-remote-message-list { padding-inline: 10px; }
+  .claudian-remote-message-list { padding-inline: 14px; }
   .claudian-remote-message { max-width: 96%; }
-  .claudian-remote-status-pill { min-width: 64px; padding-inline: 8px; }
+  .claudian-remote-status-pill { padding-inline: 6px; }
   .claudian-remote-composer-hint { display: none; }
   .claudian-remote-history-item { gap: 4px; }
   .claudian-remote-history-action { padding-inline: 6px; }
@@ -526,6 +550,7 @@ body.is-mobile .claudian-remote-input-modal {
   .claudian-remote-composer,
   .claudian-remote-overlay,
   .claudian-remote-sheet,
+  .claudian-remote-history,
   .claudian-remote-icon-button,
   .claudian-remote-status-pill,
   .claudian-remote-attach,
@@ -537,4 +562,136 @@ body.is-mobile .claudian-remote-input-modal {
   .claudian-remote-history-action {
     transition: none;
   }
+}
+
+.claudian-remote-shell.is-keyboard-open { --cr-native-bottom-space: 0px; }
+.claudian-remote-shell.is-keyboard-open .claudian-remote-composer-wrap { padding-bottom: 8px; }
+
+
+.claudian-remote-composer:focus-within { border-color: var(--interactive-accent); }
+.claudian-remote-composer-input:focus-visible { outline: none; }
+
+/* Native Claudian settings spacing and tabs; isolated from the host settings UI. */
+.claudian-remote-settings {
+  container-type: inline-size;
+  padding: 20px;
+  border-radius: 12px;
+  background: var(--background-secondary);
+  color: var(--text-normal);
+}
+.claudian-remote-settings .claudian-remote-settings-tabs {
+  display: flex;
+  gap: 3px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+.claudian-remote-settings .claudian-remote-settings-tab {
+  height: auto;
+  min-height: 40px;
+  padding: 8px 18px;
+  margin-bottom: -1px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  border-radius: 7px 7px 5px 5px;
+  background: var(--interactive-normal);
+  box-shadow: none;
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-medium);
+}
+.claudian-remote-settings .claudian-remote-settings-tab:hover { color: var(--text-normal); }
+.claudian-remote-settings .claudian-remote-settings-tab[aria-selected="true"] {
+  color: var(--text-normal);
+  border-bottom-color: var(--interactive-accent);
+}
+.claudian-remote-settings .claudian-remote-settings-panel { min-width: 0; }
+.claudian-remote-settings .claudian-remote-settings-group {
+  margin: 18px 0 0;
+  padding: 16px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 10px;
+}
+.claudian-remote-settings .claudian-remote-settings-panel > .claudian-remote-settings-group:first-child { margin-top: 0; }
+.claudian-remote-settings .claudian-remote-settings-group h3 {
+  margin: 0;
+  padding: 0 0 14px;
+  border-bottom: 1px solid var(--background-modifier-border);
+  color: var(--text-normal);
+  font-size: var(--font-ui-medium);
+  font-weight: var(--font-semibold);
+}
+.claudian-remote-settings .setting-item {
+  min-width: 0;
+  gap: 16px;
+  margin: 0;
+  padding: 16px 0;
+  border: 0;
+}
+.claudian-remote-settings .setting-item + .setting-item { border-top: 1px solid var(--background-modifier-border); }
+.claudian-remote-settings .setting-item-info { min-width: 0; }
+.claudian-remote-settings .setting-item-description { overflow-wrap: anywhere; }
+.claudian-remote-settings .setting-item-control {
+  min-width: 0;
+  flex: 0 1 52%;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.claudian-remote-settings .setting-item-control:empty { display: none; }
+.claudian-remote-settings .setting-item-control input[type="text"] {
+  min-width: 0;
+  width: 240px;
+  max-width: 100%;
+  flex: 1 1 160px;
+}
+.claudian-remote-settings .setting-item-control a { color: var(--text-accent); }
+.claudian-remote-settings .claudian-remote-settings-help {
+  margin: 4px 0 8px;
+  color: var(--text-muted);
+  font-size: var(--font-ui-smaller);
+  line-height: 1.6;
+}
+.claudian-remote-settings .claudian-remote-settings-help > summary {
+  min-height: 32px;
+  padding: 5px 0;
+  cursor: pointer;
+  color: var(--text-muted);
+}
+.claudian-remote-settings .claudian-remote-settings-help > summary:hover { color: var(--text-normal); }
+.claudian-remote-settings .claudian-remote-settings-help p { margin: 8px 0; }
+.claudian-remote-settings .claudian-remote-settings-help ol { padding-inline-start: 22px; }
+.claudian-remote-settings .claudian-remote-settings-help li { margin: 6px 0; }
+.claudian-remote-settings .claudian-remote-settings-help pre {
+  margin: 10px 0;
+  padding: 12px;
+  overflow-x: auto;
+  border-radius: 6px;
+  background: var(--background-primary);
+  font-size: var(--font-ui-smaller);
+}
+.claudian-remote-settings .claudian-remote-settings-help code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-family: var(--font-monospace);
+}
+.claudian-remote-settings .claudian-remote-settings-help a { overflow-wrap: anywhere; }
+.claudian-remote-settings .claudian-remote-settings-feedback {
+  padding: 10px 12px;
+  margin: 0 0 16px;
+  border-inline-start: 2px solid var(--interactive-accent);
+  background: var(--background-primary);
+  color: var(--text-muted);
+  font-size: var(--font-ui-small);
+  overflow-wrap: anywhere;
+}
+@container (max-width: 540px) {
+  .claudian-remote-settings .setting-item { flex-wrap: wrap; gap: 10px; }
+  .claudian-remote-settings .setting-item-info { flex: 1 1 100%; }
+  .claudian-remote-settings .setting-item-control { flex: 1 1 100%; justify-content: flex-start; }
+  .claudian-remote-settings .setting-item-control input[type="text"] { width: 100%; }
+  .claudian-remote-settings .setting-item-control button { min-height: 40px; }
+}
+@media (max-width: 600px) {
+  .claudian-remote-settings { padding: 12px; }
+  .claudian-remote-settings .claudian-remote-settings-group { padding: 12px; }
+  .claudian-remote-settings .claudian-remote-settings-tab { flex: 1; min-height: 44px; }
 }

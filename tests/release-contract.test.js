@@ -92,7 +92,7 @@ function fixture() {
       installer: { version: pluginManifest.version },
       protocol: supportMatrix.protocol,
       configuration_schema: supportMatrix.components.configuration_schema,
-      claudian: { exact_version: "2.2.6", supported_versions: ["2.0.4", "2.2.6"] },
+      claudian: { exact_version: "2.2.6", supported_versions: ["2.0.4", "2.2.6", "2.2.7"] },
       runtime: runtimeFixture(),
       upgrade_contract: structuredClone(supportMatrix.upgrade_contract)
     },
@@ -117,9 +117,15 @@ test("an exact signed compatibility set is accepted", () => {
   assert.equal(validateReleaseContract(manifest, context), true);
 });
 
-test("beta 5 signed upgrade capabilities bind every supported journey boundary", () => {
-  assert.equal(pluginManifest.version, "0.2.0-beta.5");
-  assert.equal(supportMatrix.components.compatibility_set_id, "claudian-remote-0.2.0-beta.5");
+test("beta 6 signed upgrade capabilities bind every supported journey boundary", () => {
+  assert.equal(pluginManifest.version, "0.2.0-beta.6.7");
+  assert.equal(supportMatrix.components.compatibility_set_id, "claudian-remote-0.2.0-beta.6.7");
+  assert.equal(versions["0.2.0-beta.5"], "1.12.3");
+  assert.equal(versions["0.2.0-beta.6.7"], "1.12.3");
+  assert.deepEqual(
+    supportMatrix.upgrade_contract.supported_legacy_lineages.filter((row) => row.journey === "current_update").map((row) => row.version),
+    ["0.2.0-beta.4", "0.2.0-beta.5", "0.2.0-beta.6", "0.2.0-beta.6.1", "0.2.0-beta.6.2", "0.2.0-beta.6.3", "0.2.0-beta.6.4", "0.2.0-beta.6.5", "0.2.0-beta.6.6"]
+  );
   assert.deepEqual(supportMatrix.upgrade_contract.journey_capabilities, [
     "fresh_install", "current_update", "legacy_upgrade"
   ]);
@@ -140,7 +146,7 @@ test("beta 5 signed upgrade capabilities bind every supported journey boundary",
     (contract) => { contract.journey_capabilities.pop(); },
     (contract) => { contract.result_schema_versions[0] = "claudian-remote.lifecycle-result/v1"; },
     (contract) => { contract.proof_schema_versions[0] = "attacker/proof/v9"; },
-    (contract) => { contract.supported_legacy_lineages[1].version = "unknown-lineage"; },
+    (contract) => { contract.supported_legacy_lineages[2].version = "unknown-lineage"; },
     (contract) => { contract.supported_profiles.push("local_lan"); },
     (contract) => { contract.final_topology_boundary.mode = "remote_vps"; },
     (contract) => { contract.current_update_pairing_rows[0].plugin = "0.2.0-beta.4"; },
@@ -223,7 +229,7 @@ test("unsupported Claudian and missing asset digests fail closed", () => {
   unsupported.manifest.compatibility_set.claudian.exact_version = "2.0.3";
   assert.throws(() => validateReleaseContract(unsupported.manifest, unsupported.context), /Claudian supported versions/);
 
-  for (const versions of [undefined, ["2.2.6"], ["2.0.4", "2.2.6", "2.2.7"]]) {
+  for (const versions of [undefined, ["2.2.6"], ["2.0.4", "2.2.6", "2.2.7", "2.2.8"]]) {
     const changed = fixture();
     changed.manifest.compatibility_set.claudian.supported_versions = versions;
     assert.throws(() => validateReleaseContract(changed.manifest, changed.context), /Claudian supported versions/);
@@ -304,14 +310,22 @@ test("source boundary excludes release virtual environments from publishable sou
 
 test("release schema and support matrix pin the public contract", () => {
   const schema = JSON.parse(readFileSync(join(root, "release/release-manifest.schema.json"), "utf8"));
-  assert.equal(schema.$defs.compatibilitySet.properties.id.const, "claudian-remote-0.2.0-beta.5");
+  assert.equal(schema.$defs.compatibilitySet.properties.id.const, "claudian-remote-0.2.0-beta.6.7");
   assert.equal(schema.$defs.compatibilitySet.properties.claudian.properties.exact_version.const, "2.2.6");
-  assert.deepEqual(schema.$defs.compatibilitySet.properties.claudian.properties.supported_versions.const, ["2.0.4", "2.2.6"]);
+  assert.deepEqual(schema.$defs.compatibilitySet.properties.claudian.properties.supported_versions.const, ["2.0.4", "2.2.6", "2.2.7"]);
   assert.equal(pluginManifest.id, "claudian-remote");
   assert.equal(versions[pluginManifest.version], pluginManifest.minAppVersion);
   assert.equal(supportMatrix.distribution.allowed_combinations.length, 2);
   assert.equal(schema.$defs.runtimeDistribution.properties.delivery.const, "immutable_upstream_asset");
   assert.equal(schema.$defs.helperRow.properties.delivery.const, "signed_kit_asset");
+  const lineages = fixture().manifest.compatibility_set.upgrade_contract.supported_legacy_lineages;
+  const lineageList = schema.$defs.upgradeContract.properties.supported_legacy_lineages;
+  assert.ok(lineages.length >= lineageList.minItems && lineages.length <= lineageList.maxItems);
+  for (const lineage of lineages) {
+    for (const [field, rule] of Object.entries(schema.$defs.legacyLineage.properties)) {
+      assert.ok(rule.enum.includes(lineage[field]), `lineage ${field} must match the release schema: ${lineage[field]}`);
+    }
+  }
   assert.equal(schema.$defs.executionConstraints.properties.runtime_paths_must_be_absolute.const, true);
   assert.equal(schema.$defs.executionConstraints.properties.import_paths_must_be_absolute.const, true);
   assert.equal(schema.$defs.executionConstraints.properties.runtime_proof_secret_material.const, "excluded");
@@ -423,10 +437,29 @@ buildTest("packaged lifecycle asset contains the guide, Python package, entrypoi
   }
 });
 
-buildTest("component archives are byte-for-byte reproducible", () => {
+buildTest("downloadable plugin ZIP and standalone assets match the built plugin exactly", () => {
+  const directory = buildAssets();
+  const archive = join(directory, `claudian-remote-plugin-${pluginManifest.version}.zip`);
+  const contents = JSON.parse(execFileSync("python3.12", ["-c", `
+import hashlib, json, sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as archive:
+    print(json.dumps({name: hashlib.sha256(archive.read(name)).hexdigest() for name in archive.namelist()}))
+`, archive], { encoding: "utf8" }));
+  const files = ["LICENSE", "main.js", "manifest.json", "styles.css"];
+  assert.deepEqual(Object.keys(contents), files.map((name) => `claudian-remote/${name}`));
+  for (const name of files) {
+    assert.equal(contents[`claudian-remote/${name}`], sha256File(join(root, name)));
+    if (name !== "LICENSE") assert.equal(sha256File(join(directory, name)), contents[`claudian-remote/${name}`]);
+    const signedArchiveBytes = execFileSync("tar", ["-xOzf", join(directory, `claudian-remote-plugin-${pluginManifest.version}.tar.gz`), `./${name}`]);
+    assert.equal(sha256Bytes(signedArchiveBytes), contents[`claudian-remote/${name}`]);
+  }
+});
+
+buildTest("component archives and convenience downloads are byte-for-byte reproducible", () => {
   const assetNames = ["plugin", "companion", "relay", "lifecycle"]
     .map((component) => `claudian-remote-${component}-${pluginManifest.version}.tar.gz`);
   assetNames.push(`claudian-remote-legacy-retirement-helper-${pluginManifest.version}.py`);
+  assetNames.push(`claudian-remote-plugin-${pluginManifest.version}.zip`, "main.js", "manifest.json", "styles.css");
   const directory = buildAssets();
   const first = Object.fromEntries(assetNames.map((name) => [name, sha256File(join(directory, name))]));
   buildAssets(directory);

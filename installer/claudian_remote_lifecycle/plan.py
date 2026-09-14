@@ -132,7 +132,7 @@ def _recommended_action(blockers: list[str], journey: str) -> dict[str, Any]:
 
 @dataclass(frozen=True)
 class PlanBuilder:
-    compatibility_set_id: str = "claudian-remote-0.2.0-beta.5"
+    compatibility_set_id: str = "claudian-remote-0.2.0-beta.6.7"
     current_update_pairing_identity_policy: str = "preserve"
 
     def build(
@@ -380,6 +380,7 @@ def validate_mutation_environment(
     current_snapshot: Mapping[str, Any],
     *,
     allow_plan_target: bool = False,
+    owned_profile_generation_id: str | None = None,
 ) -> None:
     """Reject material drift while allowing a declared human gate to resolve."""
 
@@ -438,6 +439,14 @@ def validate_mutation_environment(
     if not drifted_installation_fields:
         return
     if allow_plan_target:
+        if (
+            drifted_installation_fields == ["profile_generation_id"]
+            and owned_profile_generation_id
+            and current_installation.get("profile_generation_id") == owned_profile_generation_id
+        ):
+            # The caller verified the same operation's partial activation
+            # journal and live connection binding, before the current flip.
+            return
         target_mode = str(plan.get("topology", {}).get("mode") or "")
         if (
             current_installation.get("compatibility_set_id") == plan.get("compatibility_set_id")

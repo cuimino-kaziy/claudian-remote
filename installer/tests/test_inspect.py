@@ -76,14 +76,14 @@ def test_unsupported_claudian_blocks_mutation_but_inspection_still_returns_snaps
     assert result["data"]["mutation_performed"] is False
 
 
-@pytest.mark.parametrize("version", ["2.0.4", "2.2.6", "2.2.5", "2.2.7"])
+@pytest.mark.parametrize("version", ["2.0.4", "2.2.6", "2.2.7", "2.2.5", "2.2.8"])
 def test_exact_version_allowlist_agrees_for_inspection_and_selected_vault(version):
     probe = FakeProbe(claudian_version=version, vaults=[{
         "vault_id": "vault-a", "display_name": "Notes",
         "claudian_version": version, "claudian_enabled": True,
     }])
     snapshot = Inspector(probe).snapshot()
-    supported = version in {"2.0.4", "2.2.6"}
+    supported = version in {"2.0.4", "2.2.6", "2.2.7"}
     assert ("unsupported_claudian_version" not in snapshot["support"]["reason_codes"]) == supported
     plan = PlanBuilder().build(snapshot, mode="local_tailscale", vault_id="vault-a")
     assert ("unsupported_claudian_version" not in plan["blockers"]) == supported
